@@ -1,0 +1,106 @@
+{
+  "name": "分析流程 — 端到端验证",
+  "description": "覆盖日志包上传、大小限制、设置覆盖与多配置群的行为。调试模式下 LLM 输出为模拟内容。",
+  "setup": {
+    "configs": {
+      "测试组": {
+        "listen_groups": ["123456"],
+        "notify_group": "123456",
+        "settings": {
+          "send_progress_message": false,
+          "max_log_files": 3
+        }
+      },
+      "关闭组": {
+        "listen_groups": ["222222"],
+        "settings": {
+          "enabled": false
+        }
+      },
+      "多配置A": {
+        "listen_groups": ["333333"]
+      },
+      "多配置B": {
+        "listen_groups": ["333333"]
+      }
+    },
+    "files": {
+      "123456": [
+        {"file_name": "MaaXXX-logs-20260101-120000.zip", "file_id": "fid_a", "size": 2048, "modify_time": 1767225600}
+      ]
+    }
+  },
+  "scenarios": [
+    {
+      "name": "关闭进度提示 — 只收到分析结果",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_a", "name": "MaaXXX-logs-20260101-120000.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果",
+        "reply_not_contains": "正在下载并分析"
+      }
+    },
+    {
+      "name": "自定义前缀 — MaaAssistantKedrgame-logs 也能匹配",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_k", "name": "MaaXXX-logs-other.zip", "size": 1024}
+      },
+      "assert": {
+        "no_error": true,
+        "api_actions_include": "get_group_file_url"
+      }
+    },
+    {
+      "name": "关闭的配置 — 不响应上传",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 222222,
+        "user_id": 10001,
+        "file": {"id": "fid_off", "name": "MaaXXX-logs-off.zip", "size": 1024}
+      },
+      "assert": {
+        "no_error": true,
+        "api_count": 0
+      }
+    },
+    {
+      "name": "多配置群 — 无法确定设置，不响应",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 333333,
+        "user_id": 10001,
+        "file": {"id": "fid_multi", "name": "MaaXXX-logs-multi.zip", "size": 1024}
+      },
+      "assert": {
+        "no_error": true,
+        "api_count": 0
+      }
+    },
+    {
+      "name": "任务记录已落盘",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_a", "name": "MaaXXX-logs-20260101-120000.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "api_actions_include": "send_group_msg"
+      }
+    }
+  ]
+}

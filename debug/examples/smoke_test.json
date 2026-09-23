@@ -1,0 +1,256 @@
+{
+  "name": "冒烟测试 — 日志包与文本消息边界",
+  "description": "验证：无追问会话时普通文本不响应；/maa 指令可用；非本 Bot 前缀的文本不响应；日志包正常触发分析。",
+  "setup": {
+    "configs": {
+      "测试组": {
+        "listen_groups": ["123456"],
+        "notify_group": "123456"
+      },
+      "项目名组": {
+        "listen_groups": ["444444"],
+        "notify_group": "444444",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaAssistantKedrgame-logs"
+        }
+      }
+    },
+    "files": {
+      "123456": [
+        {"file_name": "MaaXXX-logs-20260101-120000.zip", "file_id": "fid_new", "size": 2048, "modify_time": 1767225600},
+        {"file_name": "readme.txt", "file_id": "fid_txt", "size": 100, "modify_time": 1767225600}
+      ],
+      "444444": [
+        {"file_name": "MaaAssistantKedrgame-logs-1.0.0.zip", "file_id": "fid_proj", "size": 2048, "modify_time": 1767225600}
+      ]
+    }
+  },
+  "scenarios": [
+    {
+      "name": "无追问会话 — 普通聊天不响应",
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 123456,
+        "user_id": 10002,
+        "raw_message": "你好",
+        "message": "你好",
+        "sender": {"user_id": 10002, "nickname": "User", "card": ""}
+      },
+      "assert": {
+        "no_error": true,
+        "api_count": 0
+      }
+    },
+    {
+      "name": "非本 Bot 前缀 — 不响应",
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 123456,
+        "user_id": 10001,
+        "raw_message": "/help",
+        "message": "/help",
+        "sender": {"user_id": 10001, "nickname": "Admin", "card": "Admin"}
+      },
+      "assert": {
+        "no_error": true,
+        "api_count": 0
+      }
+    },
+    {
+      "name": "指令 — help 返回指令列表",
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 123456,
+        "user_id": 10001,
+        "raw_message": "/maa help",
+        "message": "/maa help",
+        "sender": {"user_id": 10001, "nickname": "Admin", "card": "Admin"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "OnebotMaaLogAnalyzer 指令",
+        "api_actions_include": "send_group_msg"
+      }
+    },
+    {
+      "name": "指令 — status 返回配置状态",
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 123456,
+        "user_id": 10001,
+        "raw_message": "/maa status",
+        "message": "/maa status",
+        "sender": {"user_id": 10001, "nickname": "Admin", "card": "Admin"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "配置名：测试组"
+      }
+    },
+    {
+      "name": "指令 — 未知子指令给出提示",
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 123456,
+        "user_id": 10001,
+        "raw_message": "/maa nonexistent",
+        "message": "/maa nonexistent",
+        "sender": {"user_id": 10001, "nickname": "Admin", "card": "Admin"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "未知指令"
+      }
+    },
+    {
+      "name": "上传日志包 — 触发自动分析",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_new", "name": "MaaXXX-logs-20260101-120000.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果",
+        "api_actions_include": "get_group_file_url"
+      }
+    },
+    {
+      "name": "上传非日志包 — 不响应",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_txt", "name": "readme.txt", "size": 100}
+      },
+      "assert": {
+        "no_error": true,
+        "api_count": 0
+      }
+    },
+    {
+      "name": "上传超限日志包 — 提示跳过",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_big", "name": "MaaXXX-logs-big.zip", "size": 999999999}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "超过限制"
+      }
+    },
+    {
+      "name": "非监听群上传 — 不响应",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 999999,
+        "user_id": 10001,
+        "file": {"id": "fid_x", "name": "MaaXXX-logs-x.zip", "size": 1024}
+      },
+      "assert": {
+        "no_error": true,
+        "api_count": 0
+      }
+    },
+    {
+      "name": "消息内文件段（日志包）— 触发分析",
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "sub_type": "normal",
+        "message_id": 1,
+        "group_id": 123456,
+        "user_id": 10001,
+        "raw_message": "",
+        "message": [
+          {"type": "file", "data": {"file_id": "fid_new", "file_name": "MaaXXX-logs-20260101-120000.zip", "size": 2048}}
+        ],
+        "sender": {"user_id": 10001, "nickname": "Admin", "card": "Admin"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果"
+      }
+    },
+    {
+      "name": "同一次上传双入口 — 只分析一次（notice 与 message.file 去重）",
+      "preserve_dedup": true,
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_dup", "name": "MaaXXX-logs-dup.zip", "size": 4096}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果"
+      }
+    },
+    {
+      "name": "同一次上传双入口 — 紧随其后的 message.file 被去重",
+      "preserve_dedup": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "sub_type": "normal",
+        "message_id": 2,
+        "group_id": 123456,
+        "user_id": 10001,
+        "raw_message": "",
+        "message": [
+          {"type": "file", "data": {"file_id": "fid_dup", "file_name": "MaaXXX-logs-dup.zip", "size": 4096}}
+        ],
+        "sender": {"user_id": 10001, "nickname": "Admin", "card": "Admin"}
+      },
+      "assert": {
+        "no_error": true,
+        "api_count": 0
+      }
+    },
+    {
+      "name": "去重窗口内不同文件 — 仍各自分析",
+      "preserve_dedup": true,
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_other", "name": "MaaXXX-logs-other.zip", "size": 8192}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果"
+      }
+    },
+    {
+      "name": "报告头使用项目名 — 前缀 MaaAssistantKedrgame-logs",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 444444,
+        "user_id": 10001,
+        "file": {"id": "fid_proj", "name": "MaaAssistantKedrgame-logs-1.0.0.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaAssistantKedrgame 日志分析结果",
+        "reply_not_contains": "MaaXXX 日志分析结果",
+        "system_prompt_contains": "MaaAssistantKedrgame"
+      }
+    }
+  ]
+}

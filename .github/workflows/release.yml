@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version info
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+          # 预发布判定
+          if [[ "$VERSION" =~ alpha|beta|rc|dev|preview ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate changelog with git-cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: .github/cliff.toml
+          args: >-
+            -vv --latest --strip header
+            ${{ steps.meta.outputs.prerelease == 'false' && '--tag-pattern "^v[0-9]+\\.[0-9]+\\.[0-9]+$"' || '' }}
+        env:
+          OUTPUT: CHANGES.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Compose final release body
+        run: |
+          {
+            if [ -s CHANGES.md ]; then
+              cat CHANGES.md
+            else
+              # FALLBACK: git-cliff 失败时回退到 git log
+              PREV_TAG=$(git tag --sort=-v:refname | sed -n "/^${{ github.ref_name }}$/{n;p}")
+              echo "## ${{ steps.meta.outputs.version }} ($(date +%Y-%m-%d))"
+              echo ""
+              if [ -n "$PREV_TAG" ]; then
+                git log "${PREV_TAG}..HEAD" --format="- %s" --no-merges
+              else
+                git log --format="- %s" --no-merges
+              fi
+            fi
+          } > /tmp/release_body.md
+
+          echo "Final release body:"
+          cat /tmp/release_body.md
+
+      - name: Create release archive
+        run: |
+          set -euo pipefail
+
+          PKG=dist/OnebotMaaLogAnalyzer
+          mkdir -p "$PKG"
+
+          # ── 白名单：仅打包运行所需文件 ──
+          # 注意：debug/ 为开发调试工具，.github/ 为 CI 配置，均不打包
+          for f in main.py requirements.txt README.md LICENSE; do
+            cp "$f" "$PKG/"
+          done
+          for d in docs bot core features; do
+            cp -r "$d" "$PKG/"
+          done
+
+          # ── 清理不应进入发布包的产物 ──
+          find "$PKG" -type d -name __pycache__ -prune -exec rm -rf {} +
+          find "$PKG" -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' \) -delete
+          find "$PKG" -type d -name tests -prune -exec rm -rf {} +
+          find "$PKG" -type f -name 'test_*.py' -delete
+          find "$PKG" -type f -name '*.log' -delete
+
+          # ── 校验：禁止出现调试/测试/CI 文件 ──
+          FORBIDDEN=$(find "$PKG" \( -name 'debug' -o -name '*.json' -path '*/examples/*' \
+            -o -name '.github' -o -name 'config.json' -o -name '.gitignore' \) -print)
+          if [ -n "$FORBIDDEN" ]; then
+            echo "::error::发布包中出现禁止的文件："
+            echo "$FORBIDDEN"
+            exit 1
+          fi
+
+          # ── 校验：必需文件齐全 ──
+          for required in main.py requirements.txt README.md LICENSE \
+                          bot/__init__.py core/__init__.py features/__init__.py \
+                          features/maa/__init__.py; do
+            if [ ! -e "$PKG/$required" ]; then
+              echo "::error::发布包缺少必需文件：$required"
+              exit 1
+            fi
+          done
+
+          echo "发布包内容："
+          find "$PKG" -type f | sort
+
+          cd dist
+          zip -rq "../OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}.zip" OnebotMaaLogAnalyzer
+          cd ..
+
+          echo "打包完成，大小：$(du -h OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}.zip | cut -f1)"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: V${{ steps.meta.outputs.version }}
+          body_path: /tmp/release_body.md
+          files: |
+            OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}.zip
+          prerelease: ${{ steps.meta.outputs.prerelease }}

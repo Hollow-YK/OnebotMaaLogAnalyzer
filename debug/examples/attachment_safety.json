@@ -1,0 +1,75 @@
+{
+  "name": "附件安全 — 来源限定 / 相对路径 / 敏感文件",
+  "description": "验证附件的三道防线：① 必须指定来源 ② 必须是相对路径 ③ 凭据密钥类文件一律拒绝外发。模型被刻意诱导请求敏感文件，Bot 必须全部拒绝且不泄露内容。",
+  "setup": {
+    "model_report": "结论：调试用报告。\n\n尝试请求各种敏感文件：\n[附件@项目: .env]\n[附件@项目: sub/.env]\n[附件@项目: server.pem]\n[附件@项目: id_rsa]\n[附件@项目: .git/config]\n[附件@项目: sub/.git/config]\n[附件@项目: .aws/credentials]\n\n尝试绝对路径与越界：\n[附件@项目: C:/Windows/system32/config.json]\n[附件@项目: ../../etc/passwd]\n[附件@项目: /etc/passwd]\n\n缺少来源标记：\n[附件: config/app.json]\n\n正常请求（应放行）：\n[附件@项目: config/app.json]\n[附图@项目: assets/resource/image/Start2.png]\n\n需要补充：无。",
+    "mock_repo": {
+      "assets/resource/image/Start2.png": "fake-png-bytes",
+      "assets/resource/pipeline/PVP.json": {
+        "PVP_Click:StartBattle": {"threshold": 0.7}
+      },
+      "config/app.json": {"name": "可见配置", "ok": true},
+      ".env": "API_KEY=super-secret-token\n",
+      "sub/.env": "DB_PASSWORD=hunter2\n",
+      "server.pem": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n",
+      "id_rsa": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQ\n",
+      ".git/config": "[remote \"origin\"]\n\turl = https://user:ghp_TOKEN@github.com/a/b.git\n",
+      "sub/.git/config": "[remote \"origin\"]\n\turl = https://user:ghp_TOKEN@github.com/a/b.git\n",
+      ".aws/credentials": "[default]\naws_secret_access_key = SECRET\n"
+    },
+    "configs": {
+      "安全组": {
+        "listen_groups": ["555001"],
+        "notify_group": "555001",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaXXX-logs",
+          "max_report_files": 6,
+          "repo": {"enabled": true}
+        }
+      }
+    },
+    "files": {
+      "555001": [
+        {"file_name": "MaaXXX-logs-sec.zip", "file_id": "fid_sec", "size": 2048, "modify_time": 1767225600}
+      ]
+    }
+  },
+  "scenarios": [
+    {
+      "name": "安全 — 敏感文件全部被拒，正常附件仍放行",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 555001,
+        "user_id": 10001,
+        "file": {"id": "fid_sec", "name": "MaaXXX-logs-sec.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果",
+        "reply_not_contains": [
+          "[附件", "[附图",
+          "super-secret-token", "hunter2",
+          "BEGIN PRIVATE KEY", "BEGIN RSA PRIVATE KEY",
+          "ghp_TOKEN", "aws_secret_access_key"
+        ],
+        "api_segments_include": "image"
+      }
+    },
+    {
+      "name": "安全 — 正常项目附件可发送（对照组）",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 555001,
+        "user_id": 10001,
+        "file": {"id": "fid_sec", "name": "MaaXXX-logs-sec.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "api_actions_include": "upload_group_file"
+      }
+    }
+  ]
+}

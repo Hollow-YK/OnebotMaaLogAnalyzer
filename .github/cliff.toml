@@ -1,0 +1,107 @@
+[remote.github]
+owner = "Hollow-YK"
+repo = "OnebotMaaLogAnalyzer"
+
+[changelog]
+header = ""
+
+body = """
+{%- macro remote_url() -%}
+  https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}
+{%- endmacro -%}
+
+{% macro print_commit(commit) -%}
+    - {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
+        {{ commit.message | split(pat="\n") | first | upper_first }} \
+        {% if commit.github.username %} @{{ commit.github.username }}{% else %} {{ commit.author.name }}{% endif %}
+        {%- if commit.footers -%}
+            {%- for footer in commit.footers -%}
+                {%- if footer.token == "Co-authored-by" -%}
+                    {%- set co_author_name = footer.value | split(pat=" <") | first | trim %} @{{ co_author_name }}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- endif %}
+{% endmacro -%}
+
+{% if version %}\
+    ## {{ version | trim_start_matches(pat="v") }} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% else %}\
+    ## 未发布
+{% endif %}\
+
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits
+    | filter(attribute="scope")
+    | sort(attribute="scope") %}
+        {{ self::print_commit(commit=commit) }}
+    {%- endfor %}
+    {% for commit in commits %}
+        {%- if not commit.scope -%}
+            {{ self::print_commit(commit=commit) }}
+        {% endif -%}
+    {% endfor -%}
+{% endfor -%}
+{%- if github -%}
+{% if github.contributors | filter(attribute="is_first_time", value=true) | length != 0 %}
+  ## 新贡献者 ❤️
+{% endif %}\
+{% for contributor in github.contributors | filter(attribute="is_first_time", value=true) %}
+  * @{{ contributor.username }} made their first contribution
+    {%- if contributor.pr_number %} in \
+      [#{{ contributor.pr_number }}]({{ self::remote_url() }}/pull/{{ contributor.pr_number }}) \
+    {%- endif %}
+{% endfor %}
+{% endif %}
+"""
+
+footer = ""
+
+[git]
+# PR 标题遵循约定式提交（feat: / fix: / docs: / ...）
+conventional_commits = true
+# 保留非约定式提交，交给下方的中文 parser 兜底
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+commit_parsers = [
+    # 跳过 [skip changelog] 标记
+    { message = ".*\\[skip changelog\\].*", skip = true },
+    { body = ".*\\[skip changelog\\].*", skip = true },
+    # ── 约定式提交类型 → emoji 分组 ──
+    { message = "^feat", group = "<!-- 0 -->✨ 新功能" },
+    { message = "^fix", group = "<!-- 1 -->🐛 Bug修复" },
+    { message = "^docs", group = "<!-- 4 -->📚 文档" },
+    { message = "^perf", group = "<!-- 3 -->🚀 性能优化" },
+    { message = "^refactor", group = "<!-- 2 -->🚜 代码重构" },
+    { message = "^style", group = "<!-- 5 -->🎨 样式" },
+    { message = "^test", group = "<!-- 6 -->🧪 测试" },
+    { message = "^chore\\(deps\\)", group = "📦 依赖更新" },
+    { message = "^chore", group = "<!-- 8 -->🔧 日常维护" },
+    { message = "^ci", group = "<!-- 7 -->⚙️ 持续集成" },
+    { body = ".*security", group = "<!-- 9 -->🔒 安全" },
+    { message = "^revert", group = "<!-- 10 -->◀️ 撤销" },
+    # ── 中文前缀兜底（非约定式提交或 merge commit 被解析后）──
+    { message = "^修复", group = "<!-- 1 -->🐛 Bug修复" },
+    { message = "^解决", group = "<!-- 1 -->🐛 Bug修复" },
+    { message = "^新增", group = "<!-- 0 -->✨ 新功能" },
+    { message = "^添加", group = "<!-- 0 -->✨ 新功能" },
+    { message = "^实现", group = "<!-- 0 -->✨ 新功能" },
+    { message = "^优化", group = "<!-- 3 -->🚀 性能优化" },
+    { message = "^重构", group = "<!-- 2 -->🚜 代码重构" },
+    { message = "^调整", group = "<!-- 2 -->🚜 代码重构" },
+    { message = "^更改", group = "<!-- 2 -->🚜 代码重构" },
+    { message = "^修改", group = "<!-- 2 -->🚜 代码重构" },
+    { message = "^同步", group = "<!-- 2 -->🚜 代码重构" },
+    { message = "^文档", group = "<!-- 4 -->📚 文档" },
+    { message = "^更新文档", group = "<!-- 4 -->📚 文档" },
+    { message = "^更新", group = "<!-- 8 -->🔧 日常维护" },
+    { message = "^V[0-9]", group = "<!-- 8 -->🔧 版本发布" },
+]
+
+# 按时间从旧到新排列
+sort_commits = "oldest"
+
+# 启用 GitHub 集成：解析 merge commit → PR 标题 + @作者
+[git.github]
+commits = true

@@ -1,0 +1,199 @@
+{
+  "name": "项目代码参考 — 仓库检索注入验证",
+  "description": "验证开启 repo 后，Bot 会从日志摘要提取标识符、检索项目代码，并把节点定义注入提示词；关闭时不注入。",
+  "setup": {
+    "mock_repo": {
+      "assets/resource/pipeline/StartUp.json": {
+        "StartUp": {
+          "desc": "启动游戏并等待主界面",
+          "recognition": {
+            "type": "OCR",
+            "param": {
+              "expected": ["开始"],
+              "roi": [640, 360, 200, 80],
+              "threshold": 0.9
+            }
+          },
+          "action": "Click",
+          "next": ["MainInterface"]
+        }
+      },
+      "assets/resource/pipeline/PVP.json": {
+        "PVP_Click:StartBattle": {
+          "desc": "点击开始战斗",
+          "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+              "template": ["UI/Combat/Start2.png"],
+              "roi": [971, 630, 300, 80],
+              "threshold": 0.7
+            }
+          },
+          "action": "Click"
+        }
+      },
+      "assets/resource/pipeline/Unrelated.json": {
+        "Some_Other_Node": {"desc": "与本次日志无关的节点"}
+      }
+    },
+    "configs": {
+      "仓库开启": {
+        "listen_groups": ["123456"],
+        "notify_group": "123456",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaXXX-logs",
+          "repo": {
+            "enabled": true,
+            "max_files": 4,
+            "max_chars": 20000
+          }
+        }
+      },
+      "仓库关闭": {
+        "listen_groups": ["654321"],
+        "notify_group": "654321",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaXXX-logs",
+          "repo": {
+            "enabled": false
+          }
+        }
+      },
+      "仓库路径无效": {
+        "listen_groups": ["777777"],
+        "notify_group": "777777",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaXXX-logs",
+          "repo": {
+            "enabled": true,
+            "path": "Z:/definitely/not/a/real/repo/path"
+          }
+        }
+      },
+      "agent模式": {
+        "listen_groups": ["888888"],
+        "notify_group": "888888",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaXXX-logs",
+          "repo": {
+            "enabled": true,
+            "mode": "agent",
+            "max_tool_rounds": 3,
+            "max_tool_calls_per_round": 2
+          }
+        }
+      }
+    },
+    "files": {
+      "123456": [
+        {"file_name": "MaaXXX-logs-repo.zip", "file_id": "fid_repo", "size": 2048, "modify_time": 1767225600}
+      ],
+      "654321": [
+        {"file_name": "MaaXXX-logs-norepo.zip", "file_id": "fid_norepo", "size": 2048, "modify_time": 1767225600}
+      ],
+      "777777": [
+        {"file_name": "MaaXXX-logs-badrepo.zip", "file_id": "fid_bad", "size": 2048, "modify_time": 1767225600}
+      ],
+      "888888": [
+        {"file_name": "MaaXXX-logs-agent.zip", "file_id": "fid_agent", "size": 2048, "modify_time": 1767225600}
+      ]
+    }
+  },
+  "scenarios": [
+    {
+      "name": "开启仓库 — 提示词包含项目代码参考段落",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_repo", "name": "MaaXXX-logs-repo.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果",
+        "prompt_contains": "项目代码参考"
+      }
+    },
+    {
+      "name": "开启仓库 — 注入命中节点定义（含阈值与模板）",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 123456,
+        "user_id": 10001,
+        "file": {"id": "fid_repo", "name": "MaaXXX-logs-repo.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "prompt_contains": "assets/resource/pipeline/StartUp.json",
+        "prompt_not_contains": "Some_Other_Node"
+      }
+    },
+    {
+      "name": "关闭仓库 — 提示词不含项目代码参考段落",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 654321,
+        "user_id": 10001,
+        "file": {"id": "fid_norepo", "name": "MaaXXX-logs-norepo.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果",
+        "prompt_not_contains": "项目代码参考"
+      }
+    },
+    {
+      "name": "仓库路径无效 — 跳过代码参考但分析正常完成",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 777777,
+        "user_id": 10001,
+        "file": {"id": "fid_bad", "name": "MaaXXX-logs-badrepo.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果",
+        "api_actions_include": "send_group_msg",
+        "prompt_not_contains": "项目代码参考"
+      }
+    },
+    {
+      "name": "agent 模式 — AI 自主调用仓库工具",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 888888,
+        "user_id": 10001,
+        "file": {"id": "fid_agent", "name": "MaaXXX-logs-agent.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果",
+        "api_actions_include": "send_group_msg",
+        "system_prompt_contains": "工具模式补充说明"
+      }
+    },
+    {
+      "name": "agent 模式 — 不注入预检索片段（由 AI 自主检索）",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 888888,
+        "user_id": 10001,
+        "file": {"id": "fid_agent", "name": "MaaXXX-logs-agent.zip", "size": 2048}
+      },
+      "assert": {
+        "no_error": true,
+        "prompt_not_contains": ["已命中标识符", "项目代码参考"]
+      }
+    }
+  ]
+}
