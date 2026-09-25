@@ -124,7 +124,17 @@ class MessageHandler:
             provider=provider,
         )
         if answer is None or not answer.text:
-            await self.s.send_text(int(group_id), "抱歉，本次追问没有获得有效回复，请稍后重试。")
+            # 模型没给出任何可用内容（如全程只调工具、收敛也失败）。
+            # 给一句可操作、可区分原因的提示，而不是笼统的「无效回复」。
+            logger.warning(
+                f"[追问] 群 {group_id} 未获得有效回答"
+                f"（工具可用={provider is not None or getattr(session, 'digest', None) is not None}）"
+            )
+            await self.s.send_text(
+                int(group_id),
+                "这次追问没能整理出结论（可能是问题范围太大或检索未命中）。\n"
+                "可以试着把问题说得更具体，或换一种问法再引用一次。",
+            )
             return
 
         self.followup.append(group_id, question, answer.text)

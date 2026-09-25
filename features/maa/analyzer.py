@@ -812,6 +812,7 @@ class MaaAnalyzer:
         model_override = str(settings.model or "").strip()
 
         last_text = ""
+        tool_calls_total = 0
         for round_index in range(1, max_rounds + 1):
             if time.monotonic() > deadline:
                 logger.info("[追问] 工具循环达到时长上限，使用已有内容")
@@ -846,6 +847,7 @@ class MaaAnalyzer:
 
             per_round = max(1, int(repo_cfg.max_tool_calls_per_round or 6))
             for call in reply.tool_calls[:per_round]:
+                tool_calls_total += 1
                 if call.parse_error:
                     result = f"参数解析失败：{call.parse_error}"
                 else:
@@ -859,9 +861,17 @@ class MaaAnalyzer:
                     "content": result,
                 })
 
-        # 轮次用尽：要求收敛
-        if not last_text:
-            return None
+        # 轮次/时长用尽：要求模型收敛作答。
+        #
+        # 注意：模型可能**全程只调工具、一次正文都没输出**（last_text 为空），
+        # 这在真实使用中很常见。此时绝不能直接放弃 —— 否则上层会回复
+        # 「本次追问没有获得有效回复」。必须照样要求收敛一次。
+        if tool_calls_total == 0:
+            return last_text or None
+
+        logger.info(
+            f"[追问] 工具循环达到轮次上限（共 {tool_calls_total} 次工具调用），要求收敛"
+        )
         messages.append({
             "role": "user",
             "content": "已达到检索轮次上限，请立即基于现有信息作答，不要再调用工具。",
@@ -875,7 +885,7 @@ class MaaAnalyzer:
                 return final.content
         except Exception as exc:
             logger.warning(f"[追问] 收敛调用失败：{exc}")
-        return last_text
+        return last_text or None
 
     # ════════════════════════════════════════════════════════════
     # 项目代码参考

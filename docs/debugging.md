@@ -96,7 +96,7 @@ curl http://127.0.0.1:8765/debug/configs
 ### 运行全部套件
 
 ```bash
-python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;cfg={'bot':{'data_dir':'data/test','configs':{}}};[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config(cfg)))) for n in ('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach')]"
+python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;cfg={'bot':{'data_dir':'data/test','configs':{}}};[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config(cfg)))) for n in ('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach','followup_tool_loop','followup_converge_fallback')]"
 ```
 
 > 每次运行前先删除 `data/test`，否则残留配置会导致群多归属 → `resolve_config` 返回 `None` 而误判失败。
@@ -114,6 +114,8 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `followup_restart.json` | **重启后继续追问**（真实子进程重启） |
 | `followup_repo.json` | 重启后 agent 模式仓库工具仍可用 |
 | `followup_repo_attach.json` | 重启后 `@项目` 附件仍可取到 |
+| `followup_tool_loop.json` | 模型只检索不输出正文时仍须给出回答 |
+| `followup_converge_fallback.json` | 模型连收敛都不配合时的兜底回复 |
 
 ### 真实重启测试
 
@@ -145,6 +147,8 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `history` | 播种历史记录（`reset` 清空、每条的 `age_hours` 构造过期记录） |
 | `history_cleanup` | 播种后立即执行一次清理 |
 | `model_report` | 覆盖模拟模型的报告（测试特定附件指令 / 敏感文件请求） |
+| `llm_tool_behavior` | `normal`（首轮调工具后收敛）/ `always`（每轮都调直到上限） |
+| `llm_converge_empty` | 收敛调用返回空正文（模拟模型不配合收敛） |
 
 ### 场景字段
 
@@ -154,6 +158,7 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `assert` | 断言集合 |
 | `capture` | 捕获变量供后续场景引用（如 `{"analysis_msg": "LAST_BOT_MSG"}`） |
 | `restart` | **在全新子进程中执行本场景**（真实重启，验证落盘状态） |
+| `llm` | 本场景覆盖模型行为（`tool_behavior` / `converge_empty` / `report`） |
 | `preserve_followup` | 跨场景保留追问会话 |
 | `preserve_dedup` | 跨场景保留去重状态 |
 | `history_cleanup` | 注入事件前先清理历史 |

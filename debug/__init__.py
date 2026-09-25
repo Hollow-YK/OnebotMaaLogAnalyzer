@@ -289,6 +289,11 @@ class DebugLLMClient(LLMClient):
         self.tool_results: list[str] = []         # 收到的工具执行结果
         # 可覆盖的模拟报告（测试可注入含特定附件指令的报告）
         self.report_override: str = ""
+        # 工具循环行为：normal=首轮调工具后收敛；always=每轮都调工具直到上限。
+        # 用于复现「模型一直检索、从不输出正文」这一真实场景。
+        self.tool_behavior: str = "normal"
+        # 收敛调用是否返回空正文（模拟模型不配合收敛）
+        self.converge_empty: bool = False
 
     @property
     def report(self) -> str:
@@ -360,6 +365,25 @@ class DebugLLMClient(LLMClient):
                     finish_reason="tool_calls",
                 )
 
+        # always 模式：每轮都请求工具，直到上层用尽轮次。
+        # 复现「模型全程只检索、从不输出正文」——真实模型常见行为。
+        if tools and self.tool_behavior == "always":
+            call = ToolCall(
+                id=f"debug_call_loop_{len(self.tool_rounds)}",
+                name="log_search",
+                arguments={"pattern": "ERROR"},
+                raw_arguments='{"pattern": "ERROR"}',
+            )
+            return ChatMessage(
+                content="",
+                tool_calls=[call],
+                finish_reason="tool_calls",
+            )
+
+        # 收敛阶段（上层已用尽轮次、不再传 tools）：可模拟空正文
+        if self.converge_empty and not tools:
+            return ChatMessage(content="", finish_reason="stop")
+
         # 之后直接给结论
         return ChatMessage(content=self.report, finish_reason="stop")
 
@@ -392,6 +416,9 @@ class DebugManager:
         self.data_dir: str = str(getattr(service.dm, "_dir", "data/test"))
         # 模拟报告覆盖（由测试 setup 设置），重启后需复现
         self.model_report: str = ""
+        # 模拟模型的工具循环行为与收敛行为，重启后同样需复现
+        self.llm_tool_behavior: str = ""
+        self.llm_converge_empty: bool = False
 
     @classmethod
     def from_config(cls, cfg: dict, data_dir: str = "data/test") -> "DebugManager":

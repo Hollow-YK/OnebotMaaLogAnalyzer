@@ -403,6 +403,47 @@ def _apply_setup(manager: "DebugManager", setup: dict):
         manager.llm.report_override = str(setup["model_report"])
         # 记录到 manager，使真实重启后仍复现同一份模拟报告
         manager.model_report = str(setup["model_report"])
+    # 模拟模型在工具循环中的行为（normal / always）
+    if "llm_tool_behavior" in setup and hasattr(manager.llm, "tool_behavior"):
+        manager.llm.tool_behavior = str(setup["llm_tool_behavior"])
+        manager.llm_tool_behavior = str(setup["llm_tool_behavior"])
+    # 模拟模型收敛时返回空正文
+    if "llm_converge_empty" in setup and hasattr(manager.llm, "converge_empty"):
+        manager.llm.converge_empty = bool(setup["llm_converge_empty"])
+        manager.llm_converge_empty = bool(setup["llm_converge_empty"])
+
+
+def _apply_llm_overrides(manager: "DebugManager", spec) -> None:
+    """
+    按场景覆盖模拟模型的行为。
+
+    支持：
+      tool_behavior    normal / always（always = 每轮都调工具直到轮次上限）
+      converge_empty   收敛调用是否返回空正文
+      report           覆盖报告文本
+
+    未声明的字段回落到 setup 的全局设置（每场景先重置为全局值）。
+    """
+    llm = getattr(manager, "llm", None)
+    if llm is None:
+        return
+
+    # 先重置为 setup 级全局值，避免上一个场景的覆盖泄漏到本场景
+    if hasattr(llm, "tool_behavior"):
+        llm.tool_behavior = str(getattr(manager, "llm_tool_behavior", "") or "normal")
+    if hasattr(llm, "converge_empty"):
+        llm.converge_empty = bool(getattr(manager, "llm_converge_empty", False))
+    if hasattr(llm, "report_override"):
+        llm.report_override = str(getattr(manager, "model_report", "") or "")
+
+    if not isinstance(spec, dict):
+        return
+    if "tool_behavior" in spec and hasattr(llm, "tool_behavior"):
+        llm.tool_behavior = str(spec["tool_behavior"])
+    if "converge_empty" in spec and hasattr(llm, "converge_empty"):
+        llm.converge_empty = bool(spec["converge_empty"])
+    if "report" in spec and hasattr(llm, "report_override"):
+        llm.report_override = str(spec["report"])
 
 
 def _history_config_name(manager: "DebugManager", spec: dict) -> str:
@@ -433,6 +474,8 @@ def _run_in_subprocess(manager: "DebugManager", event: dict) -> dict:
         "event": event,
         "files": _snapshot_mock_files(manager),
         "model_report": str(getattr(manager, "model_report", "") or ""),
+        "llm_tool_behavior": str(getattr(manager, "llm_tool_behavior", "") or ""),
+        "llm_converge_empty": bool(getattr(manager, "llm_converge_empty", False)),
         # 续用消息 ID 计数器：否则新进程从 100000 重新发号，
         # 会与重启前已发出的 ID 撞号，让测试因「撞号」而非因「持久化」通过
         "next_message_id": int(
@@ -552,6 +595,10 @@ def _reload_manager(manager: "DebugManager", files: dict) -> None:
     report = str(getattr(manager, "model_report", "") or "")
     if report and hasattr(fresh.llm, "report_override"):
         fresh.llm.report_override = report
+    if hasattr(fresh.llm, "tool_behavior"):
+        fresh.llm.tool_behavior = str(getattr(manager, "llm_tool_behavior", "") or "normal")
+    if hasattr(fresh.llm, "converge_empty"):
+        fresh.llm.converge_empty = bool(getattr(manager, "llm_converge_empty", False))
 
     # 续用消息 ID 计数器，避免与重启前已发出的 ID 撞号
     fresh.api._next_message_id = next_id
@@ -772,6 +819,9 @@ async def run_test_file(file_path: str,
         if not scenario.get("preserve_followup") and manager.followup is not None:
             manager.followup._sessions.clear()
             manager.followup._index.clear()
+        # 场景可声明 llm 覆盖模拟模型行为（如只在某个场景让模型「只调工具」），
+        # 未声明时回落到 setup 的全局设置
+        _apply_llm_overrides(manager, scenario.get("llm"))
         # 场景可声明 restart=true 来模拟**进程重启**：
         # 在全新子进程里重建管线（真正的进程级重启），随后父进程也就地
         # 重建，使后续场景看到重启后的真实状态。

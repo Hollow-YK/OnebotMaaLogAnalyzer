@@ -46,6 +46,13 @@ async def _run(job: dict) -> dict:
     if report and hasattr(manager.llm, "report_override"):
         manager.llm.report_override = report
 
+    # 模拟模型的工具循环行为与收敛行为（重启后同样需复现）
+    behavior = str(job.get("llm_tool_behavior") or "")
+    if behavior and hasattr(manager.llm, "tool_behavior"):
+        manager.llm.tool_behavior = behavior
+    if hasattr(manager.llm, "converge_empty"):
+        manager.llm.converge_empty = bool(job.get("llm_converge_empty"))
+
     # 消息 ID 计数器续用：真实 QQ 的 message_id 由服务端全局发号，
     # 新进程不会重号；调试 API 是本地计数器，需显式续上避免撞号。
     try:
