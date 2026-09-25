@@ -1,0 +1,233 @@
+{
+  "name": "追问持久化 — 重启后仍可继续之前的追问",
+  "description": "验证追问会话状态（消息 ID / 追问轮数 / 问答历史）会落盘：模拟进程重启（restart=true 重建追问管线）后，引用分析消息或引用上一条追问回复都能继续追问，且轮数与上下文不丢失；会话结束后重启不再响应。",
+  "setup": {
+    "configs": {
+      "重启组": {
+        "listen_groups": ["444444"],
+        "notify_group": "444444",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaXXX-logs",
+          "followup_enabled": true,
+          "followup_window_minutes": 0,
+          "followup_max_turns": 10,
+          "history_enabled": true,
+          "history_period_hours": 24,
+          "history_keep_periods": 2
+        },
+        "commands": {
+          "prefix": "/maa",
+          "owners": ["90001"],
+          "read_level": 0,
+          "write_level": 2,
+          "followup_level": 0
+        }
+      }
+    },
+    "files": {
+      "444444": [
+        {"file_name": "MaaXXX-logs-20260101-120000.zip", "file_id": "fid_restart", "size": 2048}
+      ]
+    },
+    "history": {"config": "重启组", "reset": true}
+  },
+  "scenarios": [
+    {
+      "name": "上传分析 — 归档日志包与消息 ID",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 444444,
+        "user_id": 90001,
+        "file": {"id": "fid_restart", "name": "MaaXXX-logs-20260101-120000.zip", "size": 2048}
+      },
+      "capture": {"analysis_msg": "LAST_BOT_MSG"},
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果",
+        "history_count": 1,
+        "history_message_ids": "$LAST_BOT_MSG"
+      }
+    },
+    {
+      "name": "重启后 — 引用分析消息仍可追问",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 444444,
+        "user_id": 55555,
+        "raw_message": "这条日志到底什么问题？",
+        "message": [
+          {"type": "reply", "data": {"id": "$analysis_msg"}},
+          {"type": "text", "data": {"text": "这条日志到底什么问题？"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "capture": {"followup_msg": "LAST_BOT_MSG"},
+      "assert": {
+        "no_error": true,
+        "reply_contains": "结论",
+        "api_actions_include": "send_group_msg"
+      }
+    },
+    {
+      "name": "重启后 — 引用「追问回复」可继续追问（关键回归）",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 444444,
+        "user_id": 55555,
+        "raw_message": "那要怎么办？",
+        "message": [
+          {"type": "reply", "data": {"id": "$followup_msg"}},
+          {"type": "text", "data": {"text": "那要怎么办？"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "结论",
+        "api_actions_include": "send_group_msg"
+      }
+    },
+    {
+      "name": "重启后 — 追问轮数被保留（2 轮）",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 444444,
+        "user_id": 55555,
+        "raw_message": "/maa followup",
+        "message": "/maa followup",
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": [
+          "追问答疑会话进行中",
+          "MaaXXX-logs-20260101-120000.zip",
+          "已追问：2/10 轮"
+        ]
+      }
+    },
+    {
+      "name": "重启后 — 恢复的上下文包含此前追问的问答",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 444444,
+        "user_id": 55555,
+        "raw_message": "再确认一次",
+        "message": [
+          {"type": "reply", "data": {"id": "$analysis_msg"}},
+          {"type": "text", "data": {"text": "再确认一次"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "结论",
+        "api_actions_include": "send_group_msg"
+      }
+    },
+    {
+      "name": "重启后 — 日志工具可用（由归档 zip 重建索引）",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 444444,
+        "user_id": 55555,
+        "raw_message": "日志里 ERROR 出现在哪一行？",
+        "message": [
+          {"type": "reply", "data": {"id": "$analysis_msg"}},
+          {"type": "text", "data": {"text": "日志里 ERROR 出现在哪一行？"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "结论",
+        "tools_include": "log_search"
+      }
+    },
+    {
+      "name": "会话结束 — 超管可提前结束",
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 444444,
+        "user_id": 90001,
+        "raw_message": "/maa followup close",
+        "message": "/maa followup close",
+        "sender": {"user_id": 90001, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "已结束追问会话"
+      }
+    },
+    {
+      "name": "结束后重启 — 引用旧消息不再响应",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 444444,
+        "user_id": 55555,
+        "raw_message": "还能问吗？",
+        "message": [
+          {"type": "reply", "data": {"id": "$analysis_msg"}},
+          {"type": "text", "data": {"text": "还能问吗？"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "api_count": 0
+      }
+    },
+    {
+      "name": "历史被清空 — 重启后无法再追问",
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 444444,
+        "user_id": 90001,
+        "raw_message": "/maa history purge",
+        "message": "/maa history purge",
+        "sender": {"user_id": 90001, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "已清空分析历史",
+        "history_count": 0
+      }
+    },
+    {
+      "name": "历史清空后重启 — 引用旧消息不响应",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 444444,
+        "user_id": 55555,
+        "raw_message": "日志还在吗？",
+        "message": [
+          {"type": "reply", "data": {"id": "$analysis_msg"}},
+          {"type": "text", "data": {"text": "日志还在吗？"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "api_count": 0
+      }
+    }
+  ]
+}

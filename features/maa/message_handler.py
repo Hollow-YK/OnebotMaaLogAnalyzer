@@ -86,6 +86,9 @@ class MessageHandler:
         if settings is not None:
             # 会话有效期跟随设置（0 = 跟随历史保留期）
             self.followup.set_window(self._window_minutes(settings))
+            self.followup.set_max_turns(
+                int(getattr(settings, "followup_max_turns", 10) or 10)
+            )
 
         config_name = cfg.name if cfg is not None else ""
         session = self.followup.by_message_id(reply_id, config_name)

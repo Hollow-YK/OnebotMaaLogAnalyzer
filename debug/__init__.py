@@ -377,6 +377,11 @@ class DebugManager:
         self.followup: Optional[FollowupStore] = None
         self.messages: Optional[MessageHandler] = None
         self.history: Optional[HistoryStore] = None
+        # 构建时的原始配置，供「真实重启」测试在子进程里原样重建
+        self.cfg: dict = {}
+        self.data_dir: str = str(getattr(service.dm, "_dir", "data/test"))
+        # 模拟报告覆盖（由测试 setup 设置），重启后需复现
+        self.model_report: str = ""
 
     @classmethod
     def from_config(cls, cfg: dict, data_dir: str = "data/test") -> "DebugManager":
@@ -411,6 +416,8 @@ class DebugManager:
         manager.followup = followup
         manager.messages = messages
         manager.history = history
+        manager.cfg = cfg
+        manager.data_dir = str(dm._dir)
         return manager
 
     # ── 事件注入 ──

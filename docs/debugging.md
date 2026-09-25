@@ -96,7 +96,7 @@ curl http://127.0.0.1:8765/debug/configs
 ### 运行全部套件
 
 ```bash
-python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;cfg={'bot':{'data_dir':'data/test','configs':{}}};[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config(cfg)))) for n in ('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety')]"
+python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;cfg={'bot':{'data_dir':'data/test','configs':{}}};[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config(cfg)))) for n in ('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach')]"
 ```
 
 > 每次运行前先删除 `data/test`，否则残留配置会导致群多归属 → `resolve_config` 返回 `None` 而误判失败。
@@ -111,6 +111,26 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `commands_test.json` | 指令权限 / 附图 / 追问答疑 |
 | `history_test.json` | 历史归档 / 周期清理 / 跨天追问 |
 | `attachment_safety.json` | 附件来源 / 相对路径 / 敏感文件防护 |
+| `followup_restart.json` | **重启后继续追问**（真实子进程重启） |
+
+### 真实重启测试
+
+场景加 `"restart": true` 后，该场景会在**全新子进程**里执行：
+
+```text
+父进程 ──JSON任务──▶ python -m debug.worker ──重建整条管线──▶ 注入事件
+                                                    │
+                                              仅磁盘数据延续
+```
+
+子进程会完整走一遍启动流程（`service.load()`、配置重读、历史重载），
+等价于 kill 后重新 `python main.py`，而不是在同一进程里清几个字典 ——
+因此能捕获任何依赖进程全局状态的缺陷。随后父进程也就地重建，
+使后续场景看到重启后的真实状态。
+
+> 调试 API 的 `message_id` 是本地计数器，重启时父进程会把计数续给子进程，
+> 避免新进程从 `100000` 重新发号、与重启前的 ID 撞号而**假通过**。
+> 真实 QQ 的 `message_id` 由服务端全局发号，不存在这个问题。
 
 ### setup 字段
 
@@ -131,6 +151,7 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `event` | 要注入的事件 |
 | `assert` | 断言集合 |
 | `capture` | 捕获变量供后续场景引用（如 `{"analysis_msg": "LAST_BOT_MSG"}`） |
+| `restart` | **在全新子进程中执行本场景**（真实重启，验证落盘状态） |
 | `preserve_followup` | 跨场景保留追问会话 |
 | `preserve_dedup` | 跨场景保留去重状态 |
 | `history_cleanup` | 注入事件前先清理历史 |

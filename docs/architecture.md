@@ -48,8 +48,8 @@ OnebotMaaLogAnalyzer/
 │       ├── log_tools.py        # 日志包工具（AI 自主读压缩包内原始文件）
 │       ├── attachments.py      # 结果附图/附件（来源限定 + 相对路径沙箱 + 图文混排）
 │       ├── safety.py           # 路径安全策略（凭据/密钥类文件禁止外发）
-│       ├── followup.py         # 追问答疑会话管理（内存 + 历史回退）
-│       ├── history.py          # 分析历史归档（日志包 / 消息 ID / 周期清理）
+│       ├── followup.py         # 追问答疑会话管理（内存 + 落盘，重启后可续）
+│       ├── history.py          # 分析历史归档（日志包 / 消息 ID / 会话状态 / 周期清理）
 │       ├── commands.py         # QQ 指令解析与执行（含权限）
 │       ├── message_handler.py  # 文本消息路由（指令 / 追问）
 │       ├── onebot_files.py     # 群文件递归列出 / 查找 / 下载
@@ -60,6 +60,7 @@ OnebotMaaLogAnalyzer/
 │   ├── cli.py           #   CLI 交互式 REPL
 │   ├── http_server.py   #   HTTP 调试端点
 │   ├── runner.py        #   JSON 批量测试运行器
+│   ├── worker.py        #   子进程事件注入器（支撑真实重启测试）
 │   └── examples/        #   测试套件
 ├── data/                # 运行时数据
 │   ├── settings.json    # 全局分析设置（默认值）
@@ -68,7 +69,7 @@ OnebotMaaLogAnalyzer/
 │       ├── groups.json       # 监听群 + 通知群
 │       ├── settings.json     # 分析设置覆盖
 │       ├── commands.json     # 指令与权限设置
-│       ├── history/          # 分析历史（日志包 + 追问上下文，按周期自动清理）
+│       ├── history/          # 分析历史（日志包 + 追问上下文 + 会话状态，按周期自动清理）
 │       └── jobs/records.json # 分析任务记录
 └── logs/                # 日志文件（时间命名）
 ```

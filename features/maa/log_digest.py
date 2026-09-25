@@ -165,6 +165,36 @@ def build_log_digest(
     )
 
 
+def describe_zip(zip_path: str,
+                 options: DigestOptions | None = None) -> DigestResult | None:
+    """
+    只索引压缩包内容（不生成摘要提示词）。
+
+    用于重启后从历史归档恢复追问会话：此时只需知道包内有哪些成员
+    （供 `[附图@日志: ...]` 附件与日志工具使用），无需重新提取摘要。
+    压缩包不存在或不可读时返回 None。
+    """
+    opts = options or DigestOptions()
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+    except (zipfile.BadZipFile, OSError, RuntimeError):
+        return None
+
+    safe_infos = [info for info in infos if _is_safe_member(info.filename)]
+    return DigestResult(
+        prompt="",
+        file_count=len(infos),
+        total_uncompressed_size=sum(max(0, int(info.file_size)) for info in infos),
+        log_files=[info.filename for info in _select_log_infos(safe_infos, opts)],
+        config_files=[info.filename for info in _select_config_infos(safe_infos)],
+        error_images=_select_error_images(safe_infos, opts.max_error_images),
+        all_images=_list_all_images(safe_infos),
+        all_members=[info.filename.replace("\\", "/") for info in safe_infos],
+        zip_path=str(zip_path),
+    )
+
+
 def _list_all_images(infos: list[zipfile.ZipInfo]) -> list[str]:
     """列出压缩包内全部图片（含 on_error 截图与资源图）。"""
     result: list[str] = []
