@@ -11,6 +11,11 @@
 
 会话按「群 + message_id」索引：同一次分析可能发出多条消息
 （分段报告 + 图片），引用其中任意一条都能进入同一会话。
+
+持久化:
+  会话状态（消息 ID、追问问答、轮数）会写入历史归档目录的
+  followups.json。因此**进程重启后**仍可引用保留周期内的旧消息
+  继续追问，且追问过的轮数与上下文不会丢失。
 """
 from __future__ import annotations
 
@@ -20,6 +25,10 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 logger = logging.getLogger("Maa.Followup")
+
+# 会话首轮固定写入的种子消息数（1 条上下文 + 1 条报告），
+# 持久化时只保存其后的追问问答，避免与 context.txt 重复占盘。
+_SEED_MESSAGES = 2
 
 
 @dataclass
@@ -40,12 +49,32 @@ class FollowupSession:
     digest: Any = None
     turns: int = 0
     last_active: float = 0.0
+    # 是否已结束（达到轮数上限或用户主动关闭）：结束后不再响应引用
+    closed: bool = False
 
     def touch(self) -> None:
         self.last_active = time.time()
 
     def age_seconds(self) -> float:
         return time.time() - self.last_active
+
+    def qa_messages(self) -> list[dict]:
+        """只取追问产生的问答（不含首轮种子上下文）。"""
+        return [dict(m) for m in self.messages[_SEED_MESSAGES:]]
+
+    def to_state(self) -> dict:
+        """序列化为可落盘的会话状态。"""
+        return {
+            "history_id": self.history_id,
+            "config_name": self.config_name,
+            "file_name": self.file_name,
+            "created_at": self.created_at,
+            "last_active": self.last_active,
+            "turns": self.turns,
+            "closed": self.closed,
+            "message_ids": sorted(self.message_ids),
+            "messages": self.qa_messages(),
+        }
 
 
 class FollowupStore:
@@ -66,6 +95,10 @@ class FollowupStore:
     def set_window(self, minutes: int) -> None:
         """动态调整会话有效期（跟随历史保留期）。"""
         self.window_seconds = max(60, int(minutes or 30) * 60)
+
+    def set_max_turns(self, turns: int) -> None:
+        """动态调整单会话最大追问轮数。"""
+        self.max_turns = max(1, int(turns or 10))
 
     # ── 容量与过期 ──
 
@@ -89,6 +122,32 @@ class FollowupStore:
             if self._index.get(mid) == group_id:
                 self._index.pop(mid, None)
 
+    # ── 持久化 ──
+
+    def _persist(self, session: FollowupSession) -> None:
+        """
+        把会话状态写入历史归档（按「配置 + 历史记录 ID」索引）。
+
+        重启后 `_restore_from_history` 依赖这些状态还原追问轮数与上下文。
+        写入失败只记日志，绝不影响本次追问。
+        """
+        if self.history is None or not session.config_name:
+            return
+        key = session.history_id or session.group_id
+        try:
+            self.history.set_followup(
+                session.config_name, key, session.to_state()
+            )
+        except Exception as exc:
+            logger.warning(f"[追问] 保存会话状态失败：{exc}")
+
+    def _forget(self, session: FollowupSession) -> None:
+        """标记会话已结束并落盘，使重启后不再恢复。"""
+        if self.history is None or not session.config_name:
+            return
+        session.closed = True
+        self._persist(session)
+
     # ── 会话操作 ──
 
     def start(self, *, group_id: str, config_name: str, file_name: str,
@@ -104,7 +163,8 @@ class FollowupStore:
         """
         self._prune()
         key = str(group_id)
-        self._drop(key)   # 新分析替换旧会话
+        # 新分析替换该群**当前**会话（旧记录仍留在历史里，可继续被引用）
+        self._drop(key)
 
         session = FollowupSession(
             group_id=key,
@@ -124,6 +184,16 @@ class FollowupStore:
         for mid in session.message_ids:
             self._index[mid] = key
 
+        # 历史记录中补上本次分析的消息 ID（重启后据此反查记录）
+        if self.history is not None and session.history_id:
+            try:
+                self.history.add_message_ids(
+                    config_name, session.history_id, sorted(session.message_ids)
+                )
+            except Exception as exc:
+                logger.warning(f"[追问] 归档消息 ID 失败：{exc}")
+        self._persist(session)
+
         logger.info(
             f"[追问] 已开启会话：群 {key} / {file_name}"
             f"（可引用 {len(session.message_ids)} 条消息）"
@@ -131,7 +201,12 @@ class FollowupStore:
         return session
 
     def register_message(self, group_id: str, message_id) -> None:
-        """把后续发出的消息（如附图）登记到已有会话，使其也可被引用。"""
+        """
+        把后续发出的消息（如附图、追问回复）登记到已有会话，使其也可被引用。
+
+        追问回复的 message_id 会同时写入历史归档，因此重启后引用
+        「上一条追问的回复」仍能进入同一会话。
+        """
         session = self._sessions.get(str(group_id))
         if session is None or message_id is None:
             return
@@ -140,6 +215,14 @@ class FollowupStore:
             return
         session.message_ids.add(mid)
         self._index[mid] = str(group_id)
+        if self.history is not None and session.history_id:
+            try:
+                self.history.add_message_ids(
+                    session.config_name, session.history_id, [mid]
+                )
+            except Exception as exc:
+                logger.warning(f"[追问] 归档消息 ID 失败：{exc}")
+        self._persist(session)
 
     def by_message_id(self, message_id, config_name: str = "") -> Optional[FollowupSession]:
         """
@@ -157,7 +240,7 @@ class FollowupStore:
         if group_id is not None:
             session = self._sessions.get(group_id)
             if session is not None and session.age_seconds() <= self.window_seconds:
-                return session
+                return None if session.closed else session
             if session is not None:
                 self._drop(group_id)
 
@@ -166,10 +249,16 @@ class FollowupStore:
 
     def _restore_from_history(self, message_id: str,
                               config_name: str) -> Optional[FollowupSession]:
-        """从历史记录恢复一个追问会话。"""
+        """
+        从历史记录恢复一个追问会话。
+
+        除首轮上下文（context.txt）与报告外，还会还原：
+          - 已追问的轮数与问答历史（followups.json）
+          - 日志摘要索引（由归档 zip 重建），使 `@日志` 附件与日志工具可用
+        """
         if self.history is None:
             return None
-        names = [config_name] if config_name else list(self.history._records.keys())
+        names = [config_name] if config_name else self._history_config_names()
         for name in names:
             if not name:
                 continue
@@ -197,18 +286,103 @@ class FollowupStore:
                     {"role": "assistant", "content": record.report},
                 ],
                 history_id=record.id,
+                digest=self._restore_digest(name, record),
                 last_active=time.time(),
             )
+            # 还原追问轮数与问答历史
+            self._apply_saved_state(session, name)
+            if session.closed:
+                # 会话已结束（达到轮数上限或用户关闭）：不再恢复
+                logger.info(f"[追问] 历史 #{record.id} 的会话已结束，不恢复")
+                return None
+
             # 载入内存，后续轮次不再重复读盘
             self._sessions[session.group_id] = session
             for mid in session.message_ids:
                 self._index[mid] = session.group_id
             logger.info(
                 f"[追问] 已从历史 #{record.id} 恢复会话：群 {session.group_id}"
-                f" / {record.file_name}"
+                f" / {record.file_name}（已追问 {session.turns} 轮）"
             )
             return session
         return None
+
+    def _history_config_names(self) -> list[str]:
+        """当前历史存储中已知的全部配置名。"""
+        names = list(getattr(self.history, "_records", {}) or {})
+        lister = getattr(self.history, "list_configs", None)
+        if callable(lister):
+            try:
+                names.extend(lister())
+            except Exception as exc:
+                logger.warning(f"[追问] 枚举历史配置失败：{exc}")
+        return sorted({n for n in names if n})
+
+    def _apply_saved_state(self, session: FollowupSession, name: str) -> None:
+        """把落盘的会话状态（追问问答 / 轮数 / 消息 ID）合并进恢复的会话。"""
+        getter = getattr(self.history, "get_followup", None)
+        if not callable(getter):
+            return
+        try:
+            state = getter(name, session.history_id)
+        except Exception as exc:
+            logger.warning(f"[追问] 读取会话状态失败：{exc}")
+            return
+        if not isinstance(state, dict):
+            return
+
+        for item in (state.get("messages") or []):
+            if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
+                session.messages.append({
+                    "role": str(item["role"]),
+                    "content": str(item.get("content") or ""),
+                })
+        try:
+            session.turns = max(0, int(state.get("turns") or 0))
+        except (TypeError, ValueError):
+            session.turns = 0
+        session.closed = bool(state.get("closed"))
+
+        for mid in (state.get("message_ids") or []):
+            mid = str(mid or "").strip()
+            if mid:
+                session.message_ids.add(mid)
+        # 落盘的 last_active 用于判断会话是否仍在保留期内
+        try:
+            saved = float(state.get("last_active") or 0)
+        except (TypeError, ValueError):
+            saved = 0.0
+        if saved > 0:
+            session.last_active = saved
+
+    def _restore_digest(self, name: str, record) -> Any:
+        """
+        由归档 zip 重建一个「仅索引」的摘要结果。
+
+        重启后没有原始 DigestResult，但附件与日志工具只需要 zip 路径
+        和成员列表，因此这里重新扫描归档包即可。
+        """
+        if self.history is None:
+            return None
+        try:
+            zip_path = self.history.read_zip(name, record)
+        except Exception as exc:
+            logger.warning(f"[追问] 读取归档日志包失败：{exc}")
+            return None
+        if zip_path is None:
+            return None
+        try:
+            from features.maa.log_digest import describe_zip
+
+            digest = describe_zip(str(zip_path))
+        except Exception as exc:
+            logger.warning(f"[追问] 重建日志索引失败：{exc}")
+            return None
+        if digest is not None:
+            logger.info(
+                f"[追问] 已由归档日志包重建索引（{len(digest.all_members)} 个成员）"
+            )
+        return digest
 
     def get(self, group_id: str) -> Optional[FollowupSession]:
         """取出该群未过期的会话。"""
@@ -222,7 +396,7 @@ class FollowupStore:
         return session
 
     def append(self, group_id: str, question: str, answer: str) -> None:
-        """追加一轮问答。"""
+        """追加一轮问答（达到轮数上限时结束会话并落盘标记）。"""
         session = self.get(group_id)
         if session is None:
             return
@@ -232,18 +406,66 @@ class FollowupStore:
         session.touch()
         if session.turns >= self.max_turns:
             logger.info(f"[追问] 群 {group_id} 达到轮数上限，会话结束")
+            session.closed = True
+            self._persist(session)
             self._drop(str(group_id))
+            return
+        self._persist(session)
 
     def close(self, group_id: str) -> bool:
-        """主动结束会话。"""
+        """主动结束会话（同时清除已落盘状态，重启后不再恢复）。"""
         key = str(group_id)
-        existed = key in self._sessions
+        session = self._sessions.get(key)
+        existed = session is not None
+        if session is not None:
+            self._forget(session)
+        else:
+            # 内存里没有：可能是重启后由历史归档恢复的会话
+            existed = self._forget_persisted(key)
         self._drop(key)
         return existed
 
+    def close(self, group_id: str) -> bool:
+        """主动结束会话（落盘标记，重启后也不再恢复）。"""
+        key = str(group_id)
+        session = self._sessions.get(key)
+        existed = session is not None
+        if session is not None:
+            self._forget(session)
+        else:
+            # 内存里没有：可能是重启后由历史归档恢复的会话
+            existed = self._mark_closed_persisted(key)
+        self._drop(key)
+        return existed
+
+    def _mark_closed_persisted(self, group_id: str) -> bool:
+        """把落盘的会话状态标记为已结束（用于内存中无会话的 close）。"""
+        if self.history is None:
+            return False
+        removed = False
+        for name in self._history_config_names():
+            try:
+                states = self.history.load_followups(name) or {}
+                for key, state in list(states.items()):
+                    if not isinstance(state, dict):
+                        continue
+                    record = self.history.find_by_id(
+                        name, str(state.get("history_id") or "")
+                    )
+                    if record is None or record.group_id != str(group_id):
+                        continue
+                    state["closed"] = True
+                    self.history.set_followup(name, key, state)
+                    removed = True
+            except Exception as exc:
+                logger.warning(f"[追问] 结束落盘会话失败（{name}）：{exc}")
+        return removed
+
     def describe(self, group_id: str) -> str:
-        """会话状态描述，供指令展示。"""
+        """会话状态描述，供指令展示（内存无会话时尝试从历史恢复）。"""
         session = self.get(group_id)
+        if session is None:
+            session = self._restore_latest_for_group(group_id)
         if session is None:
             return "当前群没有进行中的追问答疑会话。"
         remain_min = max(0, int((self.window_seconds - session.age_seconds()) / 60))
@@ -254,6 +476,25 @@ class FollowupStore:
             f"剩余有效时间：约 {remain_min} 分钟\n"
             f"提示：引用 Bot 的分析结果消息即可提问。"
         )
+
+    def _restore_latest_for_group(self, group_id: str) -> Optional[FollowupSession]:
+        """重启后按群恢复最近一条历史记录对应的会话（供指令查询状态）。"""
+        if self.history is None:
+            return None
+        for name in self._history_config_names():
+            try:
+                record = self.history.find_latest_by_group(name, str(group_id))
+            except Exception as exc:
+                logger.warning(f"[追问] 查询历史失败（{name}）：{exc}")
+                continue
+            if record is None:
+                continue
+            anchor = next((mid for mid in record.message_ids if mid), "")
+            if anchor:
+                session = self._restore_from_history(anchor, name)
+                if session is not None:
+                    return session
+        return None
 
     @property
     def count(self) -> int:

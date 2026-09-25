@@ -289,6 +289,11 @@ class DebugLLMClient(LLMClient):
         self.tool_results: list[str] = []         # 收到的工具执行结果
         # 可覆盖的模拟报告（测试可注入含特定附件指令的报告）
         self.report_override: str = ""
+        # 工具循环行为：normal=首轮调工具后收敛；always=每轮都调工具直到上限。
+        # 用于复现「模型一直检索、从不输出正文」这一真实场景。
+        self.tool_behavior: str = "normal"
+        # 收敛调用是否返回空正文（模拟模型不配合收敛）
+        self.converge_empty: bool = False
 
     @property
     def report(self) -> str:
@@ -326,29 +331,58 @@ class DebugLLMClient(LLMClient):
             (str(m.get("content") or "") for m in messages if m.get("role") == "user"), ""
         ))
 
-        # 第一轮且工具可用：请求一次搜索，验证工具链路
+        # 第一轮且工具可用：请求一组检索，验证完整工具链路。
+        # 日志工具与仓库工具都会调用（若可用），这样测试既能断言
+        # 「工具被提供」，也能断言「工具真的读到了内容」。
         if tools and not self.tool_results:
-            # 优先用日志工具（若可用），否则用仓库工具
             names = {t.get("function", {}).get("name") for t in tools}
+            calls: list[ToolCall] = []
             if "log_search" in names:
-                call = ToolCall(
+                calls.append(ToolCall(
                     id="debug_call_log",
                     name="log_search",
                     arguments={"pattern": "ERROR"},
                     raw_arguments='{"pattern": "ERROR"}',
-                )
-            else:
-                call = ToolCall(
-                    id="debug_call_1",
+                ))
+            if "search_repo" in names:
+                calls.append(ToolCall(
+                    id="debug_call_repo",
                     name="search_repo",
                     arguments={"pattern": "StartUp"},
                     raw_arguments='{"pattern": "StartUp"}',
+                ))
+            if "read_file" in names:
+                calls.append(ToolCall(
+                    id="debug_call_read",
+                    name="read_file",
+                    arguments={"path": "assets/resource/pipeline/StartUp.json"},
+                    raw_arguments='{"path": "assets/resource/pipeline/StartUp.json"}',
+                ))
+            if calls:
+                return ChatMessage(
+                    content="",
+                    tool_calls=calls,
+                    finish_reason="tool_calls",
                 )
+
+        # always 模式：每轮都请求工具，直到上层用尽轮次。
+        # 复现「模型全程只检索、从不输出正文」——真实模型常见行为。
+        if tools and self.tool_behavior == "always":
+            call = ToolCall(
+                id=f"debug_call_loop_{len(self.tool_rounds)}",
+                name="log_search",
+                arguments={"pattern": "ERROR"},
+                raw_arguments='{"pattern": "ERROR"}',
+            )
             return ChatMessage(
                 content="",
                 tool_calls=[call],
                 finish_reason="tool_calls",
             )
+
+        # 收敛阶段（上层已用尽轮次、不再传 tools）：可模拟空正文
+        if self.converge_empty and not tools:
+            return ChatMessage(content="", finish_reason="stop")
 
         # 之后直接给结论
         return ChatMessage(content=self.report, finish_reason="stop")
@@ -377,6 +411,14 @@ class DebugManager:
         self.followup: Optional[FollowupStore] = None
         self.messages: Optional[MessageHandler] = None
         self.history: Optional[HistoryStore] = None
+        # 构建时的原始配置，供「真实重启」测试在子进程里原样重建
+        self.cfg: dict = {}
+        self.data_dir: str = str(getattr(service.dm, "_dir", "data/test"))
+        # 模拟报告覆盖（由测试 setup 设置），重启后需复现
+        self.model_report: str = ""
+        # 模拟模型的工具循环行为与收敛行为，重启后同样需复现
+        self.llm_tool_behavior: str = ""
+        self.llm_converge_empty: bool = False
 
     @classmethod
     def from_config(cls, cfg: dict, data_dir: str = "data/test") -> "DebugManager":
@@ -411,6 +453,8 @@ class DebugManager:
         manager.followup = followup
         manager.messages = messages
         manager.history = history
+        manager.cfg = cfg
+        manager.data_dir = str(dm._dir)
         return manager
 
     # ── 事件注入 ──

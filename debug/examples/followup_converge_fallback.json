@@ -1,0 +1,81 @@
+{
+  "name": "追问收敛兜底 — 模型连收敛也不配合时不能静默失败",
+  "description": "极端情况：模型全程只调工具（无正文），且被要求收敛后仍返回空正文。此时不应给用户一句无信息量的「没有获得有效回复」，而应给出可读的兜底说明（并提示可重试/补充信息）。",
+  "setup": {
+    "mock_repo": {
+      "assets/resource/pipeline/StartUp.json": {
+        "StartUp": {"desc": "启动", "action": "Click"}
+      }
+    },
+    "configs": {
+      "顽固组": {
+        "listen_groups": ["888888"],
+        "notify_group": "888888",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaXXX-logs",
+          "followup_enabled": true,
+          "followup_window_minutes": 0,
+          "history_enabled": true,
+          "repo": {
+            "enabled": true,
+            "mode": "agent",
+            "max_tool_rounds": 2,
+            "max_tool_calls_per_round": 2
+          }
+        },
+        "commands": {
+          "prefix": "/maa",
+          "owners": ["90001"],
+          "read_level": 0,
+          "write_level": 2,
+          "followup_level": 0
+        }
+      }
+    },
+    "files": {
+      "888888": [
+        {"file_name": "MaaXXX-logs-20260101-120000.zip", "file_id": "fid_stub", "size": 2048}
+      ]
+    },
+    "history": {"config": "顽固组", "reset": true}
+  },
+  "scenarios": [
+    {
+      "name": "分析 — 正常输出报告（建立追问会话）",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 888888,
+        "user_id": 90001,
+        "file": {"id": "fid_stub", "name": "MaaXXX-logs-20260101-120000.zip", "size": 2048}
+      },
+      "capture": {"analysis_msg": "LAST_BOT_MSG"},
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果"
+      }
+    },
+    {
+      "name": "追问 — 模型只调工具且连收敛都不配合，仍须给出可读回复",
+      "llm": {"tool_behavior": "always", "converge_empty": true},
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 888888,
+        "user_id": 55555,
+        "raw_message": "看看是哪几个节点的问题",
+        "message": [
+          {"type": "reply", "data": {"id": "$analysis_msg"}},
+          {"type": "text", "data": {"text": "看看是哪几个节点的问题"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "api_actions_include": "send_group_msg",
+        "reply_not_contains": "没有获得有效回复"
+      }
+    }
+  ]
+}

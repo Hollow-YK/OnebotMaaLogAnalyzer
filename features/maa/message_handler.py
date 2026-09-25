@@ -86,6 +86,9 @@ class MessageHandler:
         if settings is not None:
             # 会话有效期跟随设置（0 = 跟随历史保留期）
             self.followup.set_window(self._window_minutes(settings))
+            self.followup.set_max_turns(
+                int(getattr(settings, "followup_max_turns", 10) or 10)
+            )
 
         config_name = cfg.name if cfg is not None else ""
         session = self.followup.by_message_id(reply_id, config_name)
@@ -110,8 +113,9 @@ class MessageHandler:
 
         logger.info(f"[追问] 群 {group_id} 引用 {reply_id} 提问：{question[:60]}")
 
-        # 复用本次分析已就绪的仓库 provider，使追问也能附带项目内文件
-        provider = self.analyzer._repos.get(config_name)
+        # 复用本次分析已就绪的仓库 provider；重启后内存缓存为空，
+        # 这里按配置重建并确保就绪，否则仓库工具与 @项目 附件都会失效。
+        provider = await self.analyzer.ensure_repo_provider(config_name, settings)
         answer = await self.analyzer.answer_followup(
             settings=settings,
             messages=session.messages,
@@ -120,7 +124,17 @@ class MessageHandler:
             provider=provider,
         )
         if answer is None or not answer.text:
-            await self.s.send_text(int(group_id), "抱歉，本次追问没有获得有效回复，请稍后重试。")
+            # 模型没给出任何可用内容（如全程只调工具、收敛也失败）。
+            # 给一句可操作、可区分原因的提示，而不是笼统的「无效回复」。
+            logger.warning(
+                f"[追问] 群 {group_id} 未获得有效回答"
+                f"（工具可用={provider is not None or getattr(session, 'digest', None) is not None}）"
+            )
+            await self.s.send_text(
+                int(group_id),
+                "这次追问没能整理出结论（可能是问题范围太大或检索未命中）。\n"
+                "可以试着把问题说得更具体，或换一种问法再引用一次。",
+            )
             return
 
         self.followup.append(group_id, question, answer.text)

@@ -36,6 +36,8 @@ logger = logging.getLogger("Maa.History")
 _RECORDS_FILE = "records.json"
 _CONTEXT_FILE = "context.txt"
 _ZIP_FILE = "source.zip"
+# 追问会话状态（按「群 + 记录」保存，使重启后仍能继续追问）
+_FOLLOWUP_FILE = "followups.json"
 
 # 历史目录名（位于各配置目录下）
 HISTORY_DIR_NAME = "history"
@@ -81,6 +83,7 @@ class HistoryStore:
     def __init__(self, data_dir: str | Path):
         self._data_dir = Path(data_dir)
         self._records: dict[str, list[HistoryRecord]] = {}
+        self._followups: dict[str, dict] = {}
         self._loaded = False
         self.last_cleanup: float = 0.0
 
@@ -96,6 +99,9 @@ class HistoryStore:
 
     def _records_path(self, config_name: str) -> Path:
         return self._config_dir(config_name) / _RECORDS_FILE
+
+    def _followups_path(self, config_name: str) -> Path:
+        return self._config_dir(config_name) / _FOLLOWUP_FILE
 
     def record_dir(self, config_name: str, record_id: str) -> Path:
         return self._config_dir(config_name) / str(record_id)
@@ -143,6 +149,65 @@ class HistoryStore:
             tmp.replace(path)
         except OSError as exc:
             logger.warning(f"[历史] {config_name} records.json 写入失败：{exc}")
+
+    # ════════════════════════════════════════════════════════════
+    # 追问会话持久化
+    # ════════════════════════════════════════════════════════════
+
+    def load_followups(self, config_name: str) -> dict:
+        """读取某配置的追问会话状态（带缓存）。"""
+        if config_name in self._followups:
+            return self._followups[config_name]
+
+        path = self._followups_path(config_name)
+        data: dict = {}
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    data = {
+                        str(k): v for k, v in raw.items()
+                        if isinstance(v, dict)
+                    }
+            except Exception as exc:
+                logger.warning(f"[历史] {config_name} followups.json 读取失败：{exc}")
+        self._followups[config_name] = data
+        return data
+
+    def save_followups(self, config_name: str) -> None:
+        """持久化某配置的追问会话状态（原子写）。"""
+        data = self._followups.get(config_name)
+        if data is None:
+            return
+        path = self._followups_path(config_name)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+        except OSError as exc:
+            logger.warning(f"[历史] {config_name} followups.json 写入失败：{exc}")
+
+    def set_followup(self, config_name: str, key: str,
+                     state: dict) -> None:
+        """保存（或覆盖）某个追问会话状态。key 通常为历史记录 ID。"""
+        if not config_name or not key:
+            return
+        self.load_followups(config_name)[str(key)] = dict(state or {})
+        self.save_followups(config_name)
+
+    def get_followup(self, config_name: str, key: str) -> Optional[dict]:
+        """取出某个追问会话状态。"""
+        return self.load_followups(config_name).get(str(key))
+
+    def remove_followup(self, config_name: str, key: str) -> None:
+        """删除某个追问会话状态（会话结束 / 历史记录被清理时调用）。"""
+        data = self.load_followups(config_name)
+        if data.pop(str(key), None) is not None:
+            self.save_followups(config_name)
 
     # ════════════════════════════════════════════════════════════
     # 新增记录
@@ -224,6 +289,61 @@ class HistoryStore:
             if mid in record.message_ids:
                 return record
         return None
+
+    def find_by_id(self, config_name: str,
+                   record_id: str) -> Optional[HistoryRecord]:
+        """通过记录 ID 定位历史记录。"""
+        rid = str(record_id or "").strip()
+        if not rid:
+            return None
+        for record in self.load(config_name):
+            if record.id == rid:
+                return record
+        return None
+
+    def find_latest_by_group(self, config_name: str,
+                             group_id: str) -> Optional[HistoryRecord]:
+        """取某群最近一条历史记录（用于恢复追问会话）。"""
+        gid = str(group_id or "").strip()
+        if not gid:
+            return None
+        for record in reversed(self.load(config_name)):
+            if record.group_id == gid:
+                return record
+        return None
+
+    def add_message_ids(self, config_name: str, record_id: str,
+                        message_ids: Optional[list]) -> bool:
+        """
+        把消息 ID 追加到历史记录（去重）并落盘。
+
+        追问回复的消息 ID 必须一并归档，否则重启后引用追问回复无法定位会话。
+        """
+        record = self.find_by_id(config_name, record_id)
+        if record is None:
+            return False
+        changed = False
+        existing = {str(m) for m in record.message_ids}
+        for mid in (message_ids or []):
+            mid = str(mid or "").strip()
+            if mid and mid not in existing:
+                record.message_ids.append(mid)
+                existing.add(mid)
+                changed = True
+        if changed:
+            self.save(config_name)
+        return changed
+
+    def list_configs(self) -> list[str]:
+        """列出已有历史记录的配置名（含仅存在于磁盘、当前未加载的）。"""
+        names = set(self._records)
+        try:
+            for child in self._data_dir.iterdir():
+                if child.is_dir() and (child / HISTORY_DIR_NAME).is_dir():
+                    names.add(child.name)
+        except OSError:
+            pass
+        return sorted(n for n in names if n)
 
     def read_context(self, config_name: str, record: HistoryRecord) -> str:
         """读取记录归档的追问上下文。"""
@@ -307,6 +427,8 @@ class HistoryStore:
         for record in expired:
             result.freed_bytes += self._remove_record(config_name, record)
             result.removed += 1
+            # 记录已删除：对应的追问会话状态也没有意义了
+            self.remove_followup(config_name, record.id)
 
         self._records[config_name] = survivors
         self.save(config_name)

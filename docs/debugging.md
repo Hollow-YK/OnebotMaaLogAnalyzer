@@ -96,7 +96,7 @@ curl http://127.0.0.1:8765/debug/configs
 ### 运行全部套件
 
 ```bash
-python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;cfg={'bot':{'data_dir':'data/test','configs':{}}};[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config(cfg)))) for n in ('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety')]"
+python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;cfg={'bot':{'data_dir':'data/test','configs':{}}};[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config(cfg)))) for n in ('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach','followup_tool_loop','followup_converge_fallback')]"
 ```
 
 > 每次运行前先删除 `data/test`，否则残留配置会导致群多归属 → `resolve_config` 返回 `None` 而误判失败。
@@ -111,6 +111,30 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `commands_test.json` | 指令权限 / 附图 / 追问答疑 |
 | `history_test.json` | 历史归档 / 周期清理 / 跨天追问 |
 | `attachment_safety.json` | 附件来源 / 相对路径 / 敏感文件防护 |
+| `followup_restart.json` | **重启后继续追问**（真实子进程重启） |
+| `followup_repo.json` | 重启后 agent 模式仓库工具仍可用 |
+| `followup_repo_attach.json` | 重启后 `@项目` 附件仍可取到 |
+| `followup_tool_loop.json` | 模型只检索不输出正文时仍须给出回答 |
+| `followup_converge_fallback.json` | 模型连收敛都不配合时的兜底回复 |
+
+### 真实重启测试
+
+场景加 `"restart": true` 后，该场景会在**全新子进程**里执行：
+
+```text
+父进程 ──JSON任务──▶ python -m debug.worker ──重建整条管线──▶ 注入事件
+                                                    │
+                                              仅磁盘数据延续
+```
+
+子进程会完整走一遍启动流程（`service.load()`、配置重读、历史重载），
+等价于 kill 后重新 `python main.py`，而不是在同一进程里清几个字典 ——
+因此能捕获任何依赖进程全局状态的缺陷。随后父进程也就地重建，
+使后续场景看到重启后的真实状态。
+
+> 调试 API 的 `message_id` 是本地计数器，重启时父进程会把计数续给子进程，
+> 避免新进程从 `100000` 重新发号、与重启前的 ID 撞号而**假通过**。
+> 真实 QQ 的 `message_id` 由服务端全局发号，不存在这个问题。
 
 ### setup 字段
 
@@ -123,6 +147,8 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `history` | 播种历史记录（`reset` 清空、每条的 `age_hours` 构造过期记录） |
 | `history_cleanup` | 播种后立即执行一次清理 |
 | `model_report` | 覆盖模拟模型的报告（测试特定附件指令 / 敏感文件请求） |
+| `llm_tool_behavior` | `normal`（首轮调工具后收敛）/ `always`（每轮都调直到上限） |
+| `llm_converge_empty` | 收敛调用返回空正文（模拟模型不配合收敛） |
 
 ### 场景字段
 
@@ -131,6 +157,8 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `event` | 要注入的事件 |
 | `assert` | 断言集合 |
 | `capture` | 捕获变量供后续场景引用（如 `{"analysis_msg": "LAST_BOT_MSG"}`） |
+| `restart` | **在全新子进程中执行本场景**（真实重启，验证落盘状态） |
+| `llm` | 本场景覆盖模型行为（`tool_behavior` / `converge_empty` / `report`） |
 | `preserve_followup` | 跨场景保留追问会话 |
 | `preserve_dedup` | 跨场景保留去重状态 |
 | `history_cleanup` | 注入事件前先清理历史 |
@@ -153,6 +181,11 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `api_segments_include` / `api_segments_exclude` | 消息段类型包含 / 不包含指定值（如 `image`） |
 | `prompt_contains` / `prompt_not_contains` | **用户提示词**（注入内容）包含 / 不包含 |
 | `system_prompt_contains` / `system_prompt_not_contains` | **系统提示词**（固定人设）包含 / 不包含 |
+| `tools_include` / `tools_exclude` | 向模型提供的工具名包含 / 不包含（如 `search_repo`） |
+| `tool_results_contains` | 工具**执行结果**中包含指定文本（证明工具真读到了内容） |
 | `no_error` | 无异常（`true` / `false`） |
 | `history_count` / `history_zips` / `history_no_zips` / `history_message_ids` | 历史归档状态 |
 | `files_exist` / `files_missing` | 相对 `data_dir` 的文件存在性（验证 `repos/` 缓存未被清理） |
+
+> `tools_include` 只能证明工具**被提供**，`tool_results_contains` 才能证明工具
+> **真的读到了内容**（例如仓库工具确实读到了 `assets/.../PVP.json`）。

@@ -190,7 +190,9 @@ def _check_assertions(assertions: dict, reply: Optional[str],
                       has_error: bool, prompts: Optional[list[str]] = None,
                       system_prompts: Optional[list[str]] = None,
                       segments: Optional[list[str]] = None,
-                      history: Optional[dict] = None) -> list[str]:
+                      history: Optional[dict] = None,
+                      tools: Optional[list[str]] = None,
+                      tool_results: Optional[list[str]] = None) -> list[str]:
     """
     检查断言，返回失败的断言描述列表。
 
@@ -315,6 +317,33 @@ def _check_assertions(assertions: dict, reply: Optional[str],
             if mid not in indexed:
                 failures.append(f"history_message_ids: 未记录消息 ID {mid!r}")
 
+    if "tools_include" in assertions:
+        available = set(tools or [])
+        for name in _as_list(assertions["tools_include"]):
+            if name not in available:
+                failures.append(
+                    f"tools_include: 未向模型提供工具 {name!r}（实际: {sorted(available)}）"
+                )
+
+    if "tools_exclude" in assertions:
+        available = set(tools or [])
+        for name in _as_list(assertions["tools_exclude"]):
+            if name in available:
+                failures.append(
+                    f"tools_exclude: 不应提供工具 {name!r}（实际: {sorted(available)}）"
+                )
+
+    if "tool_results_contains" in assertions:
+        joined = "\n".join(tool_results or [])
+        if not tool_results:
+            failures.append("tool_results_contains: 未捕获到任何工具执行结果")
+        else:
+            for expected in _as_list(assertions["tool_results_contains"]):
+                if expected not in joined:
+                    failures.append(
+                        f"tool_results_contains: 工具结果中未找到 {expected!r}"
+                    )
+
     return failures
 
 
@@ -354,6 +383,10 @@ def _apply_setup(manager: "DebugManager", setup: dict):
 
             manager.service.configs[name] = state
 
+            # 同步回 manager.cfg，使「真实重启」（子进程 / 就地重建）
+            # 能原样复现同一套夹具，包括临时物化的模拟仓库路径
+            _sync_cfg_entry(manager, name, spec, repo_path)
+
     # 播种历史记录（可指定 age_hours 构造过期记录）
     if "history" in setup:
         _seed_history(manager, setup["history"])
@@ -368,6 +401,49 @@ def _apply_setup(manager: "DebugManager", setup: dict):
     # 覆盖模拟模型的报告（用于测试特定附件指令 / 敏感文件请求）
     if "model_report" in setup and hasattr(manager.llm, "report_override"):
         manager.llm.report_override = str(setup["model_report"])
+        # 记录到 manager，使真实重启后仍复现同一份模拟报告
+        manager.model_report = str(setup["model_report"])
+    # 模拟模型在工具循环中的行为（normal / always）
+    if "llm_tool_behavior" in setup and hasattr(manager.llm, "tool_behavior"):
+        manager.llm.tool_behavior = str(setup["llm_tool_behavior"])
+        manager.llm_tool_behavior = str(setup["llm_tool_behavior"])
+    # 模拟模型收敛时返回空正文
+    if "llm_converge_empty" in setup and hasattr(manager.llm, "converge_empty"):
+        manager.llm.converge_empty = bool(setup["llm_converge_empty"])
+        manager.llm_converge_empty = bool(setup["llm_converge_empty"])
+
+
+def _apply_llm_overrides(manager: "DebugManager", spec) -> None:
+    """
+    按场景覆盖模拟模型的行为。
+
+    支持：
+      tool_behavior    normal / always（always = 每轮都调工具直到轮次上限）
+      converge_empty   收敛调用是否返回空正文
+      report           覆盖报告文本
+
+    未声明的字段回落到 setup 的全局设置（每场景先重置为全局值）。
+    """
+    llm = getattr(manager, "llm", None)
+    if llm is None:
+        return
+
+    # 先重置为 setup 级全局值，避免上一个场景的覆盖泄漏到本场景
+    if hasattr(llm, "tool_behavior"):
+        llm.tool_behavior = str(getattr(manager, "llm_tool_behavior", "") or "normal")
+    if hasattr(llm, "converge_empty"):
+        llm.converge_empty = bool(getattr(manager, "llm_converge_empty", False))
+    if hasattr(llm, "report_override"):
+        llm.report_override = str(getattr(manager, "model_report", "") or "")
+
+    if not isinstance(spec, dict):
+        return
+    if "tool_behavior" in spec and hasattr(llm, "tool_behavior"):
+        llm.tool_behavior = str(spec["tool_behavior"])
+    if "converge_empty" in spec and hasattr(llm, "converge_empty"):
+        llm.converge_empty = bool(spec["converge_empty"])
+    if "report" in spec and hasattr(llm, "report_override"):
+        llm.report_override = str(spec["report"])
 
 
 def _history_config_name(manager: "DebugManager", spec: dict) -> str:
@@ -376,6 +452,169 @@ def _history_config_name(manager: "DebugManager", spec: dict) -> str:
         return str(spec["config"])
     names = list(manager.service.configs)
     return names[0] if names else "默认"
+
+
+# ════════════════════════════════════════════════════════════════
+# 真实重启（子进程）
+# ════════════════════════════════════════════════════════════════
+
+def _run_in_subprocess(manager: "DebugManager", event: dict) -> dict:
+    """
+    在一个**全新子进程**里重建管线并注入事件，等价于 kill 后重新启动。
+
+    与进程内清字典不同，这里会真正走一遍启动流程（service.load()、
+    配置重读、历史重载），因此能捕获任何依赖进程全局状态的缺陷。
+    """
+    import subprocess
+    import sys as _sys
+
+    job = {
+        "cfg": getattr(manager, "cfg", {}) or {},
+        "data_dir": getattr(manager, "data_dir", "data/test"),
+        "event": event,
+        "files": _snapshot_mock_files(manager),
+        "model_report": str(getattr(manager, "model_report", "") or ""),
+        "llm_tool_behavior": str(getattr(manager, "llm_tool_behavior", "") or ""),
+        "llm_converge_empty": bool(getattr(manager, "llm_converge_empty", False)),
+        # 续用消息 ID 计数器：否则新进程从 100000 重新发号，
+        # 会与重启前已发出的 ID 撞号，让测试因「撞号」而非因「持久化」通过
+        "next_message_id": int(
+            getattr(manager.api, "_next_message_id", 100000) or 100000
+        ),
+    }
+    repo_root = Path(__file__).resolve().parent.parent
+
+    proc = subprocess.run(
+        [_sys.executable, "-m", "debug.worker"],
+        input=json.dumps(job, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(repo_root),
+        timeout=180,
+    )
+
+    from debug.worker import RESULT_MARKER
+
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith(RESULT_MARKER):
+            return json.loads(line[len(RESULT_MARKER):])
+    raise RuntimeError(
+        "子进程未返回结果。"
+        f"\nstdout: {(proc.stdout or '')[-2000:]}"
+        f"\nstderr: {(proc.stderr or '')[-2000:]}"
+    )
+
+
+class _SubprocessResult:
+    """子进程注入结果的轻量适配器，字段与 `DebugResult` 对齐。"""
+
+    def __init__(self, payload: dict):
+        self.reply = payload.get("reply")
+        self.replies = list(payload.get("replies") or [])
+        self.error = payload.get("error")
+        self.api_actions = [str(a) for a in (payload.get("api_actions") or [])]
+        self.api_count = int(payload.get("api_count") or 0)
+        self.segments = [str(s) for s in (payload.get("segments") or [])]
+        self.prompts = list(payload.get("prompts") or [])
+        self.system_prompts = list(payload.get("system_prompts") or [])
+        self.tools = [str(t) for t in (payload.get("tools") or [])]
+        self.tool_results = [str(t) for t in (payload.get("tool_results") or [])]
+        self.history = payload.get("history") or {}
+        self.last_message_id = payload.get("last_message_id") or 0
+
+    @classmethod
+    def from_result(cls, result, manager: "DebugManager") -> "_SubprocessResult":
+        """把进程内的 `DebugResult` 归一成同一形状。"""
+        segments: list[str] = []
+        for call in result.api_calls:
+            for kind in (call.params.get("segments") or []):
+                segments.append(str(kind))
+        return cls({
+            "reply": result.reply,
+            "replies": list(result.replies),
+            "error": result.error,
+            "api_actions": [c.action for c in result.api_calls],
+            "api_count": len(result.api_calls),
+            "segments": segments,
+            "prompts": list(getattr(manager.llm, "prompts", [])),
+            "system_prompts": list(getattr(manager.llm, "system_prompts", [])),
+            "tools": _tool_names(manager),
+            "tool_results": list(getattr(manager.llm, "tool_results", []) or []),
+            "history": _history_snapshot(manager),
+            "last_message_id": getattr(manager.api, "last_message_id", 0),
+        })
+
+
+def _tool_names(manager: "DebugManager") -> list[str]:
+    """收集本次实际提供给模型的工具名（跨轮次去重）。"""
+    names: list[str] = []
+    for round_tools in (getattr(manager.llm, "tool_rounds", None) or []):
+        for item in (round_tools or []):
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("function") or {}).get("name")
+            if name and name not in names:
+                names.append(str(name))
+    return names
+
+
+def _snapshot_mock_files(manager: "DebugManager") -> dict:
+    """导出已预置的群文件列表（内存态，重启后需重新注入）。"""
+    files: dict = {}
+    try:
+        for gid, items in (manager.api._files or {}).items():
+            files[str(gid)] = list(items)
+    except Exception:
+        pass
+    return files
+
+
+def _reload_manager(manager: "DebugManager", files: dict) -> None:
+    """
+    把父进程的 manager 就地重建为「刚启动」的状态。
+
+    与子进程重启配套使用：子进程负责证明全新进程能正常工作，
+    本函数让后续（未声明 restart 的）场景也看到重启后的真实状态。
+    群文件列表属于测试夹具（非业务状态），需重新注入。
+    """
+    from debug import DebugManager
+
+    # 消息 ID 计数器属于「服务端发号」，重启不该重号 —— 先记下再重建
+    next_id = int(getattr(manager.api, "_next_message_id", 100000) or 100000)
+
+    fresh = DebugManager.from_config(
+        getattr(manager, "cfg", {}) or {},
+        data_dir=getattr(manager, "data_dir", "data/test"),
+    )
+    for gid, items in (files or {}).items():
+        fresh.api.set_mock_files(int(gid), list(items))
+
+    # 模拟报告覆盖不是业务状态，属于测试夹具，重启后需保留
+    report = str(getattr(manager, "model_report", "") or "")
+    if report and hasattr(fresh.llm, "report_override"):
+        fresh.llm.report_override = report
+    if hasattr(fresh.llm, "tool_behavior"):
+        fresh.llm.tool_behavior = str(getattr(manager, "llm_tool_behavior", "") or "normal")
+    if hasattr(fresh.llm, "converge_empty"):
+        fresh.llm.converge_empty = bool(getattr(manager, "llm_converge_empty", False))
+
+    # 续用消息 ID 计数器，避免与重启前已发出的 ID 撞号
+    fresh.api._next_message_id = next_id
+
+    # 就地替换，保持测试循环持有的 manager 引用有效
+    manager.api = fresh.api
+    manager.service = fresh.service
+    manager.handler = fresh.handler
+    manager.llm = fresh.llm
+    manager.watcher = fresh.watcher
+    manager.followup = fresh.followup
+    manager.messages = fresh.messages
+    manager.history = fresh.history
+    manager.cfg = fresh.cfg
+    manager.data_dir = fresh.data_dir
+    manager.model_report = getattr(manager, "model_report", "")
 
 
 def _seed_history(manager: "DebugManager", spec: dict) -> None:
@@ -426,6 +665,34 @@ def _seed_history(manager: "DebugManager", spec: dict) -> None:
             record.created_at = time.time() - age_hours * 3600
 
     store.save(config_name)
+
+
+def _sync_cfg_entry(manager: "DebugManager", name: str, spec: dict,
+                    repo_path: str) -> None:
+    """把 setup 里的配置写回 manager.cfg，供真实重启时复现同一套夹具。"""
+    cfg = getattr(manager, "cfg", None)
+    if not isinstance(cfg, dict):
+        return
+    bot = cfg.setdefault("bot", {})
+    configs = bot.setdefault("configs", {})
+    entry = configs.get(name)
+    if not isinstance(entry, dict):
+        entry = {}
+        configs[name] = entry
+
+    entry["listen_groups"] = [str(g) for g in spec.get("listen_groups", [])]
+    if spec.get("notify_group"):
+        entry["notify_group"] = spec["notify_group"]
+
+    settings = spec.get("settings")
+    if isinstance(settings, dict):
+        cloned = json.loads(json.dumps(settings))
+        if repo_path:
+            cloned.setdefault("repo", {}).setdefault("path", repo_path)
+        entry["settings"] = cloned
+    commands = spec.get("commands")
+    if isinstance(commands, dict):
+        entry["commands"] = json.loads(json.dumps(commands))
 
 
 def _run_history_cleanup(manager: "DebugManager", spec) -> None:
@@ -552,6 +819,15 @@ async def run_test_file(file_path: str,
         if not scenario.get("preserve_followup") and manager.followup is not None:
             manager.followup._sessions.clear()
             manager.followup._index.clear()
+        # 场景可声明 llm 覆盖模拟模型行为（如只在某个场景让模型「只调工具」），
+        # 未声明时回落到 setup 的全局设置
+        _apply_llm_overrides(manager, scenario.get("llm"))
+        # 场景可声明 restart=true 来模拟**进程重启**：
+        # 在全新子进程里重建管线（真正的进程级重启），随后父进程也就地
+        # 重建，使后续场景看到重启后的真实状态。
+        restart = bool(scenario.get("restart"))
+        if restart:
+            _reload_manager(manager, _snapshot_mock_files(manager))
         # 场景可声明 preserve_dedup=true 来跨场景保留去重状态
         # （默认清空，使每个场景视为独立的上传）
         if not scenario.get("preserve_dedup") and manager.watcher is not None:
@@ -562,12 +838,21 @@ async def run_test_file(file_path: str,
         # 解析事件中的占位符（$LAST_BOT_MSG / $name）
         event = _resolve_placeholders(scenario.get("event", {}), manager, variables)
         try:
-            inject_result = await manager.inject_event(event)
+            # 重启场景走子进程，真正验证「新进程能否继续之前的追问」
+            sub = _run_in_subprocess(manager, event) if restart else None
+            inject_result = (
+                _SubprocessResult(sub) if sub is not None
+                else _SubprocessResult.from_result(
+                    await manager.inject_event(event), manager
+                )
+            )
             # 场景可在捕获事件后记下变量，供后续场景引用
             # （分析消息 ID 在追问后会漂移，必须先捕获）
             capture = scenario.get("capture")
             if isinstance(capture, dict):
-                last_id = getattr(manager.api, "last_message_id", 0)
+                last_id = getattr(inject_result, "last_message_id", 0) or getattr(
+                    manager.api, "last_message_id", 0
+                )
                 for var_name, expr in capture.items():
                     if str(expr).upper() in ("LAST_BOT_MSG", "$LAST_BOT_MSG"):
                         variables[str(var_name)] = str(last_id or 0)
@@ -577,21 +862,25 @@ async def run_test_file(file_path: str,
             assertions = _resolve_placeholders(
                 scenario.get("assert", {}), manager, variables
             )
-            api_actions = [c.action for c in inject_result.api_calls]
+            api_actions = inject_result.api_actions
             segments: list[str] = []
-            for call in inject_result.api_calls:
-                for kind in (call.params.get("segments") or []):
-                    segments.append(str(kind))
+            for kind in (getattr(inject_result, "segments", None) or []):
+                segments.append(str(kind))
             failures = _check_assertions(
                 assertions,
                 inject_result.reply,
                 api_actions,
-                len(inject_result.api_calls),
+                inject_result.api_count,
                 bool(inject_result.error),
-                list(getattr(manager.llm, "prompts", [])),
-                list(getattr(manager.llm, "system_prompts", [])),
+                list(getattr(inject_result, "prompts", None)
+                     or getattr(manager.llm, "prompts", [])),
+                list(getattr(inject_result, "system_prompts", None)
+                     or getattr(manager.llm, "system_prompts", [])),
                 segments,
-                _history_snapshot(manager),
+                getattr(inject_result, "history", None) or _history_snapshot(manager),
+                getattr(inject_result, "tools", None) or _tool_names(manager),
+                getattr(inject_result, "tool_results", None)
+                or list(getattr(manager.llm, "tool_results", []) or []),
             )
             failures.extend(_check_files(manager, assertions))
             result.failures = failures
