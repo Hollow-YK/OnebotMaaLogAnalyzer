@@ -71,9 +71,24 @@ async def _run(job: dict) -> dict:
         "segments": segments,
         "prompts": list(getattr(manager.llm, "prompts", [])),
         "system_prompts": list(getattr(manager.llm, "system_prompts", [])),
+        "tools": _tool_names(manager),
+        "tool_results": list(getattr(manager.llm, "tool_results", []) or []),
         "history": _history_snapshot(manager),
         "last_message_id": getattr(manager.api, "last_message_id", 0),
     }
+
+
+def _tool_names(manager) -> list[str]:
+    """收集本次实际提供给模型的工具名（跨轮次去重）。"""
+    names: list[str] = []
+    for round_tools in (getattr(manager.llm, "tool_rounds", None) or []):
+        for item in (round_tools or []):
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("function") or {}).get("name")
+            if name and name not in names:
+                names.append(str(name))
+    return names
 
 
 def _history_snapshot(manager) -> dict:

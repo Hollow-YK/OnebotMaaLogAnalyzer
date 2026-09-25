@@ -190,7 +190,9 @@ def _check_assertions(assertions: dict, reply: Optional[str],
                       has_error: bool, prompts: Optional[list[str]] = None,
                       system_prompts: Optional[list[str]] = None,
                       segments: Optional[list[str]] = None,
-                      history: Optional[dict] = None) -> list[str]:
+                      history: Optional[dict] = None,
+                      tools: Optional[list[str]] = None,
+                      tool_results: Optional[list[str]] = None) -> list[str]:
     """
     检查断言，返回失败的断言描述列表。
 
@@ -314,6 +316,33 @@ def _check_assertions(assertions: dict, reply: Optional[str],
         for mid in _as_list(assertions["history_message_ids"]):
             if mid not in indexed:
                 failures.append(f"history_message_ids: 未记录消息 ID {mid!r}")
+
+    if "tools_include" in assertions:
+        available = set(tools or [])
+        for name in _as_list(assertions["tools_include"]):
+            if name not in available:
+                failures.append(
+                    f"tools_include: 未向模型提供工具 {name!r}（实际: {sorted(available)}）"
+                )
+
+    if "tools_exclude" in assertions:
+        available = set(tools or [])
+        for name in _as_list(assertions["tools_exclude"]):
+            if name in available:
+                failures.append(
+                    f"tools_exclude: 不应提供工具 {name!r}（实际: {sorted(available)}）"
+                )
+
+    if "tool_results_contains" in assertions:
+        joined = "\n".join(tool_results or [])
+        if not tool_results:
+            failures.append("tool_results_contains: 未捕获到任何工具执行结果")
+        else:
+            for expected in _as_list(assertions["tool_results_contains"]):
+                if expected not in joined:
+                    failures.append(
+                        f"tool_results_contains: 工具结果中未找到 {expected!r}"
+                    )
 
     return failures
 
@@ -447,6 +476,8 @@ class _SubprocessResult:
         self.segments = [str(s) for s in (payload.get("segments") or [])]
         self.prompts = list(payload.get("prompts") or [])
         self.system_prompts = list(payload.get("system_prompts") or [])
+        self.tools = [str(t) for t in (payload.get("tools") or [])]
+        self.tool_results = [str(t) for t in (payload.get("tool_results") or [])]
         self.history = payload.get("history") or {}
         self.last_message_id = payload.get("last_message_id") or 0
 
@@ -466,9 +497,24 @@ class _SubprocessResult:
             "segments": segments,
             "prompts": list(getattr(manager.llm, "prompts", [])),
             "system_prompts": list(getattr(manager.llm, "system_prompts", [])),
+            "tools": _tool_names(manager),
+            "tool_results": list(getattr(manager.llm, "tool_results", []) or []),
             "history": _history_snapshot(manager),
             "last_message_id": getattr(manager.api, "last_message_id", 0),
         })
+
+
+def _tool_names(manager: "DebugManager") -> list[str]:
+    """收集本次实际提供给模型的工具名（跨轮次去重）。"""
+    names: list[str] = []
+    for round_tools in (getattr(manager.llm, "tool_rounds", None) or []):
+        for item in (round_tools or []):
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("function") or {}).get("name")
+            if name and name not in names:
+                names.append(str(name))
+    return names
 
 
 def _snapshot_mock_files(manager: "DebugManager") -> dict:
@@ -782,6 +828,9 @@ async def run_test_file(file_path: str,
                      or getattr(manager.llm, "system_prompts", [])),
                 segments,
                 getattr(inject_result, "history", None) or _history_snapshot(manager),
+                getattr(inject_result, "tools", None) or _tool_names(manager),
+                getattr(inject_result, "tool_results", None)
+                or list(getattr(manager.llm, "tool_results", []) or []),
             )
             failures.extend(_check_files(manager, assertions))
             result.failures = failures

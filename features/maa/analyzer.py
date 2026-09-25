@@ -899,6 +899,31 @@ class MaaAnalyzer:
     def _repo_data_dir(self) -> Path:
         return Path(self.s.dm._dir)
 
+    async def ensure_repo_provider(self, config_name: str,
+                                   settings: AnalysisSettings,
+                                   ) -> Optional[RepoProvider]:
+        """
+        取（必要时重建）**就绪**的 RepoProvider，供追问使用。
+
+        进程内分析后 `_repos` 里已有就绪的 provider，直接复用；
+        但**重启后内存缓存为空**，这里按当前配置重建并确保仓库可用 ——
+        否则仓库工具与 `@项目` 附件都会静默失效，AI 只能回答
+        「项目仓库不可用」。
+
+        任何失败只记日志并返回 None（追问退化为仅用摘要与日志包）。
+        """
+        provider = self._repo_provider(config_name, settings)
+        if provider is None:
+            return None
+        try:
+            if not await provider.ensure_ready():
+                logger.warning(f"[追问] 项目代码不可用：{provider.last_error}")
+                return None
+        except Exception as exc:
+            logger.warning(f"[追问] 准备项目代码失败：{exc}", exc_info=True)
+            return None
+        return provider
+
     async def _prepare_repo(self, config_name: str,
                             settings: AnalysisSettings,
                             prompt: str,

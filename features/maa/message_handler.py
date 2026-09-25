@@ -113,8 +113,9 @@ class MessageHandler:
 
         logger.info(f"[追问] 群 {group_id} 引用 {reply_id} 提问：{question[:60]}")
 
-        # 复用本次分析已就绪的仓库 provider，使追问也能附带项目内文件
-        provider = self.analyzer._repos.get(config_name)
+        # 复用本次分析已就绪的仓库 provider；重启后内存缓存为空，
+        # 这里按配置重建并确保就绪，否则仓库工具与 @项目 附件都会失效。
+        provider = await self.analyzer.ensure_repo_provider(config_name, settings)
         answer = await self.analyzer.answer_followup(
             settings=settings,
             messages=session.messages,

@@ -1,0 +1,181 @@
+{
+  "name": "追问的仓库可用性 — 重启后 agent 模式仍能检索项目代码",
+  "description": "复现并锁定：重启后追问时 RepoProvider 从内存缓存取不到，导致 AI 声称「项目仓库不可用」。重启后应按配置重建 provider 并确保仓库就绪，使仓库工具与 @项目 附件都可用。",
+  "setup": {
+    "mock_repo": {
+      "assets/resource/pipeline/StartUp.json": {
+        "StartUp": {
+          "desc": "启动游戏并等待主界面",
+          "recognition": {
+            "type": "OCR",
+            "param": {"expected": ["开始"], "roi": [640, 360, 200, 80], "threshold": 0.9}
+          },
+          "action": "Click"
+        }
+      },
+      "assets/resource/pipeline/PVP.json": {
+        "PVP_Click:StartBattle": {
+          "desc": "点击开始战斗",
+          "recognition": {
+            "type": "TemplateMatch",
+            "param": {
+              "template": ["UI/Combat/Start2.png"],
+              "roi": [971, 630, 300, 80],
+              "threshold": 0.7
+            }
+          },
+          "action": "Click"
+        }
+      }
+    },
+    "configs": {
+      "仓库组": {
+        "listen_groups": ["555555"],
+        "notify_group": "555555",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaXXX-logs",
+          "followup_enabled": true,
+          "followup_window_minutes": 0,
+          "history_enabled": true,
+          "history_period_hours": 24,
+          "history_keep_periods": 2,
+          "repo": {
+            "enabled": true,
+            "mode": "agent",
+            "max_tool_rounds": 3,
+            "max_tool_calls_per_round": 2
+          }
+        },
+        "commands": {
+          "prefix": "/maa",
+          "owners": ["90001"],
+          "read_level": 0,
+          "write_level": 2,
+          "followup_level": 0
+        }
+      },
+      "注入组": {
+        "listen_groups": ["666666"],
+        "notify_group": "666666",
+        "settings": {
+          "send_progress_message": false,
+          "file_prefix": "MaaXXX-logs",
+          "followup_enabled": true,
+          "followup_window_minutes": 0,
+          "history_enabled": true,
+          "history_period_hours": 24,
+          "history_keep_periods": 2,
+          "send_repo_images": true,
+          "send_files": true,
+          "max_report_files": 2,
+          "repo": {
+            "enabled": true,
+            "mode": "inject"
+          }
+        },
+        "commands": {
+          "prefix": "/maa",
+          "owners": ["90001"],
+          "read_level": 0,
+          "write_level": 2,
+          "followup_level": 0
+        }
+      }
+    },
+    "files": {
+      "555555": [
+        {"file_name": "MaaXXX-logs-20260101-120000.zip", "file_id": "fid_repo_restart", "size": 2048}
+      ],
+      "666666": [
+        {"file_name": "MaaXXX-logs-20260101-120000.zip", "file_id": "fid_repo_inject", "size": 2048}
+      ]
+    },
+    "history": {"config": "仓库组", "reset": true}
+  },
+  "scenarios": [
+    {
+      "name": "分析 — agent 模式提供仓库工具",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 555555,
+        "user_id": 90001,
+        "file": {"id": "fid_repo_restart", "name": "MaaXXX-logs-20260101-120000.zip", "size": 2048}
+      },
+      "capture": {"analysis_msg": "LAST_BOT_MSG"},
+      "assert": {
+        "no_error": true,
+        "reply_contains": "MaaXXX 日志分析结果",
+        "tools_include": ["search_repo", "read_file", "log_search"],
+        "history_count": 1
+      }
+    },
+    {
+      "name": "重启后追问 — 仓库工具仍可用（关键回归）",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 555555,
+        "user_id": 55555,
+        "raw_message": "StartUp 节点的阈值是多少？",
+        "message": [
+          {"type": "reply", "data": {"id": "$analysis_msg"}},
+          {"type": "text", "data": {"text": "StartUp 节点的阈值是多少？"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "结论",
+        "tools_include": ["search_repo", "read_file"],
+        "system_prompt_contains": "项目代码仓库"
+      }
+    },
+    {
+      "name": "重启后追问 — 仓库工具真的能读到项目文件",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 555555,
+        "user_id": 55555,
+        "raw_message": "确认一下 PVP 节点的定义",
+        "message": [
+          {"type": "reply", "data": {"id": "$analysis_msg"}},
+          {"type": "text", "data": {"text": "确认一下 PVP 节点的定义"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "结论",
+        "tool_results_contains": [
+          "StartUp",
+          "assets/resource/pipeline/StartUp.json"
+        ]
+      }
+    },
+    {
+      "name": "重启后追问 — 提示词不应声称仓库不可用",
+      "restart": true,
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 555555,
+        "user_id": 55555,
+        "raw_message": "再查一次项目代码",
+        "message": [
+          {"type": "reply", "data": {"id": "$analysis_msg"}},
+          {"type": "text", "data": {"text": "再查一次项目代码"}}
+        ],
+        "sender": {"user_id": 55555, "role": "member"}
+      },
+      "assert": {
+        "no_error": true,
+        "tools_include": "search_repo"
+      }
+    }
+  ]
+}

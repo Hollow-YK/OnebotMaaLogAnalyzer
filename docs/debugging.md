@@ -112,6 +112,8 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `history_test.json` | 历史归档 / 周期清理 / 跨天追问 |
 | `attachment_safety.json` | 附件来源 / 相对路径 / 敏感文件防护 |
 | `followup_restart.json` | **重启后继续追问**（真实子进程重启） |
+| `followup_repo.json` | 重启后 agent 模式仓库工具仍可用 |
+| `followup_repo_attach.json` | 重启后 `@项目` 附件仍可取到 |
 
 ### 真实重启测试
 
@@ -174,6 +176,11 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `api_segments_include` / `api_segments_exclude` | 消息段类型包含 / 不包含指定值（如 `image`） |
 | `prompt_contains` / `prompt_not_contains` | **用户提示词**（注入内容）包含 / 不包含 |
 | `system_prompt_contains` / `system_prompt_not_contains` | **系统提示词**（固定人设）包含 / 不包含 |
+| `tools_include` / `tools_exclude` | 向模型提供的工具名包含 / 不包含（如 `search_repo`） |
+| `tool_results_contains` | 工具**执行结果**中包含指定文本（证明工具真读到了内容） |
 | `no_error` | 无异常（`true` / `false`） |
 | `history_count` / `history_zips` / `history_no_zips` / `history_message_ids` | 历史归档状态 |
 | `files_exist` / `files_missing` | 相对 `data_dir` 的文件存在性（验证 `repos/` 缓存未被清理） |
+
+> `tools_include` 只能证明工具**被提供**，`tool_results_contains` 才能证明工具
+> **真的读到了内容**（例如仓库工具确实读到了 `assets/.../PVP.json`）。
