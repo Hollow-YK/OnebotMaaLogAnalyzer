@@ -16,7 +16,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from .data_manager import DataManager
 from .models import (
@@ -33,6 +33,12 @@ logger = logging.getLogger("Maa.Service")
 
 # 事件监听器签名
 EventListener = Callable[[dict], Awaitable[None]]
+
+# 运行时重建回调：async (new_cfg, notify_group) -> (ok, message)
+ReloadHandler = Callable[[dict, str], Awaitable[tuple[bool, str]]]
+
+# 与 main.MODES 保持一致（避免 core 反向依赖 main）
+ONEBOT_MODES = ("ws", "http_ws", "ws_reverse", "http_ws_reverse")
 
 
 def _normalize_keys(model_cls, data: dict) -> dict:
@@ -76,6 +82,77 @@ def _deep_merge(base: dict, patch: dict) -> dict:
     return result
 
 
+def _flatten(data: dict, prefix: tuple = ()) -> dict:
+    """把嵌套 dict 展平为 {路径元组: 值}，用于比较两个配置的差异。"""
+    flat: dict = {}
+    for key, value in data.items():
+        path = prefix + (key,)
+        if isinstance(value, dict) and value:
+            flat.update(_flatten(value, path))
+        else:
+            flat[path] = value
+    return flat
+
+
+def _unflatten(flat: dict) -> dict:
+    """_flatten 的逆操作。"""
+    result: dict = {}
+    for path, value in flat.items():
+        node = result
+        for key in path[:-1]:
+            node = node.setdefault(key, {})
+        node[path[-1]] = value
+    return result
+
+
+def _settings_delta(base: AnalysisSettings, raw: dict) -> dict:
+    """
+    把持久化的设置转换为相对全局设置的显式覆盖。
+
+    兼容旧版全量 dump：逐字段与全局比较，只保留真正不同的项。
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    normalized = _normalize_keys(AnalysisSettings, raw)
+    if not normalized:
+        return {}
+    try:
+        merged = AnalysisSettings.model_validate(
+            _deep_merge(base.model_dump(), normalized)
+        )
+    except Exception as exc:
+        logger.warning(f"settings.json 覆盖无效，已忽略：{exc}")
+        return {}
+    base_flat = _flatten(base.model_dump())
+    merged_flat = _flatten(merged.model_dump())
+    diff = {path: value for path, value in merged_flat.items()
+            if base_flat.get(path) != value}
+    return _unflatten(diff)
+
+
+def _remove_keys(base: dict, patch: dict) -> dict:
+    """
+    从 base 中删除 patch 声明过的键（递归）。
+
+    用于让 config.json 的「删除」生效：声明过的键不再保留历史覆盖，
+    删掉后自然回退到 /maa set 的值或全局设置。
+    """
+    result = dict(base)
+    for key, value in patch.items():
+        if key not in result:
+            continue
+        current = result[key]
+        if isinstance(current, dict) and isinstance(value, dict):
+            trimmed = _remove_keys(current, value)
+            if trimmed:
+                result[key] = trimmed
+            else:
+                result.pop(key, None)
+        else:
+            result.pop(key, None)
+    return result
+
+
 class MaaService:
     """核心服务 — 提供 Bot 能力 API + 配置管理 + 事件分发。"""
 
@@ -93,6 +170,10 @@ class MaaService:
 
         # ── 事件监听表 ──
         self._event_listeners: dict[str, list[EventListener]] = {}
+
+        # ── 热重载：登记待执行的运行时重建（在指令回复发出后执行）──
+        self._runtime_reload: Optional[ReloadHandler] = None
+        self._pending_reload: Optional[tuple[dict, str]] = None
 
     # ════════════════════════════════════════════════════════════
     # 事件注册
@@ -268,30 +349,74 @@ class MaaService:
         self.global_settings = self.dm.load_global_settings()
 
         for name in self.dm.list_configs():
-            info = self.dm.load_config_info(name)
-            settings = self._merge_settings(name)
-            commands = self.dm.load_config_commands(name)
-            jobs = self.dm.load_config_jobs(name)
-            max_id = max((j.id for j in jobs), default=0)
-
-            self.configs[name] = ConfigState(
-                name=name,
-                info=info,
-                settings=settings,
-                commands=commands,
-                jobs=jobs,
-                next_job_id=max_id + 1,
-            )
+            self.configs[name] = self._load_state(name)
 
         total = sum(len(c.info.listen_groups) for c in self.configs.values())
         logger.info(f"已加载: {len(self.configs)} 配置, 共监听 {total} 个群")
 
-    def _merge_settings(self, name: str) -> AnalysisSettings:
-        """配置级 settings.json 覆盖全局设置（仅覆盖显式设置的字段）。"""
-        overrides = self.dm.load_config_settings(name)
-        if not overrides:
-            return self.global_settings.model_copy(deep=True)
-        return self.apply_settings_overrides(self.global_settings, overrides, name)
+    def _load_state(self, name: str) -> ConfigState:
+        """
+        从数据目录读取单个配置的持久化状态。
+
+        设置文件只应包含 `/maa set` 的显式覆盖；旧版文件是全量 dump，
+        这里会转换为相对全局设置的增量，并标记为 legacy 以便下次保存时改写。
+        """
+        info = self.dm.load_config_info(name)
+        jobs = self.dm.load_config_jobs(name)
+        raw = self.dm.load_config_settings(name)
+        legacy = False
+        if raw is None:
+            overrides: dict = {}
+        elif raw.get("version") == self.dm.SETTINGS_VERSION:
+            overrides = raw.get("overrides") if isinstance(raw.get("overrides"), dict) else {}
+        else:
+            overrides = _settings_delta(self.global_settings, raw)
+            legacy = True
+
+        settings = self.apply_settings_overrides(self.global_settings, overrides, name)
+        return ConfigState(
+            name=name,
+            info=info,
+            settings=settings,
+            commands=self.dm.load_config_commands(name),
+            jobs=jobs,
+            next_job_id=max((j.id for j in jobs), default=0) + 1,
+            settings_overrides=overrides,
+            settings_legacy=legacy,
+        )
+
+    def recompute_settings(self, name: str) -> None:
+        """
+        按「全局 → config.json → /maa set」重新计算生效设置。
+
+        config.json 是声明式基线；`/maa set` 是显式运行时覆盖，优先级最高，
+        因此删除 config.json 中的键会回退到 /maa set 的值或全局默认值。
+        """
+        state = self.configs.get(name)
+        if state is None:
+            return
+        base = self.apply_settings_overrides(
+            self.global_settings, state.json_settings, name
+        )
+        state.settings = self.apply_settings_overrides(
+            base, state.settings_overrides, name
+        )
+
+    def set_setting_override(self, name: str, key: str, value: Any,
+                             nested: str = "") -> None:
+        """记录一次 `/maa set` 覆盖并立即重算生效设置。"""
+        state = self.configs.get(name)
+        if state is None:
+            return
+        if nested:
+            node = state.settings_overrides.get(nested)
+            if not isinstance(node, dict):
+                node = {}
+                state.settings_overrides[nested] = node
+            node[key] = value
+        else:
+            state.settings_overrides[key] = value
+        self.recompute_settings(name)
 
     @staticmethod
     def apply_settings_overrides(base: AnalysisSettings, overrides: dict,
@@ -318,48 +443,59 @@ class MaaService:
 
     def sync_from_config(self, configs_cfg: dict) -> None:
         """
-        用 config.json → bot.configs 同步监听群与通知群。
+        用 config.json → bot.configs 同步配置（与重启进程等价）。
 
-        config.json 是群组关系的声明式来源（便于部署时直接编辑）；
-        数据目录中的配置用于保存分析设置与任务记录。
+        - 不在 config.json 中的配置会被停用（数据目录保留，重新加回即可恢复）
+        - `settings` / `commands` 是声明式的：删掉某个键即回退到下一层
+        - 设置分层：全局 → config.json → `/maa set`
         """
         if not isinstance(configs_cfg, dict):
             return
+
+        removed = sorted(name for name in self.configs if name not in configs_cfg)
+        for name in removed:
+            self.configs.pop(name, None)
+        if removed:
+            logger.info(f"[配置] 已停用（不在 config.json 中）：{', '.join(removed)}")
 
         for name, spec in configs_cfg.items():
             if not isinstance(spec, dict):
                 continue
 
-            listen = {
+            state = self.configs.get(name)
+            if state is None:
+                state = self._load_state(name)
+                self.configs[name] = state
+
+            state.info.listen_groups = {
                 str(g).strip()
                 for g in (spec.get("listen_groups") or [])
                 if str(g).strip()
             }
             notify_raw = spec.get("notify_group")
             notify = str(notify_raw).strip() if notify_raw else None
-
-            state = self.configs.get(name)
-            if state is None:
-                state = ConfigState(name=name)
-                self.configs[name] = state
-
-            state.info.listen_groups = listen
             state.info.notify_group = notify or None
             self.dm.save_config_info(name, state.info)
 
-            # 配置级分析设置覆盖（可选）
-            overrides = spec.get("settings")
-            if isinstance(overrides, dict) and overrides:
-                merged = self.apply_settings_overrides(state.settings, overrides, name)
-                if merged is not state.settings:
-                    state.settings = merged
-                    self.dm.save_config_settings(name, state.settings)
+            # 设置：config.json 作为声明式基线，/maa set 覆盖在其上
+            state.json_settings = _normalize_keys(
+                AnalysisSettings, spec.get("settings") or {}
+            )
+            if state.settings_legacy:
+                # 旧版全量 dump 会把 config.json 的历史值也当成显式覆盖，
+                # 这里剔除 config.json 声明过的键，使「删除即回退」生效。
+                state.settings_overrides = _remove_keys(
+                    state.settings_overrides, state.json_settings
+                )
+                state.settings_legacy = False
+            self.recompute_settings(name)
+            self.dm.save_config_settings(name, state.settings_overrides)
 
-            # 指令配置（可选）
-            commands_spec = spec.get("commands")
-            if isinstance(commands_spec, dict) and commands_spec:
-                state.commands = self.apply_commands_overrides(state.commands, commands_spec, name)
-                self.dm.save_config_commands(name, state.commands)
+            # 指令：完全由 config.json 决定（删除段即回退默认值）
+            state.commands = self.apply_commands_overrides(
+                CommandConfig(), spec.get("commands") or {}, name
+            )
+            self.dm.save_config_commands(name, state.commands)
 
     @staticmethod
     def apply_commands_overrides(base: CommandConfig, overrides: dict,
@@ -390,11 +526,17 @@ class MaaService:
         if state is not None:
             self.dm.save_config(name, state)
 
-    def reload_from_file(self, path: str = "config.json") -> tuple[bool, str]:
-        """
-        热重载 config.json 中的群组与设置。
+    def register_runtime_reload(self, handler: ReloadHandler) -> None:
+        """注册运行时重建回调 async (new_cfg, notify_group) -> (ok, message)。"""
+        self._runtime_reload = handler
 
-        保留数据目录中的任务记录与运行时状态，仅重新同步声明式配置。
+    def request_reload(self, path: str = "config.json",
+                       notify_group: str = "") -> tuple[bool, str]:
+        """
+        解析并校验 config.json，登记一次待执行的运行时重建。
+
+        真正的重建由运行时在**指令回复发送之后**执行（apply_pending_reload），
+        否则会拆掉正在发送回复的连接。
         """
         import json as _json
         from pathlib import Path as _Path
@@ -406,15 +548,53 @@ class MaaService:
             cfg = _json.loads(target.read_text(encoding="utf-8"))
         except Exception as exc:
             return False, f"配置文件解析失败：{exc}"
+        if not isinstance(cfg, dict):
+            return False, "config.json 顶层必须是对象。"
 
-        configs_cfg = (cfg.get("bot") or {}).get("configs")
-        if not isinstance(configs_cfg, dict) or not configs_cfg:
-            return False, "config.json 中 bot.configs 为空，未做任何变更。"
+        ob = cfg.get("onebot") or {}
+        if not isinstance(ob, dict):
+            return False, "onebot 段必须是对象。"
+        mode = str(ob.get("mode", "http_ws"))
+        if mode not in ONEBOT_MODES:
+            return False, f"onebot.mode 无效：{mode}（可选：{', '.join(ONEBOT_MODES)}）"
 
-        self.sync_from_config(configs_cfg)
-        total = sum(len(c.info.listen_groups) for c in self.configs.values())
-        logger.info(f"[重载] 已重新加载 config.json：{len(self.configs)} 配置 / {total} 个群")
-        return True, f"已重新加载：{len(self.configs)} 个配置，共监听 {total} 个群。"
+        bot_cfg = cfg.get("bot") or {}
+        if not isinstance(bot_cfg, dict):
+            return False, "bot 段必须是对象。"
+        if not str(bot_cfg.get("data_dir", "data") or "").strip():
+            return False, "bot.data_dir 不能为空。"
+
+        configs_cfg = bot_cfg.get("configs")
+        if configs_cfg is None:
+            configs_cfg = {}
+        if not isinstance(configs_cfg, dict):
+            return False, "bot.configs 必须是对象。"
+
+        total = sum(
+            len([g for g in (spec.get("listen_groups") or []) if str(g).strip()])
+            for spec in configs_cfg.values() if isinstance(spec, dict)
+        )
+        self._pending_reload = (cfg, str(notify_group or ""))
+        return True, (
+            f"已读取 config.json：{len(configs_cfg)} 个配置 / {total} 个群。\n"
+            "正在按新配置重建运行时（日志另开新文件，LLM / OneBot 连接 / 数据目录重新初始化），"
+            "连接会短暂中断。"
+        )
+
+    def has_pending_reload(self) -> bool:
+        """是否有待执行的运行时重建。"""
+        return self._pending_reload is not None
+
+    async def apply_pending_reload(self) -> tuple[bool, str]:
+        """执行已登记的运行时重建（在指令回复发送之后调用）。"""
+        pending = self._pending_reload
+        self._pending_reload = None
+        if pending is None:
+            return True, ""
+        cfg, notify_group = pending
+        if self._runtime_reload is None:
+            return False, "当前进程没有注册运行时重建回调，请重启进程。"
+        return await self._runtime_reload(cfg, notify_group)
 
     # ════════════════════════════════════════════════════════════
     # 配置查找

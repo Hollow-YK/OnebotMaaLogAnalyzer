@@ -18,7 +18,7 @@
 /maa history clean     清理超期历史记录
 /maa history purge     清空全部分析历史
 /maa enable|disable    启用 / 停用本配置
-/maa reload            重新加载 config.json（不重启进程）
+/maa reload            按 config.json 重建运行时（等同重启，日志另开新文件）
 
 /maa followup close    结束当前追问会话
 ```

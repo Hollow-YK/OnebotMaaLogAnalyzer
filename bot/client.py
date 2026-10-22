@@ -38,6 +38,8 @@ class OneBotWS:
         self._ws: Optional[object] = None
         self._server = None
         self._connection_count = 0
+        # 事件分发任务：停止时统一取消，避免热重载后旧任务继续使用已关闭的连接
+        self._event_tasks: set[asyncio.Task] = set()
 
     def on_event(self, post_type: str, h: EventHandler):
         self._event_handlers.setdefault(post_type, []).append(h)
@@ -162,7 +164,9 @@ class OneBotWS:
                 continue
 
             if "post_type" in msg:
-                asyncio.create_task(self._dispatch_event(msg))
+                task = asyncio.create_task(self._dispatch_event(msg))
+                self._event_tasks.add(task)
+                task.add_done_callback(self._event_tasks.discard)
 
             elif "action" in msg:
                 # API 调用（反向模式下 OneBot 发给我们）
@@ -193,6 +197,16 @@ class OneBotWS:
 
     async def stop(self):
         self._running = False
+
+        # 取消事件分发任务（跳过调用 stop() 的当前任务，热重载正运行在其中）
+        current = asyncio.current_task()
+        pending = [t for t in self._event_tasks if t is not current]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._event_tasks.clear()
+
         ws = self._ws
         if ws is not None:
             try:

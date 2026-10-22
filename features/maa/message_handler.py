@@ -67,11 +67,21 @@ class MessageHandler:
                 )
                 await self._send_chunks(group_str, result.text,
                                         cfg.commands.reply_chunk_chars)
+                # 回复已发出，现在才真正重建运行时（否则会拆掉发送中的连接）
+                await self._apply_pending_reload()
                 return
 
         # ── 2. 追问答疑（必须引用 Bot 的分析结果消息）──
         reply_id = str(event.get("_reply_id") or "").strip()
         await self._handle_followup(group_str, user_id, text, reply_id, cfg)
+
+    async def _apply_pending_reload(self) -> None:
+        """若刚收到 `/maa reload`，在回复发出后执行运行时重建。"""
+        if not self.s.has_pending_reload():
+            return
+        ok, message = await self.s.apply_pending_reload()
+        if not ok:
+            logger.error(f"[重载] {message}")
 
     # ════════════════════════════════════════════════════════════
     # 追问答疑

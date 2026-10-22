@@ -354,3 +354,13 @@ class ConfigState:
     commands: CommandConfig = field(default_factory=CommandConfig)
     jobs: List[JobRecord] = field(default_factory=list)
     next_job_id: int = 1
+
+    # 设置来源分层（优先级从低到高）：
+    #   global_settings（data/settings.json）
+    #   → settings_overrides（/maa set，持久化到 data/<名称>/settings.json）
+    #   → json_settings（config.json 的 settings 段，仅内存）
+    # 这样从 config.json 删掉某个键就会回退到下一层，而不是被旧值粘住。
+    settings_overrides: dict = field(default_factory=dict)
+    json_settings: dict = field(default_factory=dict)
+    # 旧版 settings.json 是全量 dump，首次同步后会被改写成增量格式
+    settings_legacy: bool = False

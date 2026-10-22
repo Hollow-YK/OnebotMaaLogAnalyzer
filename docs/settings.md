@@ -4,6 +4,20 @@
 
 > 所有设置项都可通过 `/maa get` 查看、`/maa set <项> <值>` 修改（需写权限），见 [QQ 指令](commands.md)。
 
+## 优先级与删除语义
+
+生效值按以下顺序叠加（后者覆盖前者）：
+
+1. `data/settings.json`（全局默认）
+2. `config.json` → `bot.configs.<名称>.settings`（声明式基线，每次启动/重载重新读取）
+3. `/maa set`（显式运行时覆盖，持久化到 `data/<名称>/settings.json`）
+
+因此：
+
+- 从 `config.json` **删掉**某个键 → 回退到 `/maa set` 的值；没有则回退全局
+- `/maa set` 的值始终生效，并在重启 / `/maa reload` 后保留
+- 旧版本留下的 `data/<名称>/settings.json`（全量 dump）会在首次启动时自动转换为增量格式（`{"version": 2, "overrides": {...}}`）
+
 ## 触发与反馈
 
 | 设置项 | 默认 | 说明 |

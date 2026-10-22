@@ -183,15 +183,29 @@ class DataManager:
 
     # ==================== 单配置的 settings.json（覆盖全局） ====================
 
+    SETTINGS_VERSION = 2
+
     def load_config_settings(self, name: str) -> Optional[dict]:
-        """加载配置级设置覆盖（原始 dict，仅含显式设置项）。"""
+        """
+        加载配置级设置覆盖（原始 dict）。
+
+        新版文件形如 {"version": 2, "overrides": {...}}，只含 `/maa set` 的
+        显式覆盖；旧版文件是全量 dump，由 MaaService 转换为相对全局的增量。
+        """
         p = self._config_dir(name) / "settings.json"
         data = self._read_file(p)
         return data if isinstance(data, dict) else None
 
-    def save_config_settings(self, name: str, settings: AnalysisSettings):
+    def save_config_settings(self, name: str, overrides: dict):
+        """保存配置级覆盖（仅显式设置项；为空时删除文件）。"""
         p = self._config_dir(name) / "settings.json"
-        self._write_file(p, settings.model_dump(mode="json", by_alias=True))
+        if not overrides:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        self._write_file(p, {"version": self.SETTINGS_VERSION, "overrides": overrides})
 
     # ==================== 生命周期 ====================
 
@@ -202,6 +216,6 @@ class DataManager:
     def save_config(self, name: str, state) -> None:
         """持久化单个配置的全部数据。"""
         self.save_config_info(name, state.info)
-        self.save_config_settings(name, state.settings)
+        self.save_config_settings(name, state.settings_overrides)
         self.save_config_commands(name, state.commands)
         self.save_config_jobs(name, state.jobs)

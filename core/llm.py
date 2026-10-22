@@ -10,6 +10,7 @@ LLM 客户端 — 调用 OpenAI 兼容的 /chat/completions 接口。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -29,6 +30,14 @@ class ToolCall:
     arguments: dict = field(default_factory=dict)
     raw_arguments: str = ""
     parse_error: str = ""
+
+
+class LLMError(RuntimeError):
+    """LLM 调用错误，保留 HTTP 状态码供上层判断。"""
+
+    def __init__(self, message: str, status: int = 0):
+        super().__init__(message)
+        self.status = int(status or 0)
 
 
 @dataclass
@@ -87,6 +96,43 @@ class LLMClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
+
+    @classmethod
+    def from_config(cls, cfg: dict) -> "LLMClient":
+        """按 config.json 的 llm 段创建客户端。"""
+        cfg = cfg or {}
+        return cls(
+            base_url=str(cfg.get("base_url", "") or ""),
+            api_key=str(cfg.get("api_key", "") or ""),
+            model=str(cfg.get("model", "") or ""),
+            temperature=float(cfg.get("temperature", 0.2) or 0.2),
+            timeout_seconds=int(cfg.get("timeout_seconds", 900) or 900),
+            fallback_models=[str(m) for m in (cfg.get("fallback_models") or []) if m],
+            max_tokens=int(cfg.get("max_tokens", 0) or 0),
+        )
+
+    def apply_config(self, cfg: dict) -> None:
+        """就地应用新的 llm 配置（供热重载使用）。"""
+        fresh = type(self).from_config(cfg)
+        self.base_url = fresh.base_url
+        self.api_key = fresh.api_key
+        self.model = fresh.model
+        self.temperature = fresh.temperature
+        self.timeout_seconds = fresh.timeout_seconds
+        self.fallback_models = fresh.fallback_models
+        self.max_tokens = fresh.max_tokens
+
+    @property
+    def key_fingerprint(self) -> str:
+        """密钥指纹（sha256 前 8 位），用于日志比对且不泄露密钥。"""
+        if not self.api_key:
+            return "未配置"
+        return hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()[:8]
+
+    def describe(self) -> str:
+        return (f"端点 {self.base_url or '（未配置）'}"
+                f" · 模型 {self.model or '（未配置）'}"
+                f" · 密钥指纹 {self.key_fingerprint}")
 
     def _candidate_models(self, model_override: str = "") -> list[str]:
         models: list[str] = []
@@ -164,6 +210,17 @@ class LLMClient:
                         logger.info(f"[LLM] 备用模型 {model} 调用成功。")
                     return message
                 last_error = "返回内容为空"
+            except LLMError as exc:
+                last_error = str(exc)
+                logger.warning(f"[LLM] 模型 {model} 调用失败：{exc}")
+                if exc.status in (401, 403):
+                    # 候选模型共用同一密钥，换模型重试没有意义
+                    logger.error(
+                        f"[LLM] 鉴权失败（HTTP {exc.status}）：当前密钥指纹 "
+                        f"{self.key_fingerprint} 无效或无权限。"
+                        "请核对 config.json → llm.api_key，修改后需重启或 /maa reload。"
+                    )
+                    return None
             except Exception as exc:
                 last_error = str(exc)
                 logger.warning(f"[LLM] 模型 {model} 调用失败：{exc}")
@@ -178,7 +235,7 @@ class LLMClient:
             async with session.post(endpoint, json=payload, headers=self._headers()) as resp:
                 body = await resp.text()
                 if resp.status != 200:
-                    raise RuntimeError(f"HTTP {resp.status}: {body[:300]}")
+                    raise LLMError(f"HTTP {resp.status}: {body[:300]}", resp.status)
                 try:
                     data = json.loads(body)
                 except json.JSONDecodeError as exc:

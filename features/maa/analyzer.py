@@ -897,7 +897,8 @@ class MaaAnalyzer:
         repo_cfg = settings.repo
         if not repo_cfg or not repo_cfg.enabled or not repo_cfg.usable():
             return None
-        cache_key = f"{config_name}|{repo_cfg.path}|{repo_cfg.url}|{repo_cfg.branch}"
+        # 整个 repo 配置参与缓存键：任何字段（clone_depth / extensions 等）变更都会重建
+        cache_key = f"{config_name}|{repo_cfg.model_dump_json()}"
         cached = self._repos.get(config_name)
         if cached and getattr(cached, "_cache_key", "") == cache_key:
             return cached

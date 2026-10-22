@@ -374,6 +374,9 @@ def _apply_setup(manager: "DebugManager", setup: dict):
                 if repo_path:
                     raw_settings.setdefault("repo", {}).setdefault("path", repo_path)
                 state.settings = AnalysisSettings.model_validate(raw_settings)
+                # 夹具直接给出完整设置：登记为显式覆盖，
+                # 使后续 /maa set 重算时不会丢掉夹具里的其余字段
+                state.settings_overrides = state.settings.model_dump()
 
             raw_commands = spec.get("commands")
             if isinstance(raw_commands, dict):

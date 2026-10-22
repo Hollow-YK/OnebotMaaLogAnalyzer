@@ -22,6 +22,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from bot.api import OneBotAPI
 from bot.client import OneBotWS
@@ -48,14 +49,35 @@ logging.basicConfig(
 )
 
 
+def _unique_log_file(log_dir: Path) -> Path:
+    """生成不与已有文件冲突的日志文件名（同一秒内重载也不覆盖）。"""
+    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    path = log_dir / f"{stamp}.log"
+    index = 2
+    while path.exists():
+        path = log_dir / f"{stamp}_{index}.log"
+        index += 1
+    return path
+
+
 def setup_logging(log_cfg: dict):
-    """根据配置重新设置日志：控制台 + 可选文件输出。"""
+    """
+    根据配置重新设置日志：控制台 + 可选文件输出。
+
+    每次调用都会**另开一个新日志文件**（热重载等同于重启进程），
+    旧 handler 会先关闭，避免文件句柄泄漏。
+    """
     log_level = getattr(logging, str(log_cfg.get("log_level", "INFO")).upper(), logging.INFO)
     log_to_file = log_cfg.get("log_to_file", True)
     log_dir = log_cfg.get("log_dir", "logs")
 
     root = logging.getLogger()
-    root.handlers.clear()
+    for handler in list(root.handlers):
+        root.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
     root.setLevel(log_level)
 
     console = logging.StreamHandler()
@@ -66,7 +88,7 @@ def setup_logging(log_cfg: dict):
     if log_to_file:
         log_path = Path(log_dir)
         log_path.mkdir(parents=True, exist_ok=True)
-        log_file = log_path / f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+        log_file = _unique_log_file(log_path)
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(log_level)
         file_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
@@ -183,15 +205,7 @@ def load_config(path: str = "config.json") -> dict:
 
 
 def build_llm_client(llm_cfg: dict) -> LLMClient:
-    return LLMClient(
-        base_url=str(llm_cfg.get("base_url", "") or ""),
-        api_key=str(llm_cfg.get("api_key", "") or ""),
-        model=str(llm_cfg.get("model", "") or ""),
-        temperature=float(llm_cfg.get("temperature", 0.2) or 0.2),
-        timeout_seconds=int(llm_cfg.get("timeout_seconds", 900) or 900),
-        fallback_models=[str(m) for m in (llm_cfg.get("fallback_models") or []) if m],
-        max_tokens=int(llm_cfg.get("max_tokens", 0) or 0),
-    )
+    return LLMClient.from_config(llm_cfg)
 
 
 async def _history_cleanup_loop(history, service, interval_seconds: int = 3600):
@@ -219,145 +233,264 @@ async def _history_cleanup_loop(history, service, interval_seconds: int = 3600):
             logger.warning(f"[历史] 周期清理失败：{exc}")
 
 
+class BotRuntime:
+    """
+    Bot 运行时 —— 可整体停止并按新配置重建。
+
+    这样 `/maa reload` 与重启进程效果一致：日志另开新文件，
+    onebot / log / debug / bot.data_dir 等段全部重新初始化，
+    config.json 中删除的配置与设置也会真正失效。
+    """
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.api: Optional[OneBotAPI] = None
+        self.ws: Optional[OneBotWS] = None
+        self.dm: Optional[DataManager] = None
+        self.llm: Optional[LLMClient] = None
+        self.service: Optional[MaaService] = None
+        self.history = None
+        self.analyzer = None
+        self.followup = None
+        self.watcher = None
+        self.messages = None
+        self.handler = None
+        self._tasks: list[asyncio.Task] = []
+
+    # ════════════════════════════════════════════════════════════
+    # 启动
+    # ════════════════════════════════════════════════════════════
+
+    async def start(self) -> None:
+        cfg = self.cfg
+        ob = cfg.get("onebot") or {}
+        bot_cfg = cfg.get("bot") or {}
+        llm_cfg = cfg.get("llm") or {}
+
+        # 与重启一致：每次启动都重新初始化日志（另开新文件）
+        setup_logging(cfg.get("log") or {})
+
+        mode = str(ob.get("mode", "http_ws"))
+        if mode not in MODES:
+            raise ValueError(f"未知模式: {mode}，可选: {', '.join(MODES)}")
+
+        token = ob.get("access_token", "")
+        http_url = ob.get("http_url", "")
+        ws_url = ob.get("ws_url", "")
+        ws_reverse_port = int(ob.get("ws_reverse_port", 0))
+        api_timeout = int(ob.get("api_timeout_seconds", 30) or 30)
+
+        # HTTP 模式下 API 走 HTTP；WS / ws_reverse 模式下 api 走同一 WS 连接
+        use_http = mode in ("http_ws", "http_ws_reverse")
+        self.api = OneBotAPI(
+            http_url=http_url if use_http else "",
+            access_token=token,
+            timeout_seconds=api_timeout,
+        )
+        self.ws = OneBotWS(access_token=token)
+        if mode in ("ws", "ws_reverse"):
+            self.api.set_ws_send(self.ws.send)
+            self.ws.on_api_response(self.api.handle_ws_response)
+
+        self.dm = DataManager(bot_cfg.get("data_dir", "data"))
+
+        self.llm = build_llm_client(llm_cfg)
+        if not self.llm.configured:
+            logger.warning("⚠ 未配置 llm.base_url / llm.model，AI 分析将无法工作！")
+        logger.info(f"[LLM] 当前配置：{self.llm.describe()}")
+
+        self.service = MaaService(api=self.api, dm=self.dm)
+        self.service.load()
+        self.service.sync_from_config(bot_cfg.get("configs") or {})
+        self.service.register_runtime_reload(self._handle_reload)
+
+        if not self.service.configs:
+            logger.warning("⚠ 未配置任何监听群，请在 config.json → bot.configs 中设置！")
+        else:
+            for name, state in self.service.configs.items():
+                groups = ", ".join(sorted(state.info.listen_groups)) or "（无）"
+                notify = state.info.notify_group or "（未设置）"
+                logger.info(f"配置「{name}」：监听群 {groups}，通知群 {notify}")
+
+        # 日志包监听 + 指令/追问答疑
+        # 历史存储：归档日志包 + 追问上下文（周期性清理，git 缓存不受影响）
+        self.history = HistoryStore(self.dm._dir)
+        self.analyzer = MaaAnalyzer(self.service, self.llm, history=self.history)
+        self.followup = FollowupStore(history=self.history)
+        self.watcher = LogWatcher(self.service, self.analyzer, self.followup,
+                                  history=self.history)
+        self.messages = MessageHandler(
+            self.service, self.analyzer, self.followup, history=self.history,
+            segment_sender=self.watcher.send_segments,
+        )
+
+        self.service.register_event("notice.group_upload", self.watcher.on_group_upload)
+        self.service.register_event("message.file", self.watcher.on_message_file)
+        self.service.register_event("message.text", self.messages.on_message_text)
+
+        self.handler = EventHandler(self.api, self.service)
+        self.ws.on_event("message", self.handler.on_message)
+        self.ws.on_event("notice", self.handler.on_notice)
+        self.ws.on_event("request", self.handler.on_request)
+
+        self._tasks = [
+            asyncio.create_task(self._detect_backend()),
+            asyncio.create_task(_history_cleanup_loop(self.history, self.service)),
+        ]
+        if mode in ("http_ws", "ws"):
+            self._tasks.append(asyncio.create_task(self.ws.connect(ws_url)))
+        if mode in ("ws_reverse", "http_ws_reverse"):
+            self._tasks.append(
+                asyncio.create_task(self.ws.serve("0.0.0.0", ws_reverse_port))
+            )
+
+        debug_cfg = cfg.get("debug") or {}
+        if debug_cfg.get("enabled", False):
+            # 调试模块仅存在于源码仓库，不随发布包分发
+            try:
+                from debug.http_server import start_http_server
+            except ImportError as exc:
+                raise RuntimeError(
+                    "配置启用了 debug.enabled，但未找到 debug 模块。"
+                    "调试模式仅适用于源码仓库（发布包不含 debug/）。"
+                    "请将 config.json 中的 debug.enabled 设为 false 后重启。"
+                ) from exc
+            http_port = int(debug_cfg.get("http_port", 8765))
+            self._tasks.append(asyncio.create_task(
+                start_http_server(http_port, self.service, cfg)
+            ))
+
+        logger.info(f"OnebotMaaLogAnalyzer 已就绪 (mode={mode})，等待日志包上传...")
+
+    async def _detect_backend(self) -> None:
+        """启动时探测协议端（用于兼容不同 OneBot 实现的群文件接口）。"""
+        await asyncio.sleep(3)
+        try:
+            await self.service.detect_backend()
+        except Exception as exc:
+            logger.warning(f"协议端探测失败：{exc}")
+
+    # ════════════════════════════════════════════════════════════
+    # 停止 / 重建
+    # ════════════════════════════════════════════════════════════
+
+    async def stop(self) -> None:
+        """停止所有后台任务与连接，并保存数据（相当于进程退出的收尾）。"""
+        tasks, self._tasks = self._tasks, []
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if self.ws is not None:
+            try:
+                await self.ws.stop()
+            except Exception as exc:
+                logger.warning(f"停止 WS 失败：{exc}")
+        if self.api is not None:
+            try:
+                await self.api.close()
+            except Exception as exc:
+                logger.warning(f"关闭 API 失败：{exc}")
+        if self.service is not None:
+            try:
+                self.service.save()
+            except Exception as exc:
+                logger.warning(f"保存配置失败：{exc}")
+
+    async def _handle_reload(self, new_cfg: dict,
+                             notify_group: str = "") -> tuple[bool, str]:
+        """`/maa reload` 的实际执行：整体重建，失败时回退到旧配置。"""
+        previous = self.cfg
+        logger.info("[重载] 正在停止当前运行时 ...")
+        await self.stop()
+        self.cfg = new_cfg
+        try:
+            await self.start()
+        except Exception as exc:
+            logger.exception("[重载] 按新配置启动失败，回退到重载前的配置")
+            self.cfg = previous
+            try:
+                await self.stop()
+                await self.start()
+            except Exception:
+                logger.exception("[重载] 回退启动也失败，请重启进程")
+                return False, f"重载失败，且回退失败：{exc}"
+            await self._notify(notify_group, f"重载失败，已回退到旧配置：{exc}")
+            return False, f"重载失败，已回退到旧配置：{exc}"
+
+        await self._notify(
+            notify_group,
+            "重载完成：配置、日志文件、LLM 与连接均已按新设置生效。",
+        )
+        return True, "已重新加载并重建运行时。"
+
+    async def _notify(self, group_id: str, text: str) -> None:
+        if not group_id or self.service is None:
+            return
+        try:
+            await self.service.send_text(int(group_id), text)
+        except Exception as exc:
+            logger.warning(f"[重载] 发送结果消息失败：{exc}")
+
+    async def supervise(self) -> None:
+        """等待后台任务结束；重载替换任务列表后继续等待新任务。"""
+        while True:
+            tasks = list(self._tasks)
+            if not tasks:
+                await asyncio.sleep(1)
+                continue
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None:
+                    logger.error(f"后台任务异常退出：{exc}", exc_info=exc)
+            if list(self._tasks) == tasks and all(t.done() for t in tasks):
+                return
+
+
 async def main():
     logger.info("OnebotMaaLogAnalyzer 启动中...")
 
     cfg = load_config()
-    ob = cfg.get("onebot", {})
-    bot_cfg = cfg.get("bot", {})
-    llm_cfg = cfg.get("llm", {})
-    log_cfg = cfg.get("log", {})
-
-    setup_logging(log_cfg)
-
-    mode = ob.get("mode", "http_ws")
-    if mode not in MODES:
-        logger.error(f"未知模式: {mode}，可选: {', '.join(MODES)}")
+    runtime = BotRuntime(cfg)
+    try:
+        await runtime.start()
+    except Exception as exc:
+        logger.error(f"启动失败：{exc}")
+        await runtime.stop()
         sys.exit(1)
 
-    token = ob.get("access_token", "")
-    http_url = ob.get("http_url", "")
-    ws_url = ob.get("ws_url", "")
-    ws_reverse_port = int(ob.get("ws_reverse_port", 0))
-    api_timeout = int(ob.get("api_timeout_seconds", 30) or 30)
-
-    # HTTP 模式下 API 走 HTTP；WS / ws_reverse 模式下 api 走同一 WS 连接
-    use_http = mode in ("http_ws", "http_ws_reverse")
-    api = OneBotAPI(
-        http_url=http_url if use_http else "",
-        access_token=token,
-        timeout_seconds=api_timeout,
-    )
-
-    ws = OneBotWS(access_token=token)
-
-    if mode in ("ws", "ws_reverse"):
-        api.set_ws_send(ws.send)
-        ws.on_api_response(api.handle_ws_response)
-
-    dm = DataManager(bot_cfg.get("data_dir", "data"))
-
-    llm = build_llm_client(llm_cfg)
-    if not llm.configured:
-        logger.warning("⚠ 未配置 llm.base_url / llm.model，AI 分析将无法工作！")
-
-    service = MaaService(api=api, dm=dm)
-    service.load()
-    service.sync_from_config(bot_cfg.get("configs") or {})
-
-    if not service.configs:
-        logger.warning("⚠ 未配置任何监听群，请在 config.json → bot.configs 中设置！")
-    else:
-        for name, state in service.configs.items():
-            groups = ", ".join(sorted(state.info.listen_groups)) or "（无）"
-            notify = state.info.notify_group or "（未设置）"
-            logger.info(f"配置「{name}」：监听群 {groups}，通知群 {notify}")
-
-    # 日志包监听 + 指令/追问答疑
-    # 历史存储：归档日志包 + 追问上下文（周期性清理，git 缓存不受影响）
-    history = HistoryStore(dm._dir)
-    analyzer = MaaAnalyzer(service, llm, history=history)
-    followup = FollowupStore(history=history)
-    watcher = LogWatcher(service, analyzer, followup, history=history)
-    messages = MessageHandler(
-        service, analyzer, followup, history=history,
-        segment_sender=watcher.send_segments,
-    )
-
-    service.register_event("notice.group_upload", watcher.on_group_upload)
-    service.register_event("message.file", watcher.on_message_file)
-    service.register_event("message.text", messages.on_message_text)
-
-    handler = EventHandler(api, service)
-    ws.on_event("message", handler.on_message)
-    ws.on_event("notice", handler.on_notice)
-    ws.on_event("request", handler.on_request)
-
-    tasks = []
-
-    debug_cfg = cfg.get("debug", {})
-    if debug_cfg.get("enabled", False):
-        # 调试模块仅存在于源码仓库，不随发布包分发
+    debug_enabled = bool((cfg.get("debug") or {}).get("enabled", False))
+    if debug_enabled:
         try:
             from debug.cli import run_cli
-            from debug.http_server import start_http_server
         except ImportError:
             logger.error(
                 "配置启用了 debug.enabled，但未找到 debug 模块。\n"
                 "调试模式仅适用于源码仓库（发布包不含 debug/）。\n"
                 "请将 config.json 中的 debug.enabled 设为 false 后重启。"
             )
+            await runtime.stop()
             sys.exit(1)
 
-        http_port = debug_cfg.get("http_port", 8765)
-        tasks.append(asyncio.create_task(
-            start_http_server(http_port, service, cfg)))
-        tasks.append(asyncio.create_task(
-            _history_cleanup_loop(history, service)))
-
-        logger.info(f"OnebotMaaLogAnalyzer 已就绪 (调试模式) "
-                    f"HTTP→127.0.0.1:{http_port}, CLI→当前终端")
         try:
-            await run_cli(service, cfg)
+            await run_cli(runtime.service, cfg)
         except KeyboardInterrupt:
             logger.info("收到中断信号")
         finally:
-            for t in tasks:
-                t.cancel()
-            await ws.stop()
-            await api.close()
-            service.save()
+            await runtime.stop()
             logger.info("数据已保存，退出。")
         return
 
-    # 启动时探测协议端（用于兼容不同 OneBot 实现的群文件接口）
-    async def detect_backend():
-        await asyncio.sleep(3)
-        try:
-            await service.detect_backend()
-        except Exception as exc:
-            logger.warning(f"协议端探测失败：{exc}")
-
-    if mode in ("http_ws", "ws"):
-        tasks.append(asyncio.create_task(ws.connect(ws_url)))
-    if mode in ("ws_reverse", "http_ws_reverse"):
-        tasks.append(asyncio.create_task(ws.serve("0.0.0.0", ws_reverse_port)))
-
-    tasks.append(asyncio.create_task(detect_backend()))
-    tasks.append(asyncio.create_task(_history_cleanup_loop(history, service)))
-
-    logger.info(f"OnebotMaaLogAnalyzer 已就绪 (mode={mode})，等待日志包上传...")
-
     try:
-        await asyncio.gather(*tasks)
+        await runtime.supervise()
     except KeyboardInterrupt:
         logger.info("收到中断信号")
     finally:
-        for t in tasks:
-            t.cancel()
-        await ws.stop()
-        await api.close()
-        service.save()
+        await runtime.stop()
         logger.info("数据已保存，退出。")
 
 

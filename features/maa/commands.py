@@ -397,7 +397,7 @@ class CommandHandler:
         if error:
             return CommandResult(text=f"值无效：{error}", ok=False)
 
-        setattr(cfg.settings, name, value)
+        self.s.set_setting_override(cfg.name, name, value)
         self.s.save_config(cfg.name)
         label = _FIELD_LABELS.get(name, name)
         logger.info(f"[指令] {cfg.name}: {name} = {value!r}")
@@ -411,20 +411,21 @@ class CommandHandler:
         return await self._set_repo_field(cfg, "mode", args[0])
 
     async def _cmd_enable(self, cfg: ConfigState, args: list[str]) -> CommandResult:
-        cfg.settings.enabled = True
+        self.s.set_setting_override(cfg.name, "enabled", True)
         self.s.save_config(cfg.name)
         return CommandResult(text=f"已启用配置「{cfg.name}」。")
 
     async def _cmd_disable(self, cfg: ConfigState, args: list[str]) -> CommandResult:
-        cfg.settings.enabled = False
+        self.s.set_setting_override(cfg.name, "enabled", False)
         self.s.save_config(cfg.name)
         return CommandResult(text=f"已停用配置「{cfg.name}」。停用后不再自动分析日志包。")
 
     async def _cmd_reload(self, cfg: ConfigState, args: list[str]) -> CommandResult:
-        reloader = getattr(self.s, "reload_from_file", None)
-        if reloader is None:
+        requester = getattr(self.s, "request_reload", None)
+        if requester is None:
             return CommandResult(text="当前版本不支持热重载，请重启进程。", ok=False)
-        ok, message = reloader()
+        # 只登记重建：真正重建在回复发出后执行，避免拆掉发送中的连接
+        ok, message = requester(notify_group=self._current_group)
         return CommandResult(text=message, ok=ok)
 
     # ════════════════════════════════════════════════════════════
@@ -463,7 +464,7 @@ class CommandHandler:
                 return CommandResult(text="模式只能是 inject 或 agent。", ok=False)
             value = mode
 
-        setattr(cfg.settings.repo, name, value)
+        self.s.set_setting_override(cfg.name, name, value, nested="repo")
         self.s.save_config(cfg.name)
         label = _REPO_LABELS.get(name, name)
         logger.info(f"[指令] {cfg.name}: repo.{name} = {value!r}")
