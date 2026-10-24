@@ -62,57 +62,103 @@ jobs:
           echo "Final release body:"
           cat /tmp/release_body.md
 
-      - name: Create release archive
+      - name: Create release archives
         run: |
           set -euo pipefail
 
-          PKG=dist/OnebotMaaLogAnalyzer
-          mkdir -p "$PKG"
+          VERSION="${{ steps.meta.outputs.version }}"
+          FULL=dist/OnebotMaaLogAnalyzer
+          LIGHT=dist/OnebotMaaLogAnalyzer-light
 
-          # ── 白名单：仅打包运行所需文件 ──
+          # ── 普通包：含 tools/（模板编辑器、config.json 编辑器） ──
           # 注意：debug/ 为开发调试工具，.github/ 为 CI 配置，均不打包
+          rm -rf "$FULL"
+          mkdir -p "$FULL"
           for f in main.py requirements.txt README.md LICENSE; do
-            cp "$f" "$PKG/"
+            cp "$f" "$FULL/"
           done
           for d in docs bot core features templates; do
-            cp -r "$d" "$PKG/"
+            cp -r "$d" "$FULL/"
           done
-
-          # ── 清理不应进入发布包的产物 ──
-          find "$PKG" -type d -name __pycache__ -prune -exec rm -rf {} +
-          find "$PKG" -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' \) -delete
-          find "$PKG" -type d -name tests -prune -exec rm -rf {} +
-          find "$PKG" -type f -name 'test_*.py' -delete
-          find "$PKG" -type f -name '*.log' -delete
-
-          # ── 校验：禁止出现调试/测试/CI 文件 ──
-          FORBIDDEN=$(find "$PKG" \( -name 'debug' -o -name '*.json' -path '*/examples/*' \
-            -o -name '.github' -o -name 'config.json' -o -name '.gitignore' \) -print)
-          if [ -n "$FORBIDDEN" ]; then
-            echo "::error::发布包中出现禁止的文件："
-            echo "$FORBIDDEN"
+          if [ ! -d tools ]; then
+            echo "::error::缺少 tools/ 目录：普通包必须包含工具，精简包才不含它"
             exit 1
           fi
+          cp -r tools "$FULL/"
 
-          # ── 校验：必需文件齐全 ──
-          for required in main.py requirements.txt README.md LICENSE \
-                          bot/__init__.py core/__init__.py features/__init__.py \
-                          features/maa/__init__.py \
-                          templates/default/page.html; do
-            if [ ! -e "$PKG/$required" ]; then
-              echo "::error::发布包缺少必需文件：$required"
+          # ── 清理不应进入发布包的产物 ──
+          find "$FULL" -type d -name __pycache__ -prune -exec rm -rf {} +
+          find "$FULL" -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' \) -delete
+          find "$FULL" -type d -name tests -prune -exec rm -rf {} +
+          find "$FULL" -type f -name 'test_*.py' -delete
+          find "$FULL" -type f -name '*.log' -delete
+
+          check_common() {
+            local PKG="$1" LABEL="$2"
+
+            # ── 校验：禁止出现调试/测试/CI 文件 ──
+            local FORBIDDEN
+            FORBIDDEN=$(find "$PKG" \( -name 'debug' -o -name '*.json' -path '*/examples/*' \
+              -o -name '.github' -o -name 'config.json' -o -name '.gitignore' \) -print)
+            if [ -n "$FORBIDDEN" ]; then
+              echo "::error::$LABEL 中出现禁止的文件："
+              echo "$FORBIDDEN"
+              exit 1
+            fi
+
+            # ── 校验：必需文件齐全 ──
+            local required
+            for required in main.py requirements.txt README.md LICENSE \
+                            bot/__init__.py core/__init__.py features/__init__.py \
+                            features/maa/__init__.py \
+                            templates/default/page.html; do
+              if [ ! -e "$PKG/$required" ]; then
+                echo "::error::$LABEL 缺少必需文件：$required"
+                exit 1
+              fi
+            done
+          }
+
+          # ── 普通包校验：tools/ 必须在，且两个编辑器都能跑 ──
+          check_common "$FULL" "普通包"
+          for required in tools/templates/editor.py tools/config/editor.py; do
+            if [ ! -f "$FULL/$required" ]; then
+              echo "::error::普通包缺少工具：$required"
               exit 1
             fi
           done
 
-          echo "发布包内容："
-          find "$PKG" -type f | sort
+          # ── 精简包：普通包去掉 tools/，模板只留 default ──
+          rm -rf "$LIGHT"
+          cp -r "$FULL" "$LIGHT"
+          rm -rf "$LIGHT/tools"
+          find "$LIGHT/templates" -mindepth 1 -maxdepth 1 ! -name 'default' -exec rm -rf {} +
+
+          # ── 精简包校验：tools/ 必须不存在，templates/ 只剩 default ──
+          check_common "$LIGHT" "精简包"
+          if [ -e "$LIGHT/tools" ]; then
+            echo "::error::精简包中不应出现 tools/"
+            exit 1
+          fi
+          EXTRA_TEMPLATES=$(find "$LIGHT/templates" -mindepth 1 -maxdepth 1 ! -name 'default' -print)
+          if [ -n "$EXTRA_TEMPLATES" ]; then
+            echo "::error::精简包的 templates/ 只允许保留 default："
+            echo "$EXTRA_TEMPLATES"
+            exit 1
+          fi
+
+          echo "普通包内容："
+          find "$FULL" -type f | sort
+          echo "精简包内容："
+          find "$LIGHT" -type f | sort
 
           cd dist
-          zip -rq "../OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}.zip" OnebotMaaLogAnalyzer
+          zip -rq "../OnebotMaaLogAnalyzer-${VERSION}.zip" OnebotMaaLogAnalyzer
+          zip -rq "../OnebotMaaLogAnalyzer-${VERSION}-light.zip" OnebotMaaLogAnalyzer-light
           cd ..
 
-          echo "打包完成，大小：$(du -h OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}.zip | cut -f1)"
+          echo "打包完成："
+          du -h "OnebotMaaLogAnalyzer-${VERSION}.zip" "OnebotMaaLogAnalyzer-${VERSION}-light.zip"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -121,4 +167,5 @@ jobs:
           body_path: /tmp/release_body.md
           files: |
             OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}.zip
+            OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}-light.zip
           prerelease: ${{ steps.meta.outputs.prerelease }}
