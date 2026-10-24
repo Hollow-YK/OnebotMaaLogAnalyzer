@@ -22,11 +22,15 @@ from .data_manager import DataManager
 from .models import (
     AnalysisSettings,
     CommandConfig,
+    ConfigLLM,
     ConfigState,
     JobRecord,
+    ModelRef,
     ProjectConfig,
     ProjectUISettings,
+    ReportConfig,
     RepoConfig,
+    VisionConfig,
     normalize_ui_key,
 )
 
@@ -97,6 +101,40 @@ def _normalize_project(data: dict) -> dict:
     if isinstance(repo_raw, dict):
         result["repo"] = _normalize_keys(RepoConfig, repo_raw)
     return result
+
+
+def _normalize_config_llm(data: dict) -> dict:
+    """归一化配置级 `llm` 段（models[] 是列表，需要逐项处理）。"""
+    if not isinstance(data, dict):
+        return {}
+    result = _normalize_keys(ConfigLLM, data)
+    models = result.get("models")
+    if isinstance(models, list):
+        result["models"] = [
+            _normalize_keys(ModelRef, item)
+            for item in models if isinstance(item, dict)
+        ]
+    return result
+
+
+def _normalize_simple(model_cls, data: dict) -> dict:
+    """归一化一个直接由 BaseModel 表达的配置段。"""
+    if not isinstance(data, dict):
+        return {}
+    return _normalize_keys(model_cls, data)
+
+
+def _build_model(model_cls, data: dict, label: str = ""):
+    """校验并构造配置模型；失败时退回默认值。"""
+    normalized = _normalize_simple(model_cls, data)
+    if not normalized:
+        return model_cls()
+    try:
+        return model_cls.model_validate(normalized)
+    except Exception as exc:
+        where = f"[{label}] " if label else ""
+        logger.warning(f"{where}{model_cls.__name__} 配置无效，使用默认值：{exc}")
+        return model_cls()
 
 
 def _deep_merge(base: dict, patch: dict) -> dict:
@@ -438,6 +476,19 @@ class MaaService:
             logger.warning(f"{where}project 配置无效，使用空配置：{exc}")
             return ProjectConfig()
 
+    @staticmethod
+    def _build_config_llm(data: dict, label: str = "") -> ConfigLLM:
+        """校验配置级 llm 段（候选模型列表）。"""
+        normalized = _normalize_config_llm(data)
+        if not normalized:
+            return ConfigLLM()
+        try:
+            return ConfigLLM.model_validate(normalized)
+        except Exception as exc:
+            where = f"[{label}] " if label else ""
+            logger.warning(f"{where}llm 配置无效，使用空候选列表：{exc}")
+            return ConfigLLM()
+
     def recompute_project(self, name: str) -> None:
         """
         按「config.json → /maa project set」重新计算项目配置。
@@ -585,6 +636,13 @@ class MaaService:
             self.dm.save_config_settings(name, state.settings_overrides)
             self.dm.save_config_project(name, state.project_overrides)
 
+            # AI 段：完全由 config.json 决定（声明式，不做运行时覆盖）
+            state.llm = self._build_config_llm(
+                spec.get("llm") or {}, name
+            )
+            state.vision = _build_model(VisionConfig, spec.get("vision") or {}, name)
+            state.report = _build_model(ReportConfig, spec.get("report") or {}, name)
+
             # 指令：完全由 config.json 决定（删除段即回退默认值）
             state.commands = self.apply_commands_overrides(
                 CommandConfig(), spec.get("commands") or {}, name
@@ -663,6 +721,16 @@ class MaaService:
             configs_cfg = {}
         if not isinstance(configs_cfg, dict):
             return False, "bot.configs 必须是对象。"
+
+        # AI 配置：旧结构拒绝启动；候选引用必须有效
+        from core.llm_pool import detect_legacy_llm, validate_llm_config
+
+        legacy = detect_legacy_llm(cfg.get("llm") or {})
+        if legacy:
+            return False, legacy
+        llm_errors = validate_llm_config(cfg.get("llm") or {}, configs_cfg)
+        if llm_errors:
+            return False, "LLM 配置无效：\n" + "\n".join(f"- {e}" for e in llm_errors)
 
         total = sum(
             len([g for g in (spec.get("listen_groups") or []) if str(g).strip()])

@@ -3,28 +3,25 @@
 
 模型可在报告的**任意位置**用指令声明要附带的附件，并**必须指定来源**：
 
-    [附图@日志: on_error/on_error_20260101_120002.png]
-    [附图@日志: debug/on_error/on_error_20260101_120002.png]
-    [附图@项目: assets/resource/image/Start2.png]
+    [附件@日志: on_error/on_error_20260101_120002.png]
+    [附件@项目: assets/resource/image/Start2.png]
     [附件@日志: config/mxu-MaaXXX.json]
-    [附件@日志: device_info.txt]
     [附件@项目: assets/resource/pipeline/PVP.json]
 
 来源标记（`@日志` / `@项目`）与相对路径都是**必需**的：
   - 只从指定来源查找，避免同名文件命中非预期内容
   - 路径必须是**相对路径**，拒绝绝对路径与 `..` 上跳，防止越界读取
 
-兼容写法：`[附图: 日志:on_error/a.png]`、`[附图: zip/on_error/a.png]`。
+图片与文件统一使用「附件」指令，Bot 按扩展名决定呈现方式：
+  - 图片（png/jpg/webp/bmp）→ 内联进报告（图片化报告）或 image 消息段
+  - 其他文件               → 文件卡片 + 群文件上传（upload_group_file）
 
-Bot 解析这些指令，从**日志包**或**本地项目仓库**取出对应内容，
-并按**原位置**随报告发送（附件可插在文字中间），同时把指令行从
-给用户看的文本中移除。
+另有一种**只给模型看**的指令（不发送给用户）：
 
-发送方式：
-  - 图片（png/jpg/webp/bmp）→ image 消息段（可与文字同条消息图文混排）
-  - 其他文件               → 群文件上传（upload_group_file）
+    [看图@日志: on_error/xxx.png]
+    [看图@项目: assets/resource/image/Start2.png]
 
-未声明时**不附带任何内容**。声明了但找不到时，在报告末尾附一行说明。
+旧的 `[附图@...]` 已取消，仅作为普通文本被剥离，不再发送图片。
 """
 from __future__ import annotations
 
@@ -44,11 +41,12 @@ from features.maa.safety import describe_rejection, is_sensitive_path
 logger = logging.getLogger("Maa.Attach")
 
 # 附件指令：可出现在任意位置（行首、行内、行尾）
-#   [附图@日志: a.png]   [附件@项目: b.json]   【文件@日志: c.txt】
-#   兼容 [附图: 日志:a.png] 形式
+#   [附件@日志: a.png]   [附件@项目: b.json]   【文件@日志: c.txt】
+#   图片与文件统一用「附件」，由扩展名自动区分。
+#   兼容 [附件: 日志:a.png] 形式
 _ATTACHMENT_DIRECTIVE = re.compile(
     r"[\[【]\s*"
-    r"(?P<label>附图|图片|image|附件|文件|file)"
+    r"(?P<label>附件|文件|file)"
     r"(?:\s*[@＠]\s*(?P<src1>日志|压缩包|zip|log|项目|仓库|repo|project))?"
     r"\s*[:：]\s*"
     r"(?P<path>[^\]】\n]+?)\s*"
@@ -56,7 +54,23 @@ _ATTACHMENT_DIRECTIVE = re.compile(
     re.IGNORECASE,
 )
 
-_IMAGE_LABELS = {"附图", "图片", "image"}
+# 旧版 [附图@...] / [图片@...]：已取消，按普通文本剥离，不再发送图片
+_LEGACY_DIRECTIVE = re.compile(
+    r"[\[【]\s*(?:附图|图片|image)"
+    r"(?:\s*[@＠]\s*[^\]】:：\s]+)?"
+    r"\s*[:：][^\]】\n]*[\]】]",
+    re.IGNORECASE,
+)
+
+# 看图指令：只给模型看，不发送给用户
+_VISION_DIRECTIVE = re.compile(
+    r"[\[【]\s*(?:看图|读图|vision)"
+    r"(?:\s*[@＠]\s*(?P<src>日志|压缩包|zip|log|项目|仓库|repo|project))?"
+    r"\s*[:：]\s*"
+    r"(?P<path>[^\]】\n]+?)\s*"
+    r"[\]】]",
+    re.IGNORECASE,
+)
 
 # 来源别名 → 规范化来源
 _SOURCE_ZIP = {"日志", "压缩包", "zip", "log"}
@@ -98,8 +112,9 @@ class OutSegment:
     text: str = ""
     data: bytes = b""
     name: str = ""
-    label: str = ""
+    label: str = ""    # 相对路径（仅附件片段）
     source: str = ""   # zip / repo（仅附件片段有意义）
+    origin: str = ""   # 人类可读的来源说明（日志包 xxx / 项目 yyy）
 
 
 # ════════════════════════════════════════════════════════════════
@@ -171,35 +186,22 @@ def _split_source_and_path(label: str, src1: str, raw: str) -> tuple[str, str]:
 
 
 def _kind_for(label: str, path: str) -> str:
-    """
-    判定附件类型。
-
-    以标签为准，但若扩展名明显矛盾则以扩展名为准
-    （如 `[附图: a.json]` 按文件处理），避免把非图片当图片发。
-    """
+    """按扩展名判定附件呈现方式（图片内联 / 其他文件卡片）。"""
     suffix = PurePosixPath(path.replace("\\", "/")).suffix.lower()
-    is_image_ext = suffix in IMAGE_SUFFIXES
-
-    lowered = str(label or "").strip().lower()
-    if lowered in _IMAGE_LABELS:
-        return "image" if is_image_ext else "file"
-    return "image" if is_image_ext else "file"
+    return "image" if suffix in IMAGE_SUFFIXES else "file"
 
 
-def parse_attachments(report: str) -> list[Attachment]:
-    """
-    解析全部附件指令，返回 Attachment 列表（去重，保持出现顺序）。
-
-    缺少来源标记或路径非法的条目会被丢弃（并记日志）。
-    """
+def _collect_directives(report: str, pattern: re.Pattern,
+                        source_group: str) -> list[Attachment]:
+    """解析某一类指令（附件 / 看图）为去重后的 Attachment 列表。"""
     if not report:
         return []
     result: list[Attachment] = []
     seen: set[str] = set()
-    for match in _ATTACHMENT_DIRECTIVE.finditer(report):
-        label = match.group("label")
+    for match in pattern.finditer(report):
+        label = match.group("label") if "label" in pattern.groupindex else ""
         source, raw_path = _split_source_and_path(
-            label, match.group("src1"), match.group("path")
+            label, match.group(source_group) or "", match.group("path")
         )
         for piece in re.split(r"[,，、;；]", raw_path):
             piece = piece.strip()
@@ -226,6 +228,30 @@ def parse_attachments(report: str) -> list[Attachment]:
     return result
 
 
+def parse_attachments(report: str) -> list[Attachment]:
+    """
+    解析全部附件指令，返回 Attachment 列表（去重，保持出现顺序）。
+
+    缺少来源标记或路径非法的条目会被丢弃（并记日志）。
+    """
+    return _collect_directives(report, _ATTACHMENT_DIRECTIVE, "src1")
+
+
+def parse_vision_requests(report: str) -> list[Attachment]:
+    """解析 `[看图@...]`：只给模型看，不进入报告，也不发送给用户。"""
+    return _collect_directives(report, _VISION_DIRECTIVE, "src")
+
+
+def strip_vision_requests(report: Optional[str]) -> Optional[str]:
+    """移除 `[看图@...]` 指令（不给用户看）。"""
+    if not report:
+        return report
+    cleaned = _VISION_DIRECTIVE.sub("", report)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def strip_attachments(report: Optional[str]) -> Optional[str]:
     """
     移除给用户看的报告中的附件指令。
@@ -235,6 +261,8 @@ def strip_attachments(report: Optional[str]) -> Optional[str]:
     if not report:
         return report
     cleaned = _ATTACHMENT_DIRECTIVE.sub("", report)
+    cleaned = _LEGACY_DIRECTIVE.sub("", cleaned)
+    cleaned = _VISION_DIRECTIVE.sub("", cleaned)
     # 行内指令移除后可能留下多余空格
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"[ \t]+$", "", cleaned, flags=re.MULTILINE)
@@ -254,6 +282,10 @@ def split_report(report: str) -> list[OutSegment]:
     """
     if not report:
         return []
+
+    # 看图指令与旧版附图指令都不进入报告文本
+    report = _LEGACY_DIRECTIVE.sub("", report)
+    report = _VISION_DIRECTIVE.sub("", report)
 
     segments: list[OutSegment] = []
     cursor = 0
@@ -302,7 +334,7 @@ def build_report_segments(
     *,
     repo_files: Optional[dict[str, bytes]] = None,
     max_attachments: int = 4,
-    max_image_bytes: int = 5 * 1024 * 1024,
+    max_image_bytes: int = 0,
     max_file_bytes: int = DEFAULT_MAX_FILE_MB * 1024 * 1024,
     allow_files: bool = True,
 ) -> tuple[list[OutSegment], list[str]]:
@@ -310,6 +342,7 @@ def build_report_segments(
     把报告切成片段，并为每个附件取出字节。
 
     repo_files: {仓库相对路径: 字节}，由调用方预先收集（支持任意扩展名）。
+    max_image_bytes: `0` = 不限制（图片在渲染时按内容宽度等比缩放）。
     返回 (片段列表, 备注列表)。未声明附件时只返回文本片段。
     """
     segments = split_report(report)
@@ -362,7 +395,8 @@ def build_report_segments(
             hit = repo_full.get(wanted)
             if hit:
                 rel, blob = hit
-                if len(blob) <= limit:
+                # limit <= 0 表示不限制（图片在渲染时按内容宽度缩放）
+                if limit <= 0 or len(blob) <= limit:
                     data = blob
                     source = f"项目 {rel}"
 
@@ -376,15 +410,17 @@ def build_report_segments(
         used.add(source.lower())
         sent += 1
 
+        path = seg.label.replace("\\", "/")
         if seg.kind == "image":
             out.append(OutSegment(
-                kind="image", data=data, label=source, source=seg.source
+                kind="image", data=data, label=path,
+                source=seg.source, origin=source,
             ))
         else:
             out.append(OutSegment(
                 kind="file", data=data,
-                name=PurePosixPath(seg.label).name,
-                label=source, source=seg.source,
+                name=PurePosixPath(path).name,
+                label=path, source=seg.source, origin=source,
             ))
 
     if missing:

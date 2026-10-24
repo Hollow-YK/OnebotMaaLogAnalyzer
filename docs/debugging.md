@@ -96,10 +96,13 @@ curl http://127.0.0.1:8765/debug/configs
 ### 运行全部套件
 
 ```bash
-python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;cfg={'bot':{'data_dir':'data/test','configs':{}}};[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config(cfg)))) for n in ('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach','followup_tool_loop','followup_converge_fallback')]"
+python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;cfg={'bot':{'data_dir':'data/test','configs':{}}};[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config(cfg)))) for n in ('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach','followup_tool_loop','followup_converge_fallback','render_image')]"
 ```
 
 > 每次运行前先删除 `data/test`，否则残留配置会导致群多归属 → `resolve_config` 返回 `None` 而误判失败。
+>
+> 调试夹具里的 `report` 段未声明时默认 `render=text`，这样多数场景不依赖本机浏览器；
+> 需要验证渲染时在场景里显式写 `"report": {"render": "image"}`（参考 `render_image.json`）。
 
 ### 内置套件
 
@@ -116,6 +119,7 @@ python -c "import asyncio;from debug.runner import run_test_file;from debug impo
 | `followup_repo_attach.json` | 重启后 `@项目` 附件仍可取到 |
 | `followup_tool_loop.json` | 模型只检索不输出正文时仍须给出回答 |
 | `followup_converge_fallback.json` | 模型连收敛都不配合时的兜底回复 |
+| `render_image.json` | 图片化报告：分块渲染、附件内联、文件上传、标记不外泄 |
 
 ### 真实重启测试
 

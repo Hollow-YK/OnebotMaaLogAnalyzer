@@ -271,7 +271,8 @@ LOG_TOOL_DEFINITIONS: list[dict] = [
             "name": "log_list_images",
             "description": (
                 "列出日志压缩包内的全部图片。"
-                "用于确认可以用 `[附图@日志: 路径]` 发送哪些图。"
+                "用于确认可以用 `[附件@日志: 路径]` 发送哪些图，"
+                "或可以用 `[看图@日志: 路径]` 给模型看哪些图。"
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
@@ -308,10 +309,22 @@ class RepoTools:
             return f"未知仓库工具：{name}"
 
         try:
-            return await handler(arguments or {})
+            result = await handler(arguments or {})
         except Exception as exc:
             logger.warning(f"[工具] {name} 执行异常：{exc}", exc_info=True)
             return f"工具 {name} 执行失败：{type(exc).__name__}: {exc}"
+        return self._limit_result(result)
+
+    def _limit_result(self, text: str) -> str:
+        """按 token 预算裁剪工具结果（0 = 由字符上限估算）。"""
+        from core.tokens import estimate_tokens, trim_to_tokens
+
+        tokens = int(self.cfg.max_tool_result_tokens or 0)
+        if tokens <= 0:
+            tokens = max(512, int(self.cfg.max_tool_result_chars or 30000) // 4)
+        if estimate_tokens(text) <= tokens:
+            return text
+        return trim_to_tokens(text, tokens)
 
     # ════════════════════════════════════════════════════════════
     # 路径沙箱

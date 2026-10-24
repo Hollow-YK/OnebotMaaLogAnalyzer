@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from features.maa.commands import CommandHandler
 from features.maa.followup import FollowupStore
 from features.maa.text_utils import split_text
+from core.llm_pool import new_session_id
 
 if TYPE_CHECKING:
     from core.service import MaaService
@@ -125,6 +126,11 @@ class MessageHandler:
 
         logger.info(f"[追问] 群 {group_id} 引用 {reply_id} 提问：{question[:60]}")
 
+        # 旧会话（升级前创建 / 状态里没有 session_id）补一个会话 ID，
+        # 之后每轮追问都复用它，用量才能按会话聚合。
+        if not getattr(session, "session_id", ""):
+            session.session_id = new_session_id(config_name)
+
         # 复用本次分析已就绪的仓库 provider；重启后内存缓存为空，
         # 这里按配置重建并确保就绪，否则仓库工具与 @项目 附件都会失效。
         provider = await self.analyzer.ensure_repo_provider(config_name, cfg.project)
@@ -135,6 +141,9 @@ class MessageHandler:
             digest=getattr(session, "digest", None),
             provider=provider,
             project=cfg.project,
+            config_name=config_name,
+            session_id=getattr(session, "session_id", ""),
+            file_name=getattr(session, "file_name", ""),
         )
         if answer is None or not answer.text:
             # 模型没给出任何可用内容（如全程只调工具、收敛也失败）。

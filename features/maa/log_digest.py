@@ -17,6 +17,8 @@ from .archive_profile import (
     ArchiveProfile,
     detect_archive_profile,
 )
+from core.tokens import estimate_tokens, fold_text
+
 from .text_utils import decode_bytes, format_bytes, limit_text
 
 
@@ -90,6 +92,8 @@ class DigestResult:
     all_members: list[str] = field(default_factory=list)
     # 压缩包路径（供后续按名提取图片字节）
     zip_path: str = ""
+    # 摘要提示词的估算 token 数（用于上下文预算与日志）
+    prompt_tokens: int = 0
 
 
 @dataclass
@@ -166,7 +170,7 @@ def build_log_digest(
         profile, log_infos, error_images, custom_images
     )
     resolved_project = _resolve_project_name(project_name, profile)
-    prompt = _build_prompt(
+    prompt, prompt_tokens = _build_prompt(
         original_file_name=original_file_name,
         group_id=group_id,
         project_name=resolved_project,
@@ -197,6 +201,7 @@ def build_log_digest(
         project_name=resolved_project,
         is_log_archive=is_log_archive,
         profile=profile,
+        prompt_tokens=prompt_tokens,
         all_images=all_images,
         all_members=[info.filename.replace("\\", "/") for info in safe_infos],
         zip_path=str(zip_path),
@@ -1362,10 +1367,26 @@ def _build_prompt(
     log_sections: list[str],
     notes: list[str],
     max_prompt_chars: int,
-) -> str:
+) -> tuple[str, int]:
+    """
+    分段渲染提示词，并按优先级裁剪。
+
+    旧实现直接把整段文本从尾部截断，而「关键日志片段」恰好在最后，
+    导致最先丢失的正是证据。现在每个段落独立计费：
+
+      优先级 1（最高）：关键日志片段
+      2：关键词统计
+      3：错误截图 / 自定义截图清单
+      4：配置摘要
+      5：运行环境 + 日志文件清单 + 时间范围
+      6：处理备注
+      固定：标题与文件信息
+
+    超预算时从最低优先级开始丢弃 / 折叠，最后才裁剪日志片段。
+    """
     display_project = str(project_name or "").strip() or "MaaXXX"
 
-    parts = [
+    header = "\n".join([
         f"下面是 {display_project} 日志包的自动摘要，请只根据这些内容分析本次报错原因。",
         "",
         f"文件名：{original_file_name}",
@@ -1373,36 +1394,144 @@ def _build_prompt(
         f"压缩包文件数：{file_count}",
         f"解压后总大小：{format_bytes(total_uncompressed_size)}",
         "",
-        "运行环境（自动解析）：",
-        "\n".join(f"- {line}" for line in profile.prompt_lines())
-        if profile is not None else "- 未能识别 UI 与版本信息",
-        "",
-        "处理备注：",
-        "\n".join(f"- {note}" for note in notes) if notes else "- 无",
-        "",
-        "日志文件：",
-        "\n".join(f"- {name}" for name in log_files) if log_files else "- 未找到 .log / .jsonl 文件",
-        "",
-        "日志时间范围：",
-        "\n".join(f"- {item}" for item in time_ranges) if time_ranges else "- 未识别到时间范围",
-        "",
-        "错误截图文件（on_error）：",
-        "\n".join(f"- {name}" for name in error_images) if error_images else "- 未找到 on_error 图片",
-        "",
-        "自定义截图文件（debug/custom 等）：",
-        "\n".join(f"- {name}" for name in custom_images) if custom_images else "- 未找到自定义截图",
-        "",
-        "关键词统计：",
-        "\n".join(keyword_summaries) if keyword_summaries else "- 未统计到重点关键词",
-        "",
-        "配置摘要：",
-        "\n\n".join(config_sections) if config_sections else "未找到配置文件。",
-        "",
-        "关键日志片段：",
-        "\n\n".join(log_sections) if log_sections else "未提取到关键日志片段。",
+    ])
+
+    # (key, 展示顺序, 优先级数值越小越重要, 文本)
+    sections: list[dict] = [
+        {
+            "key": "env",
+            "order": 10,
+            "priority": 5,
+            "text": "运行环境（自动解析）：\n" + (
+                "\n".join(f"- {line}" for line in profile.prompt_lines())
+                if profile is not None else "- 未能识别 UI 与版本信息"
+            ),
+        },
+        {
+            "key": "notes",
+            "order": 20,
+            "priority": 6,
+            "text": "处理备注：\n" + (
+                "\n".join(f"- {note}" for note in notes) if notes else "- 无"
+            ),
+        },
+        {
+            "key": "logs",
+            "order": 30,
+            "priority": 5,
+            "text": "日志文件：\n" + (
+                "\n".join(f"- {name}" for name in log_files)
+                if log_files else "- 未找到 .log / .jsonl 文件"
+            ),
+        },
+        {
+            "key": "ranges",
+            "order": 40,
+            "priority": 5,
+            "text": "日志时间范围：\n" + (
+                "\n".join(f"- {item}" for item in time_ranges)
+                if time_ranges else "- 未识别到时间范围"
+            ),
+        },
+        {
+            "key": "errors",
+            "order": 50,
+            "priority": 3,
+            "text": "错误截图文件（on_error）：\n" + (
+                "\n".join(f"- {name}" for name in error_images)
+                if error_images else "- 未找到 on_error 图片"
+            ),
+        },
+        {
+            "key": "custom",
+            "order": 60,
+            "priority": 3,
+            "text": "自定义截图文件（debug/custom 等）：\n" + (
+                "\n".join(f"- {name}" for name in custom_images)
+                if custom_images else "- 未找到自定义截图"
+            ),
+        },
+        {
+            "key": "keywords",
+            "order": 70,
+            "priority": 2,
+            "text": "关键词统计：\n" + (
+                "\n".join(keyword_summaries)
+                if keyword_summaries else "- 未统计到重点关键词"
+            ),
+        },
+        {
+            "key": "config",
+            "order": 80,
+            "priority": 4,
+            "text": "配置摘要：\n" + (
+                "\n\n".join(config_sections)
+                if config_sections else "未找到配置文件。"
+            ),
+        },
+        {
+            "key": "evidence",
+            "order": 90,
+            "priority": 1,
+            "text": "关键日志片段：\n" + (
+                "\n\n".join(log_sections)
+                if log_sections else "未提取到关键日志片段。"
+            ),
+        },
     ]
-    return limit_text(
-        "\n".join(parts),
-        max_prompt_chars,
-        suffix="\n...[摘要文本达到 max_prompt_chars 上限，后续已省略；日志读取状态请以“处理备注”为准]",
-    )
+
+    # max_prompt_chars 现在是「token 预算的兜底字符上限」：
+    # 按 4 字符/token 折算，纯中文时估算会更保守。
+    budget = max(2000, int(max_prompt_chars or 200000) // 4)
+    omitted: list[str] = []
+
+    def total_tokens() -> int:
+        joined = header + "\n\n".join(
+            item["text"] for item in sorted(sections, key=lambda s: s["order"])
+        )
+        return estimate_tokens(joined)
+
+    # 从最低优先级开始丢弃，直到进入预算
+    while total_tokens() > budget:
+        droppable = [item for item in sections if item["text"]]
+        if not droppable:
+            break
+        worst = max(droppable, key=lambda s: (s["priority"], -s["order"]))
+        if worst["priority"] >= 1 and len(droppable) > 1:
+            omitted.append(worst["key"])
+            worst["text"] = ""
+            continue
+        # 只剩最关键的段：折叠而不是丢弃
+        worst["text"] = fold_text(
+            worst["text"],
+            max(256, int(budget * 0.9)),
+            head_ratio=0.35,
+        )
+        break
+
+    parts = [header.rstrip()]
+    for item in sorted(sections, key=lambda s: s["order"]):
+        if not item["text"]:
+            continue
+        parts.append(item["text"])
+    text = "\n\n".join(parts)
+    if omitted:
+        text += (
+            "\n\n[摘要已按优先级省略部分段落："
+            + "、".join(sorted({_SECTION_NAMES.get(k, k) for k in omitted}))
+            + "；日志是否读完整请以“处理备注”为准]"
+        )
+    return text, estimate_tokens(text)
+
+
+_SECTION_NAMES = {
+    "env": "运行环境",
+    "notes": "处理备注",
+    "logs": "日志文件",
+    "ranges": "日志时间范围",
+    "errors": "错误截图清单",
+    "custom": "自定义截图清单",
+    "keywords": "关键词统计",
+    "config": "配置摘要",
+    "evidence": "关键日志片段",
+}

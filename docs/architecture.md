@@ -34,10 +34,14 @@ OnebotMaaLogAnalyzer/
 │   ├── client.py        #   WebSocket 客户端/服务端
 │   └── handler.py       #   原始事件 → service 桥接
 ├── core/                # [框架] 基础设施 — 功能模块的唯一依赖入口
-│   ├── models.py        #   Pydantic 数据模型（配置 / 设置 / 任务记录）
+│   ├── models.py        #   Pydantic 数据模型（配置 / 设置 / 任务记录 / LLM / 报告）
 │   ├── archive_names.py #   日志包命名识别（MXU / MFAA / MaaFwApp / 分卷）
 │   ├── data_manager.py  #   JSON 持久化（多配置 + .tmp 原子写）
-│   ├── llm.py           #   OpenAI 兼容 LLM 客户端
+│   ├── tokens.py        #   token 估算 / 裁剪 / 折叠（零第三方依赖）
+│   ├── llm.py           #   单端点执行器（连接池 + 错误分类）
+│   ├── llm_pool.py      #   候选编排（顺序失败转移 / 能力过滤 / 熔断）
+│   ├── vision.py        #   多模态图片选取与 data URL 构造
+│   ├── ai_usage.py      #   模型用量 JSONL 记录（/maa ai）
 │   └── service.py       #   Bot 能力 API + 配置管理 + 事件分发
 ├── features/            # [功能] 所有业务功能
 │   └── maa/             #   [日志分析]
@@ -48,7 +52,8 @@ OnebotMaaLogAnalyzer/
 │       ├── repo.py             # 项目代码检索（仓库/版本/tag 管理）
 │       ├── repo_tools.py       # agent 模式的仓库工具集（含路径沙箱）
 │       ├── log_tools.py        # 日志包工具（AI 自主读压缩包内原始文件）
-│       ├── attachments.py      # 结果附图/附件（来源限定 + 相对路径沙箱 + 图文混排）
+│       ├── attachments.py      # 结果附件（来源限定 + 相对路径沙箱 + 看图指令）
+│       ├── render/             # 图片化报告（Markdown → 无头浏览器 → 分页截图）
 │       ├── safety.py           # 路径安全策略（凭据/密钥类文件禁止外发）
 │       ├── followup.py         # 追问答疑会话管理（内存 + 落盘，重启后可续）
 │       ├── history.py          # 分析历史归档（日志包 / 消息 ID / 会话状态 / 周期清理）
@@ -74,8 +79,14 @@ OnebotMaaLogAnalyzer/
 │       ├── commands.json     # 指令与权限设置
 │       ├── history/          # 分析历史（日志包 + 追问上下文 + 会话状态，按周期自动清理）
 │       └── jobs/records.json # 分析任务记录
+├── templates/           # 图片化报告模板（发布包必须包含）
+│   └── default/         #   内置模板：page.html / header.html / footer.html / style.css
 └── logs/                # 日志文件（时间命名）
 ```
+
+> `data/ai_usage.jsonl` 记录每次模型调用的端点、token 用量与会话 ID
+> （`/maa ai` 按会话聚合读取：一次分析 + 其追问算同一会话）；
+> `data/_browser_profile*` 是渲染浏览器的独立配置目录，可安全删除。
 
 ## 事件订阅
 

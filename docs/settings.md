@@ -97,11 +97,14 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 | `send_images` | `true` | 是否允许模型附图 |
 | `max_report_images` | `4` | 最多附带图片数 |
 | `send_repo_images` | `true` | 是否允许从仓库取模板图 |
-| `max_image_mb` | `5` | 单张图大小上限 MB |
 | `send_files` | `true` | 是否允许附带任意文件 |
 | `max_report_files` | `2` | 最多附带文件数 |
-| `max_file_attachment_mb` | `20` | 单个附件文件大小上限 MB |
-| `inline_attachments` | `true` | 附件是否插在文字中间（图文混排） |
+| `max_file_attachment_mb` | `20` | 单个**非图片**附件大小上限 MB |
+| `inline_attachments` | `true` | 附件是否插在文字中间（旧配置兼容项） |
+
+> 图片没有单张体积上限：渲染时按正文宽度等比缩放。呈现方式（内联 / 单独发送、
+> 是否额外上传 `.md`）由 `bot.configs.<名称>.report` 控制，见
+> [图片化报告与模板](render.md)。
 
 ## 追问答疑
 
@@ -133,7 +136,7 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 | `max_zip_size_mb` | `100` | zip 下载大小上限 MB |
 | `max_total_uncompressed_mb` | `120` | 解压总大小上限 MB |
 | `max_zip_members` | `300` | 压缩包内成员数上限 |
-| `max_prompt_chars` | `600000` | 发送给 AI 的摘要最大字符数 |
+| `max_prompt_chars` | `200000` | 摘要字符上限（作为 token 预算的兜底；按优先级裁剪，不会先丢关键证据） |
 | `max_log_files` | `6` | 最多处理日志文件数（按 UI 布局优先选择框架日志 / UI 日志 / 运行记录） |
 | `max_maafw_bak_files` | `1` | 最多纳入摘要的 `maafw.bak.*` 轮转备份日志数；`0` = 不纳入 |
 | `max_maafw_bak_mb` | `64` | 单个 `maafw.bak` 大小上限 MB；`0` = 不限制 |
@@ -182,16 +185,20 @@ MaaFramework 的日志按大小轮转：写满当前 `maafw.log` 后把它改名
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `system_prompt` | 空 | 自定义系统提示词；空 = 按项目名生成默认人设 |
-| `temperature` | 空 | 覆盖全局温度，空 = 用全局 |
-| `model` | 空 | 覆盖全局模型名，空 = 用全局 |
-| `llm_timeout_seconds` | `900` | 单次 AI 调用超时 |
+| `ai_stage_timeout_seconds` | `300` | 整个 AI 阶段（含工具循环与收敛）的总时长上限 |
+| `max_context_tokens` | `0` | 上下文 token 预算；`0` = 用 `llm.defaults.max_context_tokens` |
 | `digest_timeout_seconds` | `0` | 摘要提取超时，`0` = 不限制 |
+| `analysis_cache_hours` | `0` | 分析结果缓存小时数（进程内，按 file_id 命中，重载即清空）；`0` = 关闭 |
+| `circuit_breaker_enabled` | `true` | 连续失败时熔断端点并降级为模板报告 |
+
+> 模型选择与温度已下移到 `bot.configs.<名称>.llm`，见
+> [配置 · LLM](configuration.md#llm端点与候选模型)。
 
 ## 并发
 
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `analysis_concurrency` | `1` | 同时进行的分析数 |
+| `analysis_concurrency` | `2` | 同时进行的 AI 分析数（仓库状态相关的配置仍按配置串行） |
 | `download_concurrency` | `2` | 同时进行的下载数 |
 | `download_timeout_seconds` | `120` | 下载超时秒数 |
 

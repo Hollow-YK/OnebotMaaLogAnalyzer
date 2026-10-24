@@ -1,0 +1,70 @@
+{
+  "name": "图片化报告 — Markdown 分块渲染 + 附件内联",
+  "description": "验证 report.render=image：正文按 <!-- section --> 分块渲染为图片，图片附件内联，非图片附件仍上传群文件，内部标记不泄露给用户。",
+  "setup": {
+    "model_report": "<!-- section: 结论 -->\n**调试报告**：检测到 ERROR 记录。\n\n[附件@日志: on_error/on_error_20260101_120002.png]\n\n<!-- section: 关键证据 -->\n- `ERROR` Task.StartUp Failed\n\n[附件@日志: config/mxu-MaaXXX.json]\n\n<!-- section: 处理建议 -->\n1. 检查任务配置。\n",
+    "configs": {
+      "渲染组": {
+        "listen_groups": ["555002"],
+        "notify_group": "555002",
+        "llm": {
+          "models": [
+            { "name": "default", "model": "gpt-4o-mini" }
+          ]
+        },
+        "report": {
+          "render": "image",
+          "template": "default",
+          "max_width_px": 720,
+          "max_height_px": 2400,
+          "max_pages": 4
+        },
+        "vision": { "enabled": false },
+        "settings": {
+          "send_progress_message": false,
+          "max_report_images": 2,
+          "max_report_files": 2
+        },
+        "project": {
+          "name": "MaaXXX"
+        }
+      }
+    },
+    "files": {
+      "555002": [
+        {
+          "file_name": "MaaXXX-logs-render.zip",
+          "file_id": "fid_render",
+          "size": 2048,
+          "modify_time": 1767225600
+        }
+      ]
+    }
+  },
+  "scenarios": [
+    {
+      "name": "渲染 — 报告发送为图片，文件附件仍上传",
+      "event": {
+        "post_type": "notice",
+        "notice_type": "group_upload",
+        "group_id": 555002,
+        "user_id": 10001,
+        "file": {
+          "id": "fid_render",
+          "name": "MaaXXX-logs-render.zip",
+          "size": 2048
+        }
+      },
+      "assert": {
+        "no_error": true,
+        "api_segments_include": "image",
+        "api_actions_include": "upload_group_file",
+        "reply_not_contains": [
+          "<!-- section",
+          "[附件",
+          "[看图"
+        ]
+      }
+    }
+  ]
+}

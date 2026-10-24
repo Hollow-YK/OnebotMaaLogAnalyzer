@@ -2,7 +2,7 @@
   "name": "附件安全 — 来源限定 / 相对路径 / 敏感文件",
   "description": "验证附件的三道防线：① 必须指定来源 ② 必须是相对路径 ③ 凭据密钥类文件一律拒绝外发。模型被刻意诱导请求敏感文件，Bot 必须全部拒绝且不泄露内容。",
   "setup": {
-    "model_report": "结论：调试用报告。\n\n尝试请求各种敏感文件：\n[附件@项目: .env]\n[附件@项目: sub/.env]\n[附件@项目: server.pem]\n[附件@项目: id_rsa]\n[附件@项目: .git/config]\n[附件@项目: sub/.git/config]\n[附件@项目: .aws/credentials]\n\n尝试绝对路径与越界：\n[附件@项目: C:/Windows/system32/config.json]\n[附件@项目: ../../etc/passwd]\n[附件@项目: /etc/passwd]\n\n缺少来源标记：\n[附件: config/app.json]\n\n正常请求（应放行）：\n[附件@项目: config/app.json]\n[附图@项目: assets/resource/image/Start2.png]\n\n需要补充：无。",
+    "model_report": "结论：调试用报告。\n\n尝试请求各种敏感文件：\n[附件@项目: .env]\n[附件@项目: sub/.env]\n[附件@项目: server.pem]\n[附件@项目: id_rsa]\n[附件@项目: .git/config]\n[附件@项目: sub/.git/config]\n[附件@项目: .aws/credentials]\n\n尝试绝对路径与越界：\n[附件@项目: C:/Windows/system32/config.json]\n[附件@项目: ../../etc/passwd]\n[附件@项目: /etc/passwd]\n\n缺少来源标记：\n[附件: config/app.json]\n\n正常请求（应放行）：\n[附件@项目: config/app.json]\n[附件@项目: assets/resource/image/Start2.png]\n\n需要补充：无。",
     "mock_repo": {
       "assets/resource/image/Start2.png": "fake-png-bytes",
       "assets/resource/pipeline/PVP.json": {

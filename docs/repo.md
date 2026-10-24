@@ -72,6 +72,8 @@
 | `max_tool_rounds` | `8` | **agent** 工具调用最大轮次 |
 | `max_tool_calls_per_round` | `6` | **agent** 单轮最多执行的工具数 |
 | `max_tool_result_chars` | `30000` | **agent** 单次工具结果字符上限 |
+| `max_tool_result_tokens` | `0` | **agent** 单次工具结果 token 上限；`0` = 由字符上限估算 |
+| `max_tool_context_tokens` | `0` | 工具结果累计 token 预算；`0` = 不超过上下文预算的 50% |
 | `agent_deadline_seconds` | `600` | **agent** 循环总时长上限 |
 | `extensions` | `json/jsonc/yaml/yml/toml/md/txt` | 参与扫描的文件扩展名 |
 | `max_file_kb` | `256` | 跳过大于该值的文件 KB |
@@ -99,3 +101,5 @@
 > **AI 远端操作受限**：AI 只能调用不带参数的 `pull_latest` 更新此配置的仓库；不得指定 URL、执行任意 Git 命令。获取 tag / commit 的工具由 `allow_ai_switch_tag` 控制（与预下载是否开启无关），且受 `max_tag_switch_rounds` 限制。
 >
 > **本地开发安全**：若 `path` 指向你正在开发的仓库且存在未提交改动，Bot 会跳过版本切换（`refuse_dirty_worktree`），避免 `checkout` 破坏工作区；此时仍会检索当前分支的代码。
+>
+> **并发与仓库状态**：启用仓库（`repo.enabled=true`）的配置**仍按配置串行分析**——切换 tag、还原位置都会改动同一个工作区，并发会互相干扰。其它配置（只用日志包、不开仓库）不受此锁限制，`settings.analysis_concurrency` 对它们真正生效。因此不要把「同一配置下的多份日志并发分析」当成受支持的行为；需要更高吞吐时请拆成多个配置，并给每个配置独立的仓库来源或 `path`。

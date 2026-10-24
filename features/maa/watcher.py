@@ -42,6 +42,8 @@ class LogWatcher:
         self._active: dict[tuple[str, str], float] = {}
         # (群, 归档标识) → 正在等待分卷到齐的任务
         self._part_batches: dict[tuple[str, str], dict] = {}
+        # 已提示过「报告已回退纯文本」的配置（每进程每配置只提示一次）
+        self._render_noticed: set[str] = set()
 
     # ════════════════════════════════════════════════════════════
     # 去重
@@ -390,6 +392,7 @@ class LogWatcher:
         max_chars = max(1000, int(settings.reply_chunk_chars or 3500))
         # 按片段顺序发送（文本 / 图片 / 文件），收集 message_id 供引用追问
         sent_ids = await self._send_outcome(group_int, outcome, settings, max_chars)
+        await self._notify_render_fallback(cfg, group_int, outcome)
 
         # 把消息 ID 补写到历史归档（使引用可跨天定位）
         self._link_history(cfg, outcome, sent_ids)
@@ -403,6 +406,19 @@ class LogWatcher:
             await self._send_outcome(
                 int(notify), outcome, settings, max_chars, link_history=False
             )
+
+    async def _notify_render_fallback(self, cfg: ConfigState, group_id: int,
+                                      outcome) -> None:
+        """浏览器缺失 / 渲染失败时，向通知群提示一次（每配置每进程一次）。"""
+        notice = str(getattr(outcome, "render_notice", "") or "")
+        if not notice or cfg.name in self._render_noticed:
+            return
+        self._render_noticed.add(cfg.name)
+        target = cfg.info.notify_group or str(group_id)
+        try:
+            await self.s.send_text(int(target), notice)
+        except Exception as exc:
+            logger.warning(f"[监听] 发送渲染降级提示失败：{exc}")
 
     async def _send_outcome(self, group_id: int, outcome, settings,
                             max_chars: int, *, link_history: bool = True) -> list:
@@ -525,6 +541,7 @@ class LogWatcher:
                 message_ids=message_ids or [],
                 history_id=getattr(outcome, "history_id", ""),
                 digest=getattr(outcome, "digest", None),
+                session_id=getattr(outcome, "session_id", ""),
             )
         except Exception as exc:
             logger.warning(f"[监听] 开启追问会话失败：{exc}")

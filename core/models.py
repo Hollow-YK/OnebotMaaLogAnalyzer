@@ -5,6 +5,9 @@
   - ConfigInfo       单个配置的群组信息（监听群 + 通知群）
   - CommandConfig    QQ 指令系统设置（权限等级 / 前缀）
   - RepoConfig       项目代码仓库设置（供 AI 对照源码）
+  - LLM*Config       LLM 端点 / 模型 / 候选 / 全局默认
+  - VisionConfig     多模态（看图）设置
+  - ReportConfig     图片化报告设置
   - AnalysisSettings 日志分析设置（全局默认 + 各配置可覆盖）
   - LogFileItem      群文件条目
   - JobRecord        一次分析任务的运行记录
@@ -80,6 +83,143 @@ class CommandConfig(BaseModel):
         return 0
 
 
+class ModelSupports(BaseModel):
+    """模型能力声明：决定候选模型能否满足某次调用。"""
+
+    tools: bool = False
+    vision: bool = False
+    json_mode: bool = False
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+
+class ModelSpec(BaseModel):
+    """全局 `llm.providers[].models[]`：端点上的一个模型及其参数。"""
+
+    model: str = ""
+    supports: ModelSupports = Field(default_factory=ModelSupports)
+    max_tokens: int = 0          # 0 = 用 llm.defaults.max_tokens
+    max_context_tokens: int = 0  # 0 = 用 llm.defaults.max_context_tokens
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+
+class LLMProviderConfig(BaseModel):
+    """全局 `llm.providers[]`：一个 OpenAI 兼容端点。"""
+
+    name: str = ""
+    kind: str = "openai"          # 首版只实现 openai
+    base_url: str = ""
+    api_key: str = ""
+    max_concurrency: int = 2
+    timeout_seconds: int = 180
+    connect_timeout_seconds: int = 10
+    max_retries: int = 2
+    models: List[ModelSpec] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+    def find_model(self, name: str) -> Optional[ModelSpec]:
+        """按模型名查找；找不到返回 None。"""
+        target = str(name or "").strip()
+        for spec in self.models:
+            if spec.model == target:
+                return spec
+        return None
+
+
+class LLMDefaults(BaseModel):
+    """全局 `llm.defaults`：参数兜底值。"""
+
+    temperature: float = 0.2
+    top_p: float = 1.0
+    max_tokens: int = 8192
+    max_context_tokens: int = 48000
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+
+class CircuitBreakerConfig(BaseModel):
+    """全局 `llm.circuit_breaker`：端点级熔断。"""
+
+    failure_threshold: int = 3
+    cooldown_seconds: int = 300
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+
+class LLMGlobalConfig(BaseModel):
+    """config.json → `llm`（端点、密钥、模型能力与兜底参数）。"""
+
+    providers: List[LLMProviderConfig] = Field(default_factory=list)
+    defaults: LLMDefaults = Field(default_factory=LLMDefaults)
+    circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig)
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+
+class ModelRef(BaseModel):
+    """`bot.configs.<名称>.llm.models[]` 中的一个候选引用。"""
+
+    name: str = ""
+    model: str = ""
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+
+class ConfigLLM(BaseModel):
+    """`bot.configs.<名称>.llm`：本配置按优先级尝试的候选模型列表。"""
+
+    models: List[ModelRef] = Field(default_factory=list)
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    top_p: Optional[float] = None
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+
+class VisionConfig(BaseModel):
+    """`bot.configs.<名称>.vision`：多模态（给模型看图）设置。"""
+
+    enabled: bool = True
+    max_images: int = 4
+    max_image_kb: int = 800
+    detail: str = "high"
+    attach_error_screenshots: bool = True
+    attach_repo_templates: bool = True
+    allow_model_request: bool = True
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+
+class ReportConfig(BaseModel):
+    """`bot.configs.<名称>.report`：图片化报告设置。"""
+
+    render: str = "auto"          # image / text / auto
+    template: str = "default"
+    max_width_px: int = 1080
+    max_height_px: int = 4096
+    max_pages: int = 6
+    device_scale_factor: float = 1.0
+    font_family: str = ""
+    browser_path: str = ""
+    reuse_browser: bool = True
+    render_timeout_ms: int = 8000
+    embed_attachments: bool = True
+    attach_markdown: bool = False
+    fallback_to_text: bool = True
+    render_followup: bool = True
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+    def render_mode(self) -> str:
+        """规范化 render 取值（非法值按 auto 处理）。"""
+        mode = str(self.render or "auto").strip().lower()
+        return mode if mode in ("image", "text", "auto") else "auto"
+
+
 class RepoConfig(BaseModel):
     """
     项目代码仓库设置 — 让 AI 在分析时对照源码核对节点定义、阈值与 expected 文本。
@@ -133,6 +273,8 @@ class RepoConfig(BaseModel):
     max_tool_rounds: int = 8           # 工具调用最大轮次
     max_tool_calls_per_round: int = 6  # 单轮最多执行的工具数
     max_tool_result_chars: int = 30000  # 单次工具结果字符上限
+    max_tool_result_tokens: int = 0    # 0 = 由 max_tool_result_chars 估算推导
+    max_tool_context_tokens: int = 0   # 0 = 不超过本次上下文预算的 50%
     agent_deadline_seconds: int = 600  # agent 循环总时长上限
 
     # ── 扫描范围 ──
@@ -291,7 +433,6 @@ class AnalysisSettings(BaseModel):
     send_images: bool = True            # 报告后附带相关图片
     max_report_images: int = 4          # 最多附带几张图
     send_repo_images: bool = True       # 附带仓库中的模板图（仅本地仓库可用）
-    max_image_mb: int = 5               # 单张图大小上限 MB
     # ── 结果附件（非图片文件，以群文件形式发送）──
     send_files: bool = True             # 允许模型附带任意文件（如配置、pipeline JSON）
     max_report_files: int = 2           # 最多附带几个文件
@@ -318,16 +459,21 @@ class AnalysisSettings(BaseModel):
     history_max_total_mb: int = 4096    # 历史目录总大小上限 MB（安全上限，0=不限）
 
     # ── 并发与超时 ──
-    analysis_concurrency: int = 1
+    analysis_concurrency: int = 2
     download_concurrency: int = 2
     download_timeout_seconds: int = 120
     digest_timeout_seconds: int = 0
-    llm_timeout_seconds: int = 900
+    # 整个 AI 阶段（含工具循环与收敛）的总时长上限
+    ai_stage_timeout_seconds: int = 300
+    # 0 = 用 llm.defaults.max_context_tokens；非 0 时按配置覆盖
+    max_context_tokens: int = 0
+    # 分析结果缓存小时数；0 = 关闭
+    analysis_cache_hours: int = 0
+    # 连续失败触发熔断（端点级冷却），失败时降级为模板报告
+    circuit_breaker_enabled: bool = True
 
     # ── 模型调用 ──
     system_prompt: str = ""
-    temperature: Optional[float] = None  # None=使用全局 LLM 温度
-    model: str = ""                      # 覆盖全局模型名，空=用全局
 
     # ── 日志包工具（让 AI 像读仓库一样读日志包原始文件）──
     # 开启后，即使 repo.enabled=false，分析也会走工具模式：
@@ -342,7 +488,7 @@ class AnalysisSettings(BaseModel):
     # ── 压缩包与摘要 ──
     max_zip_size_mb: int = 100
     max_total_uncompressed_mb: int = 120
-    max_prompt_chars: int = 600000
+    max_prompt_chars: int = 200000
     max_zip_members: int = 300
     max_log_files: int = 6
     max_maafw_bak_files: int = 1
@@ -464,3 +610,8 @@ class ConfigState:
     project: ProjectConfig = field(default_factory=ProjectConfig)
     project_base: dict = field(default_factory=dict)
     project_overrides: dict = field(default_factory=dict)
+
+    # AI 相关配置（完全由 config.json 的 bot.configs.<名称> 决定）
+    llm: ConfigLLM = field(default_factory=ConfigLLM)
+    vision: VisionConfig = field(default_factory=VisionConfig)
+    report: ReportConfig = field(default_factory=ReportConfig)

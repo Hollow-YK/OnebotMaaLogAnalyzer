@@ -74,7 +74,7 @@ jobs:
           for f in main.py requirements.txt README.md LICENSE; do
             cp "$f" "$PKG/"
           done
-          for d in docs bot core features; do
+          for d in docs bot core features templates; do
             cp -r "$d" "$PKG/"
           done
 
@@ -97,7 +97,8 @@ jobs:
           # ── 校验：必需文件齐全 ──
           for required in main.py requirements.txt README.md LICENSE \
                           bot/__init__.py core/__init__.py features/__init__.py \
-                          features/maa/__init__.py; do
+                          features/maa/__init__.py \
+                          templates/default/page.html; do
             if [ ! -e "$PKG/$required" ]; then
               echo "::error::发布包缺少必需文件：$required"
               exit 1

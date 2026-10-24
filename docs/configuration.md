@@ -26,6 +26,29 @@
           "ui": { "mxu": { "enabled": true }, "mfaa": { "enabled": true } },
           "repo": { "enabled": false, "mode": "inject", "url": "https://github.com/MAAXYZ/MaaXXX" }
         },
+        "llm": {
+          "models": [
+            { "name": "default", "model": "gpt-4o-mini" }
+          ]
+        },
+        "vision": {
+          "enabled": true,
+          "max_images": 4,
+          "max_image_kb": 800,
+          "detail": "high",
+          "attach_error_screenshots": true,
+          "attach_repo_templates": true,
+          "allow_model_request": true
+        },
+        "report": {
+          "render": "auto",
+          "template": "default",
+          "max_width_px": 1080,
+          "max_height_px": 4096,
+          "max_pages": 6,
+          "device_scale_factor": 1,
+          "attach_markdown": false
+        },
         "settings": {
           "followup_enabled": true,
           "followup_window_minutes": 0,
@@ -38,13 +61,33 @@
     }
   },
   "llm": {
-    "base_url": "https://api.openai.com",
-    "api_key": "sk-...",
-    "model": "gpt-4o",
-    "temperature": 0.2,
-    "timeout_seconds": 900,
-    "fallback_models": [],
-    "max_tokens": 0
+    "providers": [
+      {
+        "name": "default",
+        "kind": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "api_key": "sk-...",
+        "max_concurrency": 2,
+        "timeout_seconds": 180,
+        "connect_timeout_seconds": 10,
+        "max_retries": 2,
+        "models": [
+          {
+            "model": "gpt-4o-mini",
+            "supports": { "tools": true, "vision": true, "json_mode": true },
+            "max_tokens": 8192,
+            "max_context_tokens": 48000
+          }
+        ]
+      }
+    ],
+    "defaults": {
+      "temperature": 0.2,
+      "top_p": 1.0,
+      "max_tokens": 8192,
+      "max_context_tokens": 48000
+    },
+    "circuit_breaker": { "failure_threshold": 3, "cooldown_seconds": 300 }
   },
   "debug": { "enabled": false, "http_port": 8765, "data_dir": "data/test" },
   "log": { "log_to_file": true, "log_level": "INFO", "log_dir": "logs" }
@@ -63,13 +106,12 @@
 | `onebot.api_timeout_seconds` | API 调用超时（秒），默认 30 |
 | `bot.data_dir` | 数据目录 |
 | `bot.configs` | **多群配置**：配置名 → 监听群 / 通知群 / 设置覆盖 / 指令设置 |
-| `llm.base_url` | OpenAI 兼容接口地址（**必须配置**） |
-| `llm.api_key` | API 密钥 |
-| `llm.model` | 模型名（**必须配置**） |
-| `llm.temperature` | 默认分析温度（可被配置级覆盖） |
-| `llm.timeout_seconds` | 默认 AI 超时（可被配置级覆盖） |
-| `llm.fallback_models` | 备用模型列表，主模型失败时按序尝试 |
-| `llm.max_tokens` | 最大输出 token，`0` 表示不限制 |
+| `llm.providers[]` | **端点与密钥**（OpenAI 兼容），每个端点声明自己的 `models[]` 与能力 |
+| `llm.defaults` | 全局参数兜底：`temperature` / `top_p` / `max_tokens` / `max_context_tokens` |
+| `llm.circuit_breaker` | 端点级熔断：`failure_threshold` / `cooldown_seconds` |
+| `bot.configs.<名称>.llm.models[]` | 该配置按优先级尝试的候选 `{name, model}` 列表 |
+| `bot.configs.<名称>.vision` | 多模态（看图）设置 |
+| `bot.configs.<名称>.report` | 图片化报告设置 |
 | `log.log_to_file` | 是否输出日志到文件 |
 | `log.log_level` | 日志等级：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `log.log_dir` | 日志目录，每次启动生成 `YYYY-MM-DD_HH-MM-SS.log` |
@@ -78,6 +120,93 @@
 | `debug.data_dir` | 调试模式使用的测试数据目录（默认 `data/test`） |
 
 > `config.json` 含 API 密钥与 `access_token`，已被 `.gitignore` 排除，**不要提交到仓库**。
+
+## LLM：端点与候选模型
+
+全局 `llm.providers[]` 只描述**端点与端点上的模型**（含能力与参数）；
+每个配置在 `bot.configs.<名称>.llm.models[]` 里按优先级引用 `{name, model}`，
+**严格按数组顺序失败转移**，不做权重或轮询。
+
+```jsonc
+"bot": {
+  "configs": {
+    "MAN": {
+      "llm": {
+        "models": [
+          { "name": "deepseek", "model": "deepseek-v4.1-flash" },
+          { "name": "deepseek", "model": "deepseek-v4-pro" },
+          { "name": "backup",   "model": "qwen-vl-max" }
+        ],
+        "temperature": 0.2,
+        "max_tokens": 8192
+      }
+    }
+  }
+}
+```
+
+- 参数优先级（低 → 高）：`llm.defaults` → `providers[].models[]` → `bot.configs.<名称>.llm`
+- `supports.tools` / `supports.vision` 决定候选能否满足带工具 / 带图调用：
+  过滤在**原列表顺序**上进行；过滤后为空则该能力降级（不提供工具 / 不注入图片），
+  并在报告中注明，而不是整体失败
+- 引用不存在的端点或模型会在启动时被拒绝（打印具体项并以非 0 退出）
+- 旧版 `llm.base_url` / `api_key` / `model` 结构不再支持：
+  启动会打印迁移提示；`python main.py --print-config-template` 可输出新模板
+- 每个端点一把并发信号量（`max_concurrency`），跨配置共享；`settings.analysis_concurrency`
+  控制任务级并发，两者互不替代
+
+## vision：多模态
+
+```json
+"vision": {
+  "enabled": true,
+  "max_images": 4,
+  "max_image_kb": 800,
+  "detail": "high",
+  "attach_error_screenshots": true,
+  "attach_repo_templates": true,
+  "allow_model_request": true
+}
+```
+
+- 视觉候选从同一份 `llm.models[]` 中按序筛选 `supports.vision=true` 的模型
+- 默认**不缩放图片**，只按原始字节大小过滤（超过 `max_image_kb` 跳过该图）
+- `attach_error_screenshots`：分析开始时自动注入 `on_error/` 截图
+- `allow_model_request`：模型可在工具循环中用 `[看图@日志: 路径]` / `[看图@项目: 路径]`
+  主动请求看图；该指令**不会发送给用户**
+- 连续 2 次读图失败会停止本次看图，并在报告末尾注明
+
+## report：图片化报告
+
+```json
+"report": {
+  "render": "auto",
+  "template": "default",
+  "max_width_px": 1080,
+  "max_height_px": 4096,
+  "max_pages": 6,
+  "device_scale_factor": 1,
+  "font_family": "",
+  "browser_path": "",
+  "reuse_browser": true,
+  "render_timeout_ms": 8000,
+  "embed_attachments": true,
+  "attach_markdown": false,
+  "fallback_to_text": true,
+  "render_followup": true
+}
+```
+
+- `render`：`image`（强制图片）/ `text`（保持纯文本分段）/ `auto`（浏览器可用则图片）
+- 渲染引擎为**无头 Edge / Chrome / Chromium + CDP**，`browser_path` 为空时按平台自动探测
+- 模板固定放在工程根目录 `templates/<目录名>/`（`page.html` 必需，可含
+  `header.html` / `footer.html` / `style.css`）；目录名只允许 `[A-Za-z0-9_-]`
+- 报告正文按 `<!-- section: 标题 -->` 分块顺序拼接；`<!-- page-break -->` 强制换页
+- 内联图片按正文宽度等比缩放，**不再有单张体积上限**
+  （旧的 `settings.max_image_mb` 已删除）
+
+完整的渲染管线、分页算法、浏览器探测顺序与模板编写指南见
+[图片化报告与模板](render.md)。
 
 ## 多群配置
 
@@ -109,6 +238,9 @@
 | `listen_groups` | 要监听的群号列表 |
 | `notify_group` | 分析结果额外推送的群（可选，留空只发回原群） |
 | `project` | **项目相关**：项目名、日志包识别方式、UI 开关、项目代码仓库 |
+| `llm` | **候选模型**：按优先级引用全局 `llm.providers[]` 中的 `{name, model}` |
+| `vision` | **多模态（看图）**：开关、图片数量与体积上限 |
+| `report` | **图片化报告**：渲染模式、模板、分页与浏览器 |
 | `settings` | 该配置的分析设置覆盖（可选，未设置项继承全局 `data/settings.json`），见 [分析设置](settings.md) |
 | `commands` | 该配置的指令与权限设置（可选），见 [QQ 指令](commands.md) |
 

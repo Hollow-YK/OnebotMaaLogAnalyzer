@@ -24,6 +24,7 @@ import zipfile
 from pathlib import PurePosixPath
 from typing import Any, Optional
 
+from core.tokens import trim_to_tokens
 from features.maa.log_digest import IMAGE_SUFFIXES
 from features.maa.safety import describe_rejection, is_sensitive_path
 
@@ -51,11 +52,16 @@ class LogArchiveTools:
 
     def __init__(self, zip_path: str, *, max_file_kb: int = 512,
                  max_result_chars: int = 30000,
-                 max_search_files: int = 2000):
+                 max_search_files: int = 2000,
+                 max_result_tokens: int = 0):
         self.zip_path = str(zip_path or "")
         self.max_read_bytes = max(64, int(max_file_kb or 512)) * 1024
         self.max_result_chars = max(2000, int(max_result_chars or 30000))
         self.max_search_files = max(50, int(max_search_files or 2000))
+        self.max_result_tokens = max(0, int(max_result_tokens or 0))
+        # 压缩包常被多次工具调用反复读取：进程内缓存句柄与成员索引
+        self._archive: Optional[zipfile.ZipFile] = None
+        self._member_list: Optional[list[zipfile.ZipInfo]] = None
 
     # ════════════════════════════════════════════════════════════
     # 内部工具
@@ -65,11 +71,19 @@ class LogArchiveTools:
         """压缩包是否可读（存在且是合法 zip）。"""
         if not self.zip_path:
             return False
-        try:
-            with zipfile.ZipFile(self.zip_path):
-                return True
-        except (zipfile.BadZipFile, OSError):
-            return False
+        if self._archive is not None:
+            return True
+        return self._open() is not None
+
+    def close(self) -> None:
+        """关闭缓存的压缩包句柄（分析结束时调用）。"""
+        archive, self._archive = self._archive, None
+        self._member_list = None
+        if archive is not None:
+            try:
+                archive.close()
+            except Exception:
+                pass
 
     @staticmethod
     def _normalize(rel: str) -> Optional[str]:
@@ -93,15 +107,30 @@ class LogArchiveTools:
         return True
 
     def _open(self) -> Optional[zipfile.ZipFile]:
+        if self._archive is not None:
+            return self._archive
         try:
-            return zipfile.ZipFile(self.zip_path)
+            self._archive = zipfile.ZipFile(self.zip_path)
+            self._member_list = [
+                info for info in self._archive.infolist() if not info.is_dir()
+            ]
+            return self._archive
         except (zipfile.BadZipFile, OSError) as exc:
             logger.warning(f"[日志工具] 无法打开压缩包：{exc}")
             return None
 
-    @staticmethod
-    def _members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
-        return [i for i in archive.infolist() if not i.is_dir()]
+    def _members(self, archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+        if self._member_list is None:
+            self._member_list = [
+                info for info in archive.infolist() if not info.is_dir()
+            ]
+        return self._member_list
+
+    def _finish(self, text: str) -> str:
+        """按 token 预算裁剪工具结果（0 = 不限）。"""
+        if self.max_result_tokens <= 0:
+            return text
+        return trim_to_tokens(text, self.max_result_tokens)
 
     # ════════════════════════════════════════════════════════════
     # 工具实现
@@ -116,23 +145,20 @@ class LogArchiveTools:
         archive = self._open()
         if archive is None:
             return "日志包不可用（可能已被清理）"
-        try:
-            prefix = f"{rel}/" if rel else ""
-            files: list[str] = []
-            dirs: set[str] = set()
-            for info in self._members(archive):
-                name = info.filename.replace("\\", "/")
-                if prefix and not name.startswith(prefix):
-                    continue
-                rest = name[len(prefix):]
-                if not rest:
-                    continue
-                if "/" in rest:
-                    dirs.add(rest.split("/", 1)[0] + "/")
-                else:
-                    files.append(f"{rest}  ({info.file_size} 字节)")
-        finally:
-            archive.close()
+        prefix = f"{rel}/" if rel else ""
+        files: list[str] = []
+        dirs: set[str] = set()
+        for info in self._members(archive):
+            name = info.filename.replace("\\", "/")
+            if prefix and not name.startswith(prefix):
+                continue
+            rest = name[len(prefix):]
+            if not rest:
+                continue
+            if "/" in rest:
+                dirs.add(rest.split("/", 1)[0] + "/")
+            else:
+                files.append(f"{rest}  ({info.file_size} 字节)")
 
         if not files and not dirs:
             where = rel or "压缩包根目录"
@@ -141,7 +167,7 @@ class LogArchiveTools:
         lines = [f"日志包 {rel or '/'} 下的内容（{len(dirs) + len(files)} 项）："]
         lines.extend(sorted(dirs))
         lines.extend(sorted(files))
-        return "\n".join(lines[:300])
+        return self._finish("\n".join(lines[:300]))
 
     async def search(self, pattern: str, path: str = "",
                      max_results: int = 60) -> str:
@@ -171,37 +197,34 @@ class LogArchiveTools:
         hits: list[str] = []
         scanned = 0
         truncated = False
-        try:
-            prefix = f"{rel}/" if rel else ""
-            for info in self._members(archive):
-                name = info.filename.replace("\\", "/")
-                if prefix and not name.startswith(prefix):
-                    continue
-                if not self._is_text_member(name):
-                    continue
-                if is_sensitive_path(name):
-                    continue
-                if scanned >= self.max_search_files:
-                    truncated = True
-                    break
+        prefix = f"{rel}/" if rel else ""
+        for info in self._members(archive):
+            name = info.filename.replace("\\", "/")
+            if prefix and not name.startswith(prefix):
+                continue
+            if not self._is_text_member(name):
+                continue
+            if is_sensitive_path(name):
+                continue
+            if scanned >= self.max_search_files:
+                truncated = True
+                break
 
-                scanned += 1
-                try:
-                    with archive.open(info) as handle:
-                        for lineno, raw in enumerate(handle, 1):
-                            line = raw.decode("utf-8", "ignore").rstrip("\r\n")
-                            if not regex.search(line):
-                                continue
-                            hits.append(f"{name}:{lineno}: {line.strip()[:300]}")
-                            if len(hits) >= limit:
-                                truncated = True
-                                break
-                except (OSError, RuntimeError, zipfile.BadZipFile):
-                    continue
-                if truncated:
-                    break
-        finally:
-            archive.close()
+            scanned += 1
+            try:
+                with archive.open(info) as handle:
+                    for lineno, raw in enumerate(handle, 1):
+                        line = raw.decode("utf-8", "ignore").rstrip("\r\n")
+                        if not regex.search(line):
+                            continue
+                        hits.append(f"{name}:{lineno}: {line.strip()[:300]}")
+                        if len(hits) >= limit:
+                            truncated = True
+                            break
+            except (OSError, RuntimeError, zipfile.BadZipFile):
+                continue
+            if truncated:
+                break
 
         if not hits:
             return (f"未在日志包中匹配到 {pattern_text!r}"
@@ -212,7 +235,7 @@ class LogArchiveTools:
         text += "\n".join(hits)
         if truncated:
             text += "\n...[结果已截断，可用更精确的 pattern 或限定 path]"
-        return text
+        return self._finish(text)
 
     async def read_file(self, path: str, start_line: Optional[int] = None,
                         end_line: Optional[int] = None) -> str:
@@ -228,23 +251,20 @@ class LogArchiveTools:
         archive = self._open()
         if archive is None:
             return "日志包不可用（可能已被清理）"
-        try:
-            target = None
-            for info in self._members(archive):
-                if info.filename.replace("\\", "/") == rel:
-                    target = info
-                    break
-            if target is None:
-                return f"日志包中不存在该文件：{rel}"
-            if not self._is_text_member(rel):
-                return f"这是二进制文件，无法按文本读取：{rel}"
+        target = None
+        for info in self._members(archive):
+            if info.filename.replace("\\", "/") == rel:
+                target = info
+                break
+        if target is None:
+            return f"日志包中不存在该文件：{rel}"
+        if not self._is_text_member(rel):
+            return f"这是二进制文件，无法按文本读取：{rel}"
 
-            try:
-                raw = archive.read(target)
-            except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-                return f"读取失败：{exc}"
-        finally:
-            archive.close()
+        try:
+            raw = archive.read(target)
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            return f"读取失败：{exc}"
 
         text = raw.decode("utf-8", "ignore")
         lines = text.splitlines()
@@ -279,22 +299,21 @@ class LogArchiveTools:
         if last < end:
             body += (f"\n...[受结果长度限制，行 {last + 1}-{end} 未显示，"
                      f"可用 start_line 继续读]")
-        return header + body
+        return self._finish(header + body)
 
     async def list_images(self) -> str:
         """列出压缩包内的全部图片（便于模型判断能附哪些图）。"""
         archive = self._open()
         if archive is None:
             return "日志包不可用（可能已被清理）"
-        try:
-            images = [
-                f"{info.filename.replace(chr(92), '/')}  ({info.file_size} 字节)"
-                for info in self._members(archive)
-                if PurePosixPath(info.filename).suffix.lower() in IMAGE_SUFFIXES
-            ]
-        finally:
-            archive.close()
+        images = [
+            f"{info.filename.replace(chr(92), '/')}  ({info.file_size} 字节)"
+            for info in self._members(archive)
+            if PurePosixPath(info.filename).suffix.lower() in IMAGE_SUFFIXES
+        ]
         if not images:
             return "日志包内没有图片"
-        return ("日志包内的图片（可用 [附图@日志: 路径] 发送）：\n"
-                + "\n".join(sorted(images)))
+        return self._finish(
+            "日志包内的图片（可用 [附件@日志: 路径] 发送）：\n"
+            + "\n".join(sorted(images))
+        )

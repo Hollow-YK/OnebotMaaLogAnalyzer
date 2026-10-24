@@ -25,7 +25,7 @@ from typing import Any, Optional
 
 from bot.handler import EventHandler
 from core.data_manager import DataManager
-from core.llm import ChatMessage, LLMClient, ToolCall
+from core.llm import ChatMessage, ToolCall
 from core.service import MaaService
 from features.maa.analyzer import MaaAnalyzer
 from features.maa.followup import FollowupStore
@@ -43,7 +43,7 @@ _DEBUG_REPORT = (
     "关键证据：\n"
     "1. [调试] ERROR 日志命中\n\n"
     "下面这张错误截图可以直接看出界面停在哪里：\n"
-    "[附图@日志: on_error/on_error_20260101_120002.png]\n"
+    "[附件@日志: on_error/on_error_20260101_120002.png]\n"
     "可以看到界面没有进入主界面。\n\n"
     "对应的配置内容如下（已附上原文件）：\n"
     "[附件@日志: config/mxu-MaaXXX.json]\n"
@@ -51,7 +51,7 @@ _DEBUG_REPORT = (
     "可能原因：\n"
     "1. 调试模式不执行真实 AI 分析\n\n"
     "处理建议：\n"
-    "1. 配置真实 llm.base_url / llm.api_key / llm.model 后重试\n\n"
+    "1. 配置真实 llm.providers[] 与 bot.configs.<名称>.llm.models[] 后重试\n\n"
     "需要补充：\n"
     "无需补充。"
 )
@@ -274,15 +274,16 @@ class DebugAPI:
 # 模拟 LLM
 # ════════════════════════════════════════════════════════════════
 
-class DebugLLMClient(LLMClient):
-    """不发起真实请求的 LLM 客户端，返回固定结构的模拟分析结果。
+class DebugLLMClient:
+    """不发起真实请求的模拟 LLM 池，返回固定结构的模拟分析结果。
 
-    agent 模式下会先请求一次 search_repo 工具，再输出最终报告，
-    以便离线验证完整的工具调用循环。
+    暴露与 `LLMPool` 相同的调用接口（chat / has_capability / close），
+    agent 模式下会先请求一次工具，再输出最终报告。
     """
 
     def __init__(self):
-        super().__init__(base_url="debug://llm", api_key="", model="debug-model")
+        self.base_url = "debug://llm"
+        self.name = "debug"
         self.prompts: list[str] = []
         self.system_prompts: list[str] = []
         self.tool_rounds: list[list[dict]] = []   # 每轮收到的 tools 定义
@@ -303,17 +304,35 @@ class DebugLLMClient(LLMClient):
     def configured(self) -> bool:
         return True
 
-    async def chat(self, prompt: str, *, system_prompt: str = "",
-                   temperature: Optional[float] = None,
-                   model_override: str = "") -> Optional[str]:
-        self.prompts.append(prompt)
-        self.system_prompts.append(system_prompt)
-        return self.report
+    def describe_all(self) -> list[str]:
+        return ["端点 debug://llm（模拟，不发请求）"]
 
-    async def chat_messages(self, messages: list[dict], *, temperature=None,
-                            model_override: str = "", tools=None,
-                            tool_choice: str = "auto") -> Optional[ChatMessage]:
+    def has_capability(self, config_llm=None, need: str = "") -> bool:
+        return True
+
+    def context_budget(self, config_llm=None, override: int = 0) -> int:
+        return int(override or 48000)
+
+    def session_summary(self, session_id: str = "") -> dict:
+        """调试模式不产生真实用量，返回全 0 的安全摘要。"""
+        return {
+            "calls": 0, "failed": 0,
+            "prompt_tokens": 0, "completion_tokens": 0,
+            "total_tokens": 0, "elapsed_ms": 0,
+            "providers": [], "models": [], "pairs": {},
+        }
+
+    async def close(self) -> None:
+        return None
+
+    async def chat(self, config_llm, messages: list[dict], *,
+                   config_name: str = "", need=(), tools=None,
+                   tool_choice: str = "auto", phase: str = "",
+                   **kwargs) -> Optional[ChatMessage]:
         """模拟一轮工具调用，然后给出最终报告。"""
+        return self._simulate(messages, tools)
+
+    def _simulate(self, messages: list[dict], tools) -> Optional[ChatMessage]:
         self.tool_rounds.append(list(tools or []))
 
         # 收集本轮之前已产生的工具结果
@@ -431,6 +450,14 @@ class DebugManager:
         service = MaaService(api=api, dm=dm)  # type: ignore[arg-type]
         service.load()
         service.sync_from_config(bot_cfg.get("configs") or {})
+        # 调试场景默认走纯文本：避免测试夹具依赖本机浏览器；
+        # 需要验证渲染的场景显式声明 report.render=image/auto。
+        for name, spec in (bot_cfg.get("configs") or {}).items():
+            if not isinstance(spec, dict) or spec.get("report"):
+                continue
+            state = service.configs.get(name)
+            if state is not None:
+                state.report.render = "text"
 
         llm = DebugLLMClient()
         history = HistoryStore(dm._dir)

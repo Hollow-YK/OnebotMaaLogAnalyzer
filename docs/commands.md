@@ -10,6 +10,7 @@
 /maa repo              查看项目代码仓库设置
 /maa jobs              最近分析记录
 /maa history           分析历史归档（可跨天追问）
+/maa ai [n]            最近 n 个会话（分析 + 追问）的用量（默认 5 个）
 /maa followup          追问答疑会话状态
 
 /maa set <项> <值>      修改分析设置（如 /maa set max_log_files 3）
@@ -31,6 +32,16 @@
 
 /maa followup close    结束当前追问会话
 ```
+
+## 模型与报告
+
+- `/maa get` 会先列出**候选模型顺序**（`name/model → …`）、看图开关与报告渲染模式，
+  然后才是可改的分析设置
+- 模型候选不在 `settings` 中，需要改 `config.json` 的
+  `bot.configs.<名称>.llm.models[]` 后 `/maa reload`
+- `/maa ai [n]` 读取 `data/ai_usage.jsonl`，按**会话**聚合：同一份日志的分析与它后续的
+  追问（引用的任意消息）算作一个会话，显示该会话的调用次数、分析/追问拆分、
+  输入/输出/合计 token、耗时与用到的 `provider/model`；不包含任何密钥
 
 ## 权限等级
 

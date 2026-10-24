@@ -43,7 +43,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from core.models import AnalysisSettings, CommandConfig, ConfigInfo, ConfigState
+from core.models import (
+    AnalysisSettings,
+    CommandConfig,
+    ConfigInfo,
+    ConfigState,
+    ReportConfig,
+    VisionConfig,
+)
+from core.service import _build_model
 
 if TYPE_CHECKING:
     from debug import DebugManager
@@ -368,6 +376,15 @@ def _apply_setup(manager: "DebugManager", setup: dict):
                 notifyGroup=spec.get("notify_group"),
             )
             state = ConfigState(name=name, info=info)
+            # AI 段：夹具显式声明才启用；未声明时报告走纯文本，
+            # 避免测试依赖本机浏览器。
+            state.llm = manager.service._build_config_llm(
+                spec.get("llm") or {}, name
+            )
+            state.vision = _build_model(VisionConfig, spec.get("vision") or {}, name)
+            state.report = _build_model(ReportConfig, spec.get("report") or {}, name)
+            if not spec.get("report"):
+                state.report.render = "text"
             raw_settings = spec.get("settings")
             if isinstance(raw_settings, dict):
                 raw_settings = json.loads(json.dumps(raw_settings))
@@ -704,6 +721,10 @@ def _sync_cfg_entry(manager: "DebugManager", name: str, spec: dict,
     commands = spec.get("commands")
     if isinstance(commands, dict):
         entry["commands"] = json.loads(json.dumps(commands))
+    for key in ("llm", "vision", "report"):
+        value = spec.get(key)
+        if isinstance(value, dict):
+            entry[key] = json.loads(json.dumps(value))
     project = spec.get("project")
     if isinstance(project, dict):
         cloned_project = json.loads(json.dumps(project))

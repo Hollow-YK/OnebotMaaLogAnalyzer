@@ -27,8 +27,9 @@ from typing import Optional
 from bot.api import OneBotAPI
 from bot.client import OneBotWS
 from bot.handler import EventHandler
+from core.ai_usage import UsageStore
 from core.data_manager import DataManager
-from core.llm import LLMClient
+from core.llm_pool import LLMPool, detect_legacy_llm, validate_llm_config
 from core.service import MaaService
 from features.maa.analyzer import MaaAnalyzer
 from features.maa.followup import FollowupStore
@@ -156,6 +157,39 @@ def default_config() -> dict:
                             "restore_latest_after_analyze": True,
                         },
                     },
+                    # 本配置可用的模型（按顺序失败转移；引用全局 llm.providers）
+                    "llm": {
+                        "models": [
+                            {"name": "default", "model": "gpt-4o-mini"},
+                        ],
+                    },
+                    # 多模态：把错误截图 / 模板图交给视觉模型（默认开启）
+                    "vision": {
+                        "enabled": True,
+                        "max_images": 4,
+                        "max_image_kb": 800,
+                        "detail": "high",
+                        "attach_error_screenshots": True,
+                        "attach_repo_templates": True,
+                        "allow_model_request": True,
+                    },
+                    # 图片化报告：auto = 浏览器可用则图片，否则纯文本
+                    "report": {
+                        "render": "auto",
+                        "template": "default",
+                        "max_width_px": 1080,
+                        "max_height_px": 4096,
+                        "max_pages": 6,
+                        "device_scale_factor": 1,
+                        "font_family": "",
+                        "browser_path": "",
+                        "reuse_browser": True,
+                        "render_timeout_ms": 8000,
+                        "embed_attachments": True,
+                        "attach_markdown": False,
+                        "fallback_to_text": True,
+                        "render_followup": True,
+                    },
                     "settings": {
                         # 结果附图 / 附件：报告后附带错误截图、模板图或相关文件
                         "send_images": True,
@@ -174,6 +208,11 @@ def default_config() -> dict:
                         "history_enabled": True,
                         "history_period_hours": 24,
                         "history_keep_periods": 2,
+                        # 整个 AI 阶段（含工具循环与收敛）的总时长上限
+                        "ai_stage_timeout_seconds": 300,
+                        # 0 = 用 llm.defaults.max_context_tokens
+                        "max_context_tokens": 0,
+                        "analysis_concurrency": 2,
                     },
                     # QQ 指令（默认前缀 /maa，发 `/maa help` 查看全部）
                     "commands": {
@@ -192,14 +231,39 @@ def default_config() -> dict:
                 }
             },
         },
+        # 全局 LLM 端点与模型能力；具体用哪个模型由
+        # bot.configs.<名称>.llm.models[] 按优先级声明
         "llm": {
-            "base_url": "https://api.openai.com",
-            "api_key": "",
-            "model": "",
-            "temperature": 0.2,
-            "timeout_seconds": 900,
-            "fallback_models": [],
-            "max_tokens": 0,
+            "providers": [
+                {
+                    "name": "default",
+                    "kind": "openai",
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key": "",
+                    "max_concurrency": 2,
+                    "timeout_seconds": 180,
+                    "connect_timeout_seconds": 10,
+                    "max_retries": 2,
+                    "models": [
+                        {
+                            "model": "gpt-4o-mini",
+                            "supports": {"tools": True, "vision": True, "json_mode": True},
+                            "max_tokens": 8192,
+                            "max_context_tokens": 48000,
+                        }
+                    ],
+                }
+            ],
+            "defaults": {
+                "temperature": 0.2,
+                "top_p": 1.0,
+                "max_tokens": 8192,
+                "max_context_tokens": 48000,
+            },
+            "circuit_breaker": {
+                "failure_threshold": 3,
+                "cooldown_seconds": 300,
+            },
         },
         "debug": {
             "enabled": False,
@@ -224,8 +288,14 @@ def load_config(path: str = "config.json") -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def build_llm_client(llm_cfg: dict) -> LLMClient:
-    return LLMClient.from_config(llm_cfg)
+def build_llm_pool(llm_cfg: dict, usage: Optional[UsageStore] = None) -> LLMPool:
+    return LLMPool(llm_cfg, usage=usage)
+
+
+def _print_config_template() -> bool:
+    """`--print-config-template`：把默认配置模板输出到标准输出。"""
+    print(json.dumps(default_config(), ensure_ascii=False, indent=2))
+    return True
 
 
 async def _history_cleanup_loop(history, service, interval_seconds: int = 3600):
@@ -267,7 +337,7 @@ class BotRuntime:
         self.api: Optional[OneBotAPI] = None
         self.ws: Optional[OneBotWS] = None
         self.dm: Optional[DataManager] = None
-        self.llm: Optional[LLMClient] = None
+        self.llm: Optional[LLMPool] = None
         self.service: Optional[MaaService] = None
         self.history = None
         self.analyzer = None
@@ -314,10 +384,11 @@ class BotRuntime:
 
         self.dm = DataManager(bot_cfg.get("data_dir", "data"))
 
-        self.llm = build_llm_client(llm_cfg)
+        self.llm = build_llm_pool(llm_cfg, UsageStore(self.dm._dir))
         if not self.llm.configured:
-            logger.warning("⚠ 未配置 llm.base_url / llm.model，AI 分析将无法工作！")
-        logger.info(f"[LLM] 当前配置：{self.llm.describe()}")
+            logger.warning("⚠ 未配置可用的 llm.providers[]，AI 分析将无法工作！")
+        for line in self.llm.describe_all():
+            logger.info(f"[LLM] {line}")
 
         self.service = MaaService(api=self.api, dm=self.dm)
         self.service.load()
@@ -331,6 +402,15 @@ class BotRuntime:
                 groups = ", ".join(sorted(state.info.listen_groups)) or "（无）"
                 notify = state.info.notify_group or "（未设置）"
                 logger.info(f"配置「{name}」：监听群 {groups}，通知群 {notify}")
+                candidates = " → ".join(
+                    f"{ref.name}/{ref.model}" for ref in state.llm.models
+                ) or "（未声明）"
+                logger.info(f"配置「{name}」模型候选：{candidates}")
+                logger.info(
+                    f"配置「{name}」报告：render={state.report.render_mode()}"
+                    f" · template={state.report.template}"
+                    f" · vision={'开' if state.vision.enabled else '关'}"
+                )
 
         # 日志包监听 + 指令/追问答疑
         # 历史存储：归档日志包 + 追问上下文（周期性清理，git 缓存不受影响）
@@ -421,6 +501,17 @@ class BotRuntime:
                 self.service.save()
             except Exception as exc:
                 logger.warning(f"保存配置失败：{exc}")
+        if self.llm is not None:
+            try:
+                await self.llm.close()
+            except Exception as exc:
+                logger.warning(f"关闭 LLM 连接池失败：{exc}")
+        try:
+            from features.maa.render import close_all
+
+            close_all()
+        except Exception as exc:
+            logger.warning(f"关闭渲染浏览器失败：{exc}")
 
     async def _handle_reload(self, new_cfg: dict,
                              notify_group: str = "") -> tuple[bool, str]:
@@ -475,10 +566,30 @@ class BotRuntime:
                 return
 
 
+def _validate_ai_config(cfg: dict) -> bool:
+    """启动前校验 LLM 结构：旧结构 / 无效引用都拒绝启动。"""
+    llm_cfg = cfg.get("llm") or {}
+    legacy = detect_legacy_llm(llm_cfg)
+    if legacy:
+        logger.error(legacy)
+        return False
+    configs_cfg = (cfg.get("bot") or {}).get("configs") or {}
+    errors = validate_llm_config(llm_cfg, configs_cfg)
+    if errors:
+        logger.error("[配置] LLM 配置无效，已拒绝启动：")
+        for error in errors:
+            logger.error(f"  - {error}")
+        logger.error("可运行 `python main.py --print-config-template` 查看新模板。")
+        return False
+    return True
+
+
 async def main():
     logger.info("OnebotMaaLogAnalyzer 启动中...")
 
     cfg = load_config()
+    if not _validate_ai_config(cfg):
+        sys.exit(2)
     runtime = BotRuntime(cfg)
     try:
         await runtime.start()
@@ -519,6 +630,9 @@ async def main():
 
 
 if __name__ == "__main__":
+    if "--print-config-template" in sys.argv[1:]:
+        _print_config_template()
+        sys.exit(0)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

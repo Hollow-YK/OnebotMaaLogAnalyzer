@@ -45,6 +45,8 @@ class FollowupSession:
     messages: list[dict] = field(default_factory=list)
     # 关联的历史记录 ID（用于从历史归档重载上下文，支持跨天追问）
     history_id: str = ""
+    # 本次分析 + 追问共用的会话 ID（用量聚合与报告页脚统计）
+    session_id: str = ""
     # 本次分析的日志摘要（供追问时按名取出附件）
     digest: Any = None
     turns: int = 0
@@ -66,6 +68,7 @@ class FollowupSession:
         """序列化为可落盘的会话状态。"""
         return {
             "history_id": self.history_id,
+            "session_id": self.session_id,
             "config_name": self.config_name,
             "file_name": self.file_name,
             "created_at": self.created_at,
@@ -153,13 +156,15 @@ class FollowupStore:
     def start(self, *, group_id: str, config_name: str, file_name: str,
               system_context: str, report: str,
               message_ids: Optional[list] = None,
-              history_id: str = "", digest: Any = None) -> FollowupSession:
+              history_id: str = "", digest: Any = None,
+              session_id: str = "") -> FollowupSession:
         """
         分析成功后创建会话。
 
         message_ids: 本次分析 Bot 发出的消息 ID 列表（引用它们即可追问）。
         history_id:  对应的历史记录 ID，内存会话过期后可据此恢复。
         digest:      本次分析的日志摘要，供追问时取出日志包内的附件。
+        session_id:  本次分析与追问共用的会话 ID（用量按会话聚合）。
         """
         self._prune()
         key = str(group_id)
@@ -177,6 +182,7 @@ class FollowupStore:
                 {"role": "assistant", "content": report},
             ],
             history_id=str(history_id or ""),
+            session_id=str(session_id or ""),
             digest=digest,
             last_active=time.time(),
         )
@@ -330,6 +336,11 @@ class FollowupStore:
             return
         if not isinstance(state, dict):
             return
+
+        # 恢复会话 ID（重启后追问仍归入原会话的用量统计）
+        saved_session = str(state.get("session_id") or "").strip()
+        if saved_session:
+            session.session_id = saved_session
 
         for item in (state.get("messages") or []):
             if isinstance(item, dict) and item.get("role") in ("user", "assistant"):

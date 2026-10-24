@@ -15,8 +15,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-from core.llm import LLMClient
-from core.models import AnalysisSettings, ProjectConfig, RepoConfig
+from core.llm import ContextOverflowError
+from core.llm_pool import LLMPool
+from core.models import (
+    AnalysisSettings,
+    ConfigLLM,
+    ProjectConfig,
+    ReportConfig,
+    RepoConfig,
+    VisionConfig,
+)
+from core.ai_usage import format_tokens
+from core.llm_pool import current_session_id, new_session_id, session_context
+from core.tokens import (
+    estimate_messages_tokens,
+    estimate_tokens,
+    fold_text,
+    trim_to_tokens,
+)
 from features.maa.archive_profile import (
     ArchivePart,
     ArchiveProfile,
@@ -30,13 +46,9 @@ from features.maa.log_digest import (
 )
 from features.maa.log_tools import LogArchiveTools
 from features.maa.onebot_files import download_group_file, get_all_files
-from features.maa.prompts import (
-    AGENT_TOOL_HINT,
-    AGENT_TOOL_HINT_FOLLOWUP,
-    AGENT_TOOL_HINT_LOG_ONLY,
-    AGENT_TOOL_HINT_REPO_ONLY,
-    build_system_prompt,
-)
+from features.maa.prompts import build_system_prompt, build_tool_hint
+from features.maa.render import RenderAttachment, render_report
+from core import vision as vision_util
 from features.maa.repo import RepoProvider, extract_identifiers, remove_repo_tree
 from features.maa.repo_tools import (
     LOG_TOOL_DEFINITIONS,
@@ -47,8 +59,10 @@ from features.maa.attachments import (
     OutSegment,
     build_report_segments,
     find_repo_attachment_names,
+    parse_vision_requests,
     split_report,
     strip_attachments,
+    strip_vision_requests,
 )
 from features.maa.text_utils import format_bytes, split_text
 
@@ -56,36 +70,6 @@ if TYPE_CHECKING:
     from core.service import MaaService
 
 logger = logging.getLogger("Maa.Analyze")
-
-
-def _filter_repo_tool_hint(hint: str, repo_cfg: RepoConfig) -> str:
-    if not repo_cfg.allow_ai_update or repo_cfg.path:
-        hint = hint.replace(
-            "- pull_latest     从当前配置的仓库来源更新默认分支（无 URL / Git 命令参数）\n",
-            "",
-        )
-        hint = hint.replace(
-            "- pull_latest 从当前配置的仓库来源更新默认分支\n",
-            "",
-        )
-        hint = hint.replace(
-            "5. 仅在确有必要时调用 pull_latest 获取最新默认分支代码，不要重复更新。\n",
-            "",
-        )
-        hint = hint.replace(
-            "3. 仅在确有必要时调用 pull_latest 获取最新默认分支代码，不要重复更新。\n",
-            "",
-        )
-    if not repo_cfg.allow_ai_switch_tag:
-        hint = hint.replace(
-            "- checkout_ref    配置允许时提供：获取指定 tag / commit（有次数上限）\n",
-            "",
-        )
-        hint = hint.replace(
-            "- checkout_ref 配置允许时提供，用于获取 tag / commit（有次数上限）\n",
-            "",
-        )
-    return hint
 
 
 # AI 在报告末尾请求核对其他版本：单独一行 [需要核对版本: v1.0.0]
@@ -105,6 +89,22 @@ def _strip_version_request(text: Optional[str]) -> Optional[str]:
     if not text:
         return text
     cleaned = _VERSION_REQUEST.sub("", text)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+_INTERNAL_SECTION = re.compile(
+    r"(?m)^\s*<!--\s*(?:section|小节)\s*[:：].*?-->\s*$"
+)
+_INTERNAL_PAGE_BREAK = re.compile(
+    r"(?m)^\s*<!--\s*(?:page-break|分页)\s*-->\s*$"
+)
+
+
+def _strip_internal_markers(text: str) -> str:
+    """纯文本模式下也绝不能把内部标记泄露给用户。"""
+    cleaned = _INTERNAL_SECTION.sub("", text or "")
+    cleaned = _INTERNAL_PAGE_BREAK.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -162,10 +162,19 @@ def _append_text_segment(segments: list[OutSegment],
     return list(segments) + [OutSegment(kind="text", text=addition)]
 
 
-def build_digest_options(settings: AnalysisSettings) -> DigestOptions:
-    """把分析设置转换为摘要提取选项。"""
+def build_digest_options(settings: AnalysisSettings,
+                         context_tokens: int = 0) -> DigestOptions:
+    """
+    把分析设置转换为摘要提取选项。
+
+    context_tokens 非 0 时，摘要字符上限同时受上下文预算约束
+    （约 4 字符/token），避免摘要本身就把请求撑爆上下文。
+    """
+    prompt_chars = max(5000, int(settings.max_prompt_chars or 600000))
+    if context_tokens > 0:
+        prompt_chars = min(prompt_chars, int(context_tokens) * 4)
     return DigestOptions(
-        max_prompt_chars=max(5000, int(settings.max_prompt_chars or 600000)),
+        max_prompt_chars=prompt_chars,
         max_zip_members=max(20, int(settings.max_zip_members or 300)),
         max_total_uncompressed_bytes=max(10, int(settings.max_total_uncompressed_mb or 120)) * 1024 * 1024,
         max_file_read_bytes=max(64, int(settings.max_log_file_read_kb or 512)) * 1024,
@@ -203,6 +212,8 @@ class FollowupAnswer:
 
     text: str = ""
     segments: list[OutSegment] = field(default_factory=list)
+    rendered: bool = False
+    render_notice: str = ""
 
 
 @dataclass
@@ -231,6 +242,12 @@ class AnalysisOutcome:
     project_name: str = "MaaXXX"
     # 自动识别的 UI / 软件版本 / MaaFramework 版本
     profile: Optional[ArchiveProfile] = None
+    # 报告是否已渲染为图片（此时 segments 已是最终输出，不再补文本头）
+    rendered: bool = False
+    # 渲染降级提示（发给通知群，每个配置每进程只发一次）
+    render_notice: str = ""
+    # 本次会话 ID（一次分析 + 其全部追问共用，用于用量聚合）
+    session_id: str = ""
 
     def header_text(self) -> str:
         """报告头（项目名 + 运行环境 + 文件信息）。"""
@@ -272,6 +289,8 @@ class AnalysisOutcome:
         片段模型下 header 不会自动包含，这里显式拼到首个文本片段前，
         保证「项目名 + 文件信息」始终出现在报告开头。
         """
+        if self.rendered:
+            return list(self.segments)
         header = self.header_text()
         if not self.segments:
             text = header + self.response_text
@@ -299,7 +318,7 @@ class MaaAnalyzer:
       - download_semaphore: 限制同时下载数
       - analysis_semaphore: 限制同时调用 LLM 数
     """
-    def __init__(self, service: "MaaService", llm: LLMClient, history=None):
+    def __init__(self, service: "MaaService", llm: LLMPool, history=None):
         self.s = service
         self.llm = llm
         # 历史存储：归档日志包与追问上下文（None 表示不启用）
@@ -314,6 +333,40 @@ class MaaAnalyzer:
         self._repo_preload_status: dict[str, dict] = {}
         self._analysis_locks: dict[str, asyncio.Lock] = {}
         self.active_jobs: set[str] = set()
+        # 分析结果缓存（仅缓存 AI 文本，不缓存下载与摘要）
+        self._ai_cache: dict[str, tuple[float, str]] = {}
+
+    @staticmethod
+    def _cache_key(config_name: str, file_id: str, file_size: int) -> str:
+        return f"{config_name}:{file_id}:{file_size}"
+
+    def _cache_get(self, config_name: str, file_id: str, file_size: int,
+                   hours: int) -> Optional[str]:
+        if hours <= 0 or not file_id:
+            return None
+        entry = self._ai_cache.get(self._cache_key(config_name, file_id, file_size))
+        if entry is None:
+            return None
+        created, text = entry
+        if time.time() - created > hours * 3600:
+            self._ai_cache.pop(
+                self._cache_key(config_name, file_id, file_size), None
+            )
+            return None
+        return text
+
+    def _cache_put(self, config_name: str, file_id: str, file_size: int,
+                   text: str) -> None:
+        if not text:
+            return
+        # 简单上限，避免长期运行时无限增长
+        if len(self._ai_cache) > 512:
+            oldest = sorted(self._ai_cache.items(), key=lambda kv: kv[1][0])[:128]
+            for key, _ in oldest:
+                self._ai_cache.pop(key, None)
+        self._ai_cache[self._cache_key(config_name, file_id, file_size)] = (
+            time.time(), text
+        )
 
     # ════════════════════════════════════════════════════════════
     # 并发控制
@@ -330,6 +383,37 @@ class MaaAnalyzer:
         analysis_sem = asyncio.Semaphore(analysis_n)
         self._semaphores[config_name] = (download_n, analysis_n, download_sem, analysis_sem)
         return download_sem, analysis_sem
+
+    # ── 配置访问 ──
+
+    def _state(self, config_name: str):
+        return self.s.configs.get(config_name)
+
+    def _llm_cfg(self, config_name: str) -> ConfigLLM:
+        state = self._state(config_name)
+        return state.llm if state is not None else ConfigLLM()
+
+    def _vision_cfg(self, config_name: str) -> VisionConfig:
+        state = self._state(config_name)
+        return state.vision if state is not None else VisionConfig()
+
+    def _report_cfg(self, config_name: str) -> ReportConfig:
+        state = self._state(config_name)
+        return state.report if state is not None else ReportConfig()
+
+    @property
+    def _data_dir(self) -> Path:
+        return Path(getattr(self.s.dm, "_dir", "data"))
+
+    @property
+    def _template_root(self) -> Path:
+        # features/maa/analyzer.py → 工程根目录/templates
+        return Path(__file__).resolve().parents[2] / "templates"
+
+    @staticmethod
+    def _context_budget(settings: AnalysisSettings, llm: LLMPool,
+                        config_llm: ConfigLLM) -> int:
+        return llm.context_budget(config_llm, int(settings.max_context_tokens or 0))
 
     # ════════════════════════════════════════════════════════════
     # 主流程
@@ -445,20 +529,41 @@ class MaaAnalyzer:
         if job_key in self.active_jobs:
             return AnalysisOutcome(ok=False, file_name=file_name, error="这个日志包正在分析中，请稍等。")
         self.active_jobs.add(job_key)
+        # 只有需要仓库状态的配置才按配置串行（切换 tag / 还原位置会互相干扰）；
+        # 纯日志包分析不再被这把锁串行化，analysis_concurrency 才能真正生效。
+        needs_repo_lock = bool(project.repo.enabled)
         lock = self._analysis_locks.setdefault(config_name, asyncio.Lock())
+        # 一次分析 + 其后续追问共用一个会话 ID，用量与报告页脚统计都按它聚合
+        session_id = new_session_id(config_name)
         try:
-            async with lock:
-                return await self._analyze_serialized(
-                    config_name=config_name,
-                    settings=settings,
-                    project=project,
-                    group_id=group_id,
-                    file_name=file_name,
-                    file_id=file_id,
-                    file_size=file_size,
-                    uploader=uploader,
-                    progress=progress,
-                )
+            with session_context(session_id, config_name, file_name):
+                if needs_repo_lock:
+                    async with lock:
+                        outcome = await self._analyze_serialized(
+                            config_name=config_name,
+                            settings=settings,
+                            project=project,
+                            group_id=group_id,
+                            file_name=file_name,
+                            file_id=file_id,
+                            file_size=file_size,
+                            uploader=uploader,
+                            progress=progress,
+                        )
+                else:
+                    outcome = await self._analyze_serialized(
+                        config_name=config_name,
+                        settings=settings,
+                        project=project,
+                        group_id=group_id,
+                        file_name=file_name,
+                        file_id=file_id,
+                        file_size=file_size,
+                        uploader=uploader,
+                        progress=progress,
+                    )
+            outcome.session_id = outcome.session_id or session_id
+            return outcome
         finally:
             self.active_jobs.discard(job_key)
 
@@ -547,7 +652,7 @@ class MaaAnalyzer:
 
             digest = await self._build_digest(
                 zip_path, file_name, group_id, settings, project=project,
-                extra_notes=extra_notes,
+                extra_notes=extra_notes, config_name=config_name,
             )
             logger.info(
                 f"[分析] 摘要完成：logs={len(digest.log_files)}, "
@@ -593,52 +698,115 @@ class MaaAnalyzer:
             )
             if repo_prep.context:
                 prompt = f"{prompt}\n\n{repo_prep.context}"
-                logger.info(f"[分析] 已注入项目代码参考（{len(repo_prep.context)} 字符）")
+                logger.info(
+                    "[分析] 已注入项目代码参考（约 "
+                    f"{format_tokens(estimate_tokens(repo_prep.context))} tokens）"
+                )
 
-            async with analysis_sem:
-                # 需要工具时（agent 模式，或 inject 模式下日志包仍可用）
-                use_tools = project.repo.use_agent() or bool(settings.log_tools_enabled)
-                if use_tools and (repo_prep.provider is not None or zip_path.exists()):
-                    response_text = await asyncio.wait_for(
-                        self._run_repo_agent(
-                            settings, prompt, repo_prep.provider,
-                            project=project,
-                            log_tools=LogArchiveTools(
-                                str(zip_path),
-                                max_file_kb=max(64, int(settings.max_log_file_read_kb or 512)),
-                                max_result_chars=max(
-                                    2000, int(project.repo.max_tool_result_chars or 30000)
-                                ),
-                            ) if settings.log_tools_enabled else None,
-                        ),
-                        timeout=max(60, int(settings.llm_timeout_seconds or 900)),
-                    )
-                else:
-                    response_text = await asyncio.wait_for(
-                        self._call_ai(settings, prompt, project),
-                        timeout=max(30, int(settings.llm_timeout_seconds or 900)),
-                    )
-                    # AI 可请求切换到其他 tag 复核（受 max_tag_switch_rounds 限制）
-                    response_text = await self._maybe_recheck_with_other_tag(
-                        config_name, settings, prompt, response_text,
-                        repo_prep.context, project,
+            vision_note = ""
+            vision_state = self._vision_state(config_name, digest)
+            user_content, vision_note = self._build_user_content(
+                config_name, prompt, digest, vision_state
+            )
+
+            tool_note = ""
+            cached_text = self._cache_get(
+                config_name, file_id or "", file_size or 0,
+                int(settings.analysis_cache_hours or 0),
+            )
+            if cached_text is not None:
+                response_text = cached_text
+                logger.info("[分析] 命中分析缓存，跳过 AI 调用")
+            else:
+                async with analysis_sem:
+                    # 需要工具时（agent 模式，或 inject 模式下日志包仍可用）
+                    use_tools = project.repo.use_agent() or bool(settings.log_tools_enabled)
+                    if use_tools and not self.llm.has_capability(
+                        self._llm_cfg(config_name), "tools"
+                    ):
+                        use_tools = False
+                        tool_note = "当前配置没有支持工具调用的模型，已降级为普通对话。"
+                        logger.warning(f"[分析] {tool_note}")
+                    stage_timeout = max(30, int(settings.ai_stage_timeout_seconds or 300))
+                    if use_tools and (repo_prep.provider is not None or zip_path.exists()):
+                        response_text = await asyncio.wait_for(
+                            self._run_repo_agent(
+                                config_name, settings, prompt, repo_prep.provider,
+                                project=project,
+                                user_content=user_content,
+                                vision_state=vision_state,
+                                log_tools=LogArchiveTools(
+                                    str(zip_path),
+                                    max_file_kb=max(64, int(settings.max_log_file_read_kb or 512)),
+                                    max_result_chars=max(
+                                        2000, int(project.repo.max_tool_result_chars or 30000)
+                                    ),
+                                    max_result_tokens=int(project.repo.max_tool_result_tokens or 0),
+                                ) if settings.log_tools_enabled else None,
+                            ),
+                            timeout=stage_timeout,
+                        )
+                    else:
+                        response_text = await asyncio.wait_for(
+                            self._call_ai(
+                                settings, prompt, project,
+                                config_name=config_name, content=user_content,
+                            ),
+                            timeout=stage_timeout,
+                        )
+                        # AI 可请求切换到其他 tag 复核（受 max_tag_switch_rounds 限制）
+                        response_text = await self._maybe_recheck_with_other_tag(
+                            config_name, settings, prompt, response_text,
+                            repo_prep.context, project,
+                        )
+                if response_text:
+                    self._cache_put(
+                        config_name, file_id or "", file_size or 0, response_text
                     )
             # 内部指令与模型过渡语不应出现在给用户的报告里
             response_text = _strip_version_request(response_text)
+            response_text = strip_vision_requests(response_text)
             response_text = _strip_model_preamble(response_text)
 
-            # 附件：模型可在报告任意位置声明 [附图: ...] / [附件: ...]
+            ai_fallback = False
+            if not response_text:
+                # 全部候选失败 / 熔断：降级为模板报告，而不是只回一句错误
+                response_text = self._fallback_report(digest, project)
+                ai_fallback = True
+                logger.warning("[分析] AI 无有效输出，已降级为基础摘要报告")
+            elif not self._looks_formatted(response_text):
+                response_text = await self._fix_report_format(
+                    config_name, settings, response_text, project
+                )
+            raw_report = response_text or ""
+
+            # 附件：模型可在报告任意位置声明 [附件@...]
             # 这里解析为有序片段，从而支持「文字 → 图 → 文字」的排版
             segments, attach_notes = await self.build_report_segments(
-                settings, response_text, digest, repo_prep.provider, project=project
+                settings, raw_report, digest, repo_prep.provider,
+                project=project, config_name=config_name,
             )
-            response_text = strip_attachments(response_text) or ""
-            if attach_notes:
-                response_text = f"{response_text}\n\n" + "\n".join(
-                    f"（{note}）" for note in attach_notes
-                )
-                # 备注追加在末尾，同步反映到片段序列
-                segments = _append_text_segment(segments, attach_notes)
+            if vision_note:
+                attach_notes.append(vision_note)
+            if tool_note:
+                attach_notes.append(tool_note)
+
+            header = self._report_header_text(
+                digest=digest, file_name=file_name, downloaded=downloaded,
+                project=project, log_count=len(digest.log_files),
+                image_count=len(digest.error_images),
+            )
+            segments, response_text, rendered, render_notice = await self._prepare_output(
+                config_name=config_name,
+                settings=settings,
+                raw_report=raw_report,
+                header=header,
+                digest=digest,
+                segments=segments,
+                notes=attach_notes,
+                render_followup=True,
+                session_id=current_session_id(),
+            )
 
             if not response_text:
                 self._finish_job(config_name, job, "执行失败", "AI 未返回有效内容")
@@ -650,7 +818,10 @@ class MaaAnalyzer:
             job.status = "已执行"
             job.log_count = len(digest.log_files)
             job.image_count = len(digest.error_images)
-            self._finish_job(config_name, job, "已执行", "")
+            self._finish_job(
+                config_name, job, "已执行",
+                "AI 不可用，已降级为基础摘要报告" if ai_fallback else "",
+            )
 
             followup_context = self._build_followup_context(
                 file_name, prompt, repo_prep.context, response_text
@@ -689,6 +860,8 @@ class MaaAnalyzer:
                 archived_zip=archived_zip,
                 project_name=digest.project_name or project.name or "MaaXXX",
                 profile=digest.profile,
+                rendered=rendered,
+                render_notice=render_notice,
             )
 
         except asyncio.TimeoutError:
@@ -698,7 +871,8 @@ class MaaAnalyzer:
             return AnalysisOutcome(
                 ok=False, file_name=file_name,
                 error=(
-                    "分析超时。可以尝试调大 digest_timeout_seconds 或 llm_timeout_seconds。"
+                    "分析超时（AI 阶段）。可以尝试调大 ai_stage_timeout_seconds"
+                    " 或 digest_timeout_seconds。"
                 ),
             )
         except Exception as exc:
@@ -890,35 +1064,443 @@ class MaaAnalyzer:
     async def _build_digest(self, zip_path: Path, file_name: str,
                             group_id: int, settings: AnalysisSettings,
                             project: Optional[ProjectConfig] = None,
-                            extra_notes: Optional[list[str]] = None) -> DigestResult:
+                            extra_notes: Optional[list[str]] = None,
+                            config_name: str = "") -> DigestResult:
         timeout = int(settings.digest_timeout_seconds or 0)
         project = project or ProjectConfig()
         logger.info(f"[分析] 开始提取日志摘要：{file_name}")
+        config_llm = self._llm_cfg(config_name)
+        context_tokens = self._context_budget(settings, self.llm, config_llm)
         task = asyncio.to_thread(
             build_log_digest,
             str(zip_path),
             original_file_name=file_name,
             group_id=str(group_id),
             project_name=project.name,
-            options=build_digest_options(settings),
+            options=build_digest_options(settings, context_tokens),
             extra_notes=extra_notes,
         )
         if timeout > 0:
             return await asyncio.wait_for(task, timeout=max(10, timeout))
         return await task
 
-    async def _call_ai(self, settings: AnalysisSettings, prompt: str,
-                       project: Optional[ProjectConfig] = None) -> Optional[str]:
-        system_prompt = self._system_prompt(settings, project)
-        temperature = settings.temperature
-        if temperature is None:
-            temperature = self.llm.temperature
-        return await self.llm.chat(
-            prompt,
-            system_prompt=system_prompt,
-            temperature=float(temperature),
-            model_override=str(settings.model or "").strip(),
+    # ════════════════════════════════════════════════════════════
+    # 图片化报告 / 看图
+    # ════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _report_header_text(*, digest, file_name: str, downloaded: int,
+                            project: ProjectConfig, log_count: int,
+                            image_count: int) -> str:
+        """渲染进图片的报告头（项目名 / 运行环境 / 文件信息）。"""
+        project_label = (
+            (digest.project_name if digest is not None else "")
+            or project.name or "MaaXXX"
         )
+        lines = [f"{project_label} 日志分析结果"]
+        if digest is not None and digest.profile is not None:
+            lines.append(f"运行环境：{digest.profile.version_summary()}")
+        part_note = next(
+            (note for note in (digest.notes if digest is not None else [])
+             if str(note).startswith("检测到分卷")),
+            "",
+        )
+        if part_note:
+            lines.append(part_note)
+        lines.extend([
+            f"文件：{file_name}",
+            f"大小：{format_bytes(downloaded)}",
+            f"日志文件：{log_count} 个",
+            f"错误截图：{image_count} 张",
+        ])
+        return "\n".join(lines)
+
+    def _vision_state(self, config_name: str, digest: Optional[DigestResult]) -> dict:
+        """本次分析可用的看图状态（模型能力 / 张数 / 失败计数）。"""
+        vision = self._vision_cfg(config_name)
+        config_llm = self._llm_cfg(config_name)
+        usable = bool(vision.enabled) and self.llm.has_capability(config_llm, "vision")
+        return {
+            "vision": vision,
+            "config_llm": config_llm,
+            "usable": usable,
+            "digest": digest,
+            "used": 0,
+            "failures": 0,
+            "disabled": False,
+            "note": "",
+        }
+
+    def _build_user_content(self, config_name: str, prompt: str,
+                            digest: Optional[DigestResult],
+                            state: Optional[dict] = None) -> tuple[Any, str]:
+        """首轮 user 消息：文本 + 自动注入的错误截图。"""
+        state = state or self._vision_state(config_name, digest)
+        vision: VisionConfig = state["vision"]
+        if not vision.enabled:
+            return prompt, ""
+        if not state["usable"]:
+            return prompt, "未注入错误截图：当前配置没有支持视觉的候选模型。"
+        picked = vision_util.select_error_screenshots(digest, vision)
+        if not picked:
+            return prompt, ""
+        parts: list[dict] = [{"type": "text", "text": prompt}]
+        for path, data in picked:
+            parts.append({
+                "type": "text",
+                "text": f"以下是日志包中的错误截图：{path}",
+            })
+            parts.append(vision_util.image_part(data, path, vision.detail))
+        state["used"] = len(picked)
+        logger.info(f"[分析] 已注入 {len(picked)} 张错误截图")
+        return parts, ""
+
+    def _take_vision_requests(self, text: str, state: Optional[dict],
+                              project: Optional[ProjectConfig],
+                              provider: Optional[RepoProvider]) -> tuple[str, list[dict], str]:
+        """
+        处理模型主动发起的 `[看图@...]`。
+
+        返回 (清理后的正文, 追加的图片内容段, 备注)。
+        """
+        cleaned = strip_vision_requests(text) or ""
+        if not state or not state.get("vision") or not state["vision"].enabled:
+            return cleaned, [], ""
+        vision: VisionConfig = state["vision"]
+        if not state.get("usable") or state.get("disabled"):
+            return cleaned, [], state.get("note", "")
+
+        requests = parse_vision_requests(text)
+        if not requests:
+            return cleaned, [], ""
+
+        if not vision.allow_model_request:
+            return cleaned, [], "模型请求看图已被配置禁用。"
+
+        digest = state.get("digest")
+        parts: list[dict] = []
+        note = ""
+        for request in requests:
+            if state["disabled"]:
+                break
+            room = int(vision.max_images or 0) - int(state.get("used") or 0)
+            if room <= 0:
+                note = "已达本次分析的图片数量上限，后续看图请求未处理。"
+                break
+            limit = vision_util.max_image_bytes(vision)
+            data: Optional[bytes] = None
+            if request.source == "zip" and digest is not None:
+                data = vision_util.read_zip_image(
+                    str(getattr(digest, "zip_path", "") or ""),
+                    request.path, limit,
+                )
+            elif (request.source == "repo" and provider is not None
+                  and vision.attach_repo_templates):
+                data = vision_util.read_repo_image(
+                    getattr(provider, "root", None), request.path, limit
+                )
+            if data is None:
+                state["failures"] = int(state.get("failures") or 0) + 1
+                if state["failures"] >= 2:
+                    state["disabled"] = True
+                    state["note"] = "连续两次未能读取截图，本次分析已停止看图。"
+                    note = state["note"]
+                continue
+            state["used"] = int(state.get("used") or 0) + 1
+            parts.append({"type": "text", "text": f"这是 {request.path}："})
+            parts.append(vision_util.image_part(data, request.path, vision.detail))
+            logger.info(f"[看图] 已加载 {request.path}（{len(data)} 字节）")
+
+        if not parts:
+            return cleaned, [], note
+        return cleaned, [{"role": "user", "content": parts}], note
+
+    async def _prepare_output(
+        self,
+        *,
+        config_name: str,
+        settings: AnalysisSettings,
+        raw_report: str,
+        header: str,
+        digest: Optional[DigestResult],
+        segments: list[OutSegment],
+        notes: list[str],
+        render_followup: bool,
+        session_id: str = "",
+    ) -> tuple[list[OutSegment], str, bool, str]:
+        """
+        生成最终输出：文本分段或图片化报告。
+
+        返回 (片段, 给用户看的文本, 是否已渲染, 渲染降级提示)。
+        """
+        report_text = strip_attachments(raw_report) or ""
+        if notes:
+            report_text = f"{report_text}\n\n" + "\n".join(
+                f"（{note}）" for note in notes
+            )
+            segments = _append_text_segment(segments, notes)
+
+        report_cfg = self._report_cfg(config_name)
+        mode = report_cfg.render_mode()
+
+        def plain(parts: list[OutSegment]) -> list[OutSegment]:
+            """文本模式：剥离内部标记，避免泄露给用户。"""
+            cleaned: list[OutSegment] = []
+            for seg in parts:
+                if seg.kind == "text":
+                    seg = OutSegment(kind="text",
+                                     text=_strip_internal_markers(seg.text))
+                cleaned.append(seg)
+            return cleaned
+
+        if not report_text.strip() or mode == "text" or not render_followup:
+            return plain(segments), _strip_internal_markers(report_text), False, ""
+
+        attachments: dict[str, RenderAttachment] = {}
+        for seg in segments:
+            if seg.kind not in ("image", "file") or not seg.data or not seg.label:
+                continue
+            path = seg.label.replace("\\", "/")
+            attachments[f"{seg.source}:{path.lower()}"] = RenderAttachment(
+                path=path, kind=seg.kind, data=seg.data, origin=seg.origin,
+            )
+
+        markdown = "<!-- section: 概览 -->\n" + header + "\n\n" + raw_report
+        if notes:
+            markdown += "\n\n" + "\n".join(f"- {note}" for note in notes)
+
+        project_name = (
+            (digest.project_name if digest is not None else "") or "MaaXXX"
+        )
+        generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        session_id = session_id or current_session_id()
+        usage = self.llm.session_summary(session_id) if session_id else {}
+        meta = {
+            "title": "日志分析报告",
+            "project": project_name,
+            "file": (
+                Path(str(getattr(digest, "zip_path", "") or "")).name
+                if digest is not None and getattr(digest, "zip_path", "")
+                else ""
+            ),
+            "generated_at": generated_at,
+            # 本次会话（分析 + 追问）的用量，供模板页眉/页脚使用
+            "tokens_input": format_tokens(usage.get("prompt_tokens")),
+            "tokens_output": format_tokens(usage.get("completion_tokens")),
+            "tokens_total": format_tokens(usage.get("total_tokens")),
+            "usage_calls": str(usage.get("calls") or 0),
+            "provider": "、".join(usage.get("providers") or []) or "-",
+            "model": "、".join(usage.get("models") or []) or "-",
+            "usage": self._usage_line(usage),
+        }
+        result = await render_report(
+            markdown,
+            report_cfg,
+            meta=meta,
+            attachments=attachments,
+            data_dir=self._data_dir,
+            template_root=self._template_root,
+        )
+        if not result.images:
+            notice = ""
+            if mode in ("auto", "image"):
+                notice = result.reason or "报告渲染失败，已回退为纯文本。"
+                if not report_cfg.fallback_to_text:
+                    notice += "（fallback_to_text=false：为保证送达仍以纯文本发送）"
+                logger.warning(f"[渲染] {notice}")
+            return plain(segments), _strip_internal_markers(report_text), False, notice
+
+        final: list[OutSegment] = [
+            OutSegment(kind="image", data=image, label="report")
+            for image in result.images
+        ]
+        # 非图片附件仍上传群文件；未内联的图片单独发送
+        for seg in segments:
+            if seg.kind == "file":
+                final.append(seg)
+            elif seg.kind == "image":
+                key = f"{seg.source}:{seg.label.replace(chr(92), '/').lower()}"
+                if key not in result.embedded_images:
+                    final.append(seg)
+
+        if report_cfg.attach_markdown:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            name = f"{project_name}-{stamp}-report.md"
+            final.append(OutSegment(
+                kind="file",
+                data=(result.clean_markdown or raw_report).encode("utf-8"),
+                name=name,
+                label=name,
+                origin="Markdown 报告",
+            ))
+        return final, report_text, True, ""
+
+    @staticmethod
+    def _usage_line(usage: dict) -> str:
+        """把会话用量压成一行，供模板 `{{usage}}` 直接使用。"""
+        if not usage or not usage.get("calls"):
+            return ""
+        pairs = usage.get("pairs") or {}
+        labels = " · ".join(
+            f"{pair} ×{count}"
+            for pair, count in sorted(
+                pairs.items(), key=lambda item: (-item[1], item[0])
+            )
+        )
+        line = (
+            f"输入 {format_tokens(usage.get('prompt_tokens'))}"
+            f" · 输出 {format_tokens(usage.get('completion_tokens'))}"
+            f" · 合计 {format_tokens(usage.get('total_tokens'))} tokens"
+        )
+        if labels:
+            line += f" · {labels}"
+        return line
+
+    @staticmethod
+    def _looks_formatted(text: str) -> bool:
+        """报告是否具备可渲染的结构（section 标记或传统小节标题）。"""
+        if not text or not text.strip():
+            return False
+        if re.search(r"<!--\s*(?:section|小节)\s*[:：]", text):
+            return True
+        return any(
+            marker in text
+            for marker in ("结论：", "关键证据：", "可能原因：", "处理建议：")
+        )
+
+    async def _fix_report_format(self, config_name: str,
+                                 settings: AnalysisSettings,
+                                 text: str,
+                                 project: Optional[ProjectConfig]) -> str:
+        """输出格式不符合约定时，做一次纠错重试（只整理格式）。"""
+        logger.info("[分析] 报告缺少结构标记，尝试一次格式纠错")
+        prompt = (
+            "下面是对一份日志包的分析草稿，但格式不符合要求。\n"
+            "请**只做格式整理**，不要新增或删除结论、证据与建议。\n"
+            "要求：从一个 `<!-- section: 标题 -->` 开始，按主题分块"
+            "（如 结论 / 关键证据 / 可能原因 / 处理建议 / 需要补充）；"
+            "需要换页时单独一行写 `<!-- page-break -->`。\n\n"
+            "草稿：\n" + text
+        )
+        try:
+            fixed = await asyncio.wait_for(
+                self._call_ai(settings, prompt, project, config_name=config_name),
+                timeout=60,
+            )
+        except Exception as exc:
+            logger.warning(f"[分析] 格式纠错失败，保留原报告：{exc}")
+            return text
+        if fixed and self._looks_formatted(fixed):
+            return fixed
+        return text
+
+    @staticmethod
+    def _fallback_report(digest: Optional[DigestResult],
+                         project: Optional[ProjectConfig]) -> str:
+        """模型全部失败（含熔断）时的兜底报告：只陈述已知事实。"""
+        project_name = (
+            (digest.project_name if digest is not None else "")
+            or (project.name if project is not None else "")
+            or "MaaXXX"
+        )
+        log_files = getattr(digest, "log_files", []) if digest is not None else []
+        error_images = getattr(digest, "error_images", []) if digest is not None else []
+        notes = getattr(digest, "notes", []) if digest is not None else []
+        lines = [
+            "<!-- section: 结论 -->",
+            f"{project_name} 的 AI 分析暂时不可用（端点无响应或已熔断），"
+            "以下为日志包的基础信息，请稍后重试。",
+            "",
+            "<!-- section: 关键证据 -->",
+            f"- 日志文件：{len(log_files)} 个"
+            + (f"（{'、'.join(str(n) for n in log_files[:4])}）" if log_files else ""),
+            f"- 错误截图：{len(error_images)} 张",
+        ]
+        if notes:
+            lines.extend(f"- {note}" for note in notes[:6])
+        lines.extend([
+            "",
+            "<!-- section: 处理建议 -->",
+            "1. 稍后重新上传日志包再试一次。",
+            "2. 检查 `llm.providers[]` 的地址与密钥，或发送 `/maa ai` 查看失败原因。",
+        ])
+        return "\n".join(lines)
+
+    async def _call_ai(self, settings: AnalysisSettings, prompt: str,
+                       project: Optional[ProjectConfig] = None,
+                       *, config_name: str = "",
+                       content: Optional[list[dict]] = None) -> Optional[str]:
+        """普通文本调用（无工具），失败返回 None。"""
+        system_prompt = self._system_prompt(settings, project)
+        config_llm = self._llm_cfg(config_name)
+        user_content: Any = content if content else prompt
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        try:
+            reply = await self.llm.chat(
+                config_llm, messages,
+                config_name=config_name,
+                max_context_tokens=int(settings.max_context_tokens or 0),
+                max_tokens=None,
+                phase="analysis",
+                use_breaker=bool(settings.circuit_breaker_enabled),
+            )
+        except ContextOverflowError:
+            # 输入超限：按预算裁剪后再试一次（不切换候选）
+            budget = self._context_budget(settings, self.llm, config_llm)
+            logger.warning(f"[分析] 上下文超限，裁剪提示词后重试（预算 {budget} tokens）")
+            messages = self._trim_messages_to_budget(messages, int(budget * 0.7))
+            try:
+                reply = await self.llm.chat(
+                    config_llm, messages,
+                    config_name=config_name,
+                    max_context_tokens=int(settings.max_context_tokens or 0),
+                    phase="analysis-trimmed",
+                    use_breaker=bool(settings.circuit_breaker_enabled),
+                )
+            except ContextOverflowError:
+                logger.error("[分析] 裁剪后仍然上下文超限")
+                return None
+        if reply is None:
+            return None
+        text = reply.content
+        if reply.truncated:
+            text = await self._retry_truncated(
+                config_llm, messages, text, config_name, settings, "analysis"
+            )
+        return text
+
+    async def _retry_truncated(self, config_llm: ConfigLLM,
+                               messages: list[dict], text: Optional[str],
+                               config_name: str, settings: AnalysisSettings,
+                               phase: str) -> Optional[str]:
+        """输出被 max_tokens 截断时，要求模型在相同预算内重新给出完整报告。"""
+        logger.warning(f"[分析] {phase} 输出被截断（finish_reason=length），重试一次")
+        retry_messages = list(messages) + [
+            {"role": "assistant", "content": text or ""},
+            {"role": "user", "content": (
+                "上一个回答因超出输出长度被截断。请重新输出完整报告，"
+                "删除重复与无关内容，保留全部结论、关键证据与处理建议。"
+            )},
+        ]
+        try:
+            reply = await self.llm.chat(
+                config_llm, retry_messages,
+                config_name=config_name,
+                max_context_tokens=int(settings.max_context_tokens or 0),
+                phase=f"{phase}-truncated-retry",
+                use_breaker=bool(settings.circuit_breaker_enabled),
+            )
+        except Exception as exc:
+            logger.warning(f"[分析] 截断重试失败：{exc}")
+            return text
+        if reply is None or not reply.content:
+            return text
+        if reply.truncated:
+            return reply.content + "\n\n（报告可能因长度限制被截断。）"
+        return reply.content
 
     @staticmethod
     def _system_prompt(settings: AnalysisSettings,
@@ -981,6 +1563,7 @@ class MaaAnalyzer:
         provider: Optional[RepoProvider],
         *, project: Optional[ProjectConfig] = None,
         allow_files: bool = True,
+        config_name: str = "",
     ) -> tuple[list[OutSegment], list[str]]:
         """
         把报告切成「文本 / 图片 / 文件」有序片段，并为附件取出字节。
@@ -1000,16 +1583,13 @@ class MaaAnalyzer:
                 # 不允许任何附件，但仍需剥离指令行
                 return split_report(report), []
 
-            max_image_bytes = max(64, int(settings.max_image_mb or 5)) * 1024 * 1024
             max_file_bytes = max(
                 64, int(settings.max_file_attachment_mb or 20)
             ) * 1024 * 1024
 
             # 从本地仓库取附件（仅 @项目 来源；@日志 由压缩包直接读取）
             repo_files: dict[str, bytes] = {}
-            repo_cfg = project.repo if project is not None else RepoConfig()
-            if (settings.send_repo_images and provider is not None
-                    and not repo_cfg.use_agent()):
+            if settings.send_repo_images and provider is not None:
                 wanted = find_repo_attachment_names(report)
                 # 图片与文件分别限流，避免把整仓库读进内存
                 wanted = self._limit_attachment_requests(
@@ -1025,7 +1605,8 @@ class MaaAnalyzer:
                 report, digest,
                 repo_files=repo_files,
                 max_attachments=max_images + max_files,
-                max_image_bytes=max_image_bytes,
+                # 图片不再按体积裁剪：渲染时按内容宽度等比缩放
+                max_image_bytes=0,
                 max_file_bytes=max_file_bytes,
                 allow_files=max_files > 0,
             )
@@ -1092,7 +1673,34 @@ class MaaAnalyzer:
                               digest: Optional[DigestResult] = None,
                               provider: Optional[RepoProvider] = None,
                               project: Optional[ProjectConfig] = None,
+                              config_name: str = "",
+                              session_id: str = "",
+                              file_name: str = "",
                               ) -> Optional["FollowupAnswer"]:
+        """
+        回答追问（会话上下文包装）。
+
+        同一次分析及其后续追问共用一个 `session_id`，用量因此可以按会话聚合。
+        """
+        sid = session_id or new_session_id(config_name)
+        with session_context(sid, config_name, file_name):
+            return await self._answer_followup_inner(
+                settings=settings,
+                messages=messages,
+                question=question,
+                digest=digest,
+                provider=provider,
+                project=project,
+                config_name=config_name,
+            )
+
+    async def _answer_followup_inner(self, *, settings: AnalysisSettings,
+                                     messages: list[dict], question: str,
+                                     digest: Optional[DigestResult] = None,
+                                     provider: Optional[RepoProvider] = None,
+                                     project: Optional[ProjectConfig] = None,
+                                     config_name: str = "",
+                                     ) -> Optional["FollowupAnswer"]:
         """
         基于已有会话上下文回答追问。
 
@@ -1102,38 +1710,8 @@ class MaaAnalyzer:
         text 是剥离指令后的纯文本，供上层发送。
         """
         system_prompt = self._system_prompt(settings, project)
-        temperature = settings.temperature
-        if temperature is None:
-            temperature = self.llm.temperature
+        config_llm = self._llm_cfg(config_name)
         repo_cfg = project.repo if project is not None else RepoConfig()
-
-        # 追问是否开放工具：日志包可用（或 agent 模式的仓库可用）
-        allow_tools = bool(settings.log_tools_enabled) or (
-            provider is not None and repo_cfg.use_agent()
-        )
-
-        followup_hint = AGENT_TOOL_HINT_FOLLOWUP
-        if provider is not None and repo_cfg.use_agent():
-            followup_hint = _filter_repo_tool_hint(followup_hint, repo_cfg)
-        followup_system = (
-            f"{system_prompt}\n\n"
-            "【追问答疑模式】\n"
-            "用户正在就上面那次分析继续提问。请基于已提供的日志摘要与代码参考回答，"
-            "不要要求用户重新上传日志。如果问题涉及摘要中未包含的信息，"
-            "明确说明“摘要中未包含”，并指出需要补充什么。"
-            "回答要简洁、面向普通用户，不要输出 Markdown 大段代码。\n"
-            "追问时同样可以声明附带内容，必须指定来源与相对路径：\n"
-            "  `[附图@日志: on_error/xxx.png]`、`[附图@日志: debug/on_error/xxx.png]`、"
-            "`[附件@项目: assets/.../PVP.json]`\n"
-            "（`@日志` = 本次上传的日志压缩包，`@项目` = 项目代码仓库）\n"
-            "图片会与相邻文字合并为同一条消息，写在想要出现的位置即可。"
-            "如果确实找不到，直接说明找不到，不要编造路径。"
-            + (followup_hint if allow_tools else "")
-        )
-
-        payload: list[dict] = [{"role": "system", "content": followup_system}]
-        payload.extend(messages)
-        payload.append({"role": "user", "content": question})
 
         # 追问同样开放工具：让 AI 能读日志包原始文件与项目代码，
         # 而不是只能看到首轮摘要里已发送的内容。
@@ -1147,92 +1725,207 @@ class MaaAnalyzer:
                     max_result_chars=max(
                         2000, int(repo_cfg.max_tool_result_chars or 30000)
                     ),
+                    max_result_tokens=int(repo_cfg.max_tool_result_tokens or 0),
                 )
                 if candidate.available():
                     log_tools = candidate
 
+        repo_tools = RepoTools(provider, repo_cfg) if (
+            provider is not None and repo_cfg.use_agent()
+        ) else None
         tools: list[dict] = []
-        if provider is not None and repo_cfg.use_agent():
+        if repo_tools is not None:
             tools = repo_tool_definitions(repo_cfg)
         if log_tools is not None:
             tools = tools + LOG_TOOL_DEFINITIONS
+        tool_note = ""
+        if tools and not self.llm.has_capability(config_llm, "tools"):
+            tools = []
+            repo_tools = None
+            tool_note = "当前配置没有支持工具调用的模型，本次追问未开放工具。"
+            logger.warning(f"[追问] {tool_note}")
+        tool_names = [
+            str(item.get("function", {}).get("name") or "")
+            for item in tools if isinstance(item, dict)
+        ]
+
+        followup_system = (
+            f"{system_prompt}\n\n"
+            "【追问答疑模式】\n"
+            "用户正在就上面那次分析继续提问。请基于已提供的日志摘要与代码参考回答，"
+            "不要要求用户重新上传日志。"
+            "回答要简洁、面向普通用户，不要输出 Markdown 大段代码。\n"
+            "追问时同样可以声明附件，必须指定来源与相对路径："
+            "`[附件@日志: on_error/xxx.png]`、`[附件@项目: assets/.../PVP.json]`。"
+            "图片与文件由 Bot 按后缀自动区分；如果确实找不到，直接说明找不到，不要编造路径。"
+            + build_tool_hint(tool_names, followup=True)
+        )
+
+        payload: list[dict] = [{"role": "system", "content": followup_system}]
+        payload.extend(messages)
+        payload.append({"role": "user", "content": question})
 
         try:
             if tools:
-                raw = await self._run_tool_conversation(
-                    settings, payload, tools,
-                    repo_cfg=repo_cfg,
-                    repo_tools=RepoTools(provider, repo_cfg)
-                    if (provider is not None and repo_cfg.use_agent()) else None,
+                raw = await self._run_tool_loop(
+                    config_name=config_name,
+                    settings=settings,
+                    messages=payload,
+                    tools=tools,
+                    repo_tools=repo_tools,
                     log_tools=log_tools,
+                    project=project,
+                    phase="followup",
+                    vision_state=self._vision_state(config_name, digest),
+                    convergence_prompt=(
+                        "已达到检索轮次上限，请立即基于现有信息作答，不要再调用工具。"
+                    ),
                 )
             else:
-                reply = await self.llm.chat_messages(
-                    payload,
-                    temperature=float(temperature),
-                    model_override=str(settings.model or "").strip(),
+                reply = await self.llm.chat(
+                    config_llm, payload,
+                    config_name=config_name,
+                    max_context_tokens=int(settings.max_context_tokens or 0),
+                    phase="followup",
+                    use_breaker=bool(settings.circuit_breaker_enabled),
                 )
                 raw = reply.content if reply is not None else None
+                if reply is not None and reply.truncated:
+                    raw = await self._retry_truncated(
+                        config_llm, payload, raw, config_name, settings, "followup"
+                    )
         except Exception as exc:
             logger.warning(f"[追问] 调用失败：{exc}", exc_info=True)
             return None
+        finally:
+            if log_tools is not None:
+                log_tools.close()
 
         if not raw:
             return None
+        raw = strip_vision_requests(raw) or ""
         raw = _strip_model_preamble(raw) or ""
         if not raw:
             return None
 
-        # 追问同样支持附图/附件：解析为有序片段，避免指令行漏成文字
+        # 追问同样支持附件：解析为有序片段，避免指令行漏成文字
         segments, notes = await self.build_report_segments(
-            settings, raw, digest, provider, project=project
+            settings, raw, digest, provider, project=project,
+            config_name=config_name,
         )
-        text = strip_attachments(raw) or ""
-        if notes:
-            text = f"{text}\n\n" + "\n".join(f"（{note}）" for note in notes)
-            segments = _append_text_segment(segments, notes)
+        if tool_note:
+            notes.append(tool_note)
+        report_cfg = self._report_cfg(config_name)
+        segments, text, rendered, render_notice = await self._prepare_output(
+            config_name=config_name,
+            settings=settings,
+            raw_report=raw,
+            header="",
+            digest=digest,
+            segments=segments,
+            notes=notes,
+            render_followup=bool(report_cfg.render_followup),
+            session_id=current_session_id(),
+        )
+        if render_notice:
+            segments = _append_text_segment(segments, [render_notice])
+            text = f"{text}\n\n（{render_notice}）" if text else render_notice
+        return FollowupAnswer(
+            text=text, segments=segments, rendered=rendered,
+            render_notice=render_notice,
+        )
 
-        return FollowupAnswer(text=text, segments=segments)
-
-    async def _run_tool_conversation(self, settings: AnalysisSettings,
-                                     messages: list[dict], tools: list[dict],
-                                     *, repo_cfg: RepoConfig,
-                                     repo_tools: Optional[RepoTools],
-                                     log_tools: Optional["LogArchiveTools"],
-                                     ) -> Optional[str]:
+    async def _run_tool_loop(
+        self,
+        *,
+        config_name: str,
+        settings: AnalysisSettings,
+        messages: list[dict],
+        tools: list[dict],
+        repo_tools: Optional[RepoTools],
+        log_tools: Optional["LogArchiveTools"],
+        project: Optional[ProjectConfig] = None,
+        phase: str = "analysis",
+        convergence_prompt: str = "",
+        vision_state: Optional[dict] = None,
+    ) -> Optional[str]:
         """
-        执行一段工具对话（追问场景），返回模型最终文本。
+        统一的工具循环（分析与追问共用）。
 
-        与 agent 分析共用 `_dispatch_agent_tool`，限制逻辑一致。
+        限制：最大轮次、总时长、单轮工具数、上下文 token 预算。
         """
+        repo_cfg = project.repo if project is not None else RepoConfig()
+        config_llm = self._llm_cfg(config_name)
         max_rounds = max(1, int(repo_cfg.max_tool_rounds or 8))
         deadline = time.monotonic() + max(60, int(repo_cfg.agent_deadline_seconds or 600))
-        temperature = settings.temperature
-        if temperature is None:
-            temperature = self.llm.temperature
-        model_override = str(settings.model or "").strip()
+        per_round = max(1, int(repo_cfg.max_tool_calls_per_round or 6))
+        context_budget = self._context_budget(settings, self.llm, config_llm)
+        tool_token_budget = max(
+            512,
+            int(repo_cfg.max_tool_context_tokens or 0)
+            or int(context_budget * 0.5),
+        )
 
         last_text = ""
         tool_calls_total = 0
-        for round_index in range(1, max_rounds + 1):
-            if time.monotonic() > deadline:
-                logger.info("[追问] 工具循环达到时长上限，使用已有内容")
-                break
+        overflow_retries = 0
+        round_index = 0
 
-            reply = await self.llm.chat_messages(
-                messages, temperature=float(temperature),
-                model_override=model_override, tools=tools,
+        def enforce_budget() -> None:
+            nonlocal messages
+            messages = self._enforce_context_budget(
+                messages, context_budget, tool_token_budget
             )
+
+        while round_index < max_rounds:
+            if time.monotonic() > deadline:
+                logger.warning(f"[{phase}] 工具循环达到时长上限，使用已有内容")
+                break
+            round_index += 1
+            try:
+                reply = await self.llm.chat(
+                    config_llm, messages,
+                    config_name=config_name,
+                    need=("tools",),
+                    tools=tools,
+                    max_context_tokens=int(settings.max_context_tokens or 0),
+                    phase=phase,
+                    use_breaker=bool(settings.circuit_breaker_enabled),
+                )
+            except ContextOverflowError:
+                if overflow_retries >= 2:
+                    logger.error(f"[{phase}] 上下文仍然超限，放弃本轮工具调用")
+                    break
+                overflow_retries += 1
+                logger.warning(f"[{phase}] 上下文超限，压缩历史后重试（第 {overflow_retries} 次）")
+                enforce_budget()
+                messages = self._shrink_tool_results(messages, aggressive=True)
+                continue
+
             if reply is None:
+                logger.warning(f"[{phase}] 工具轮次调用失败，使用已有内容")
                 break
             if reply.content:
                 last_text = reply.content
+
+            # 看图请求：先处理指令，再把正文写回 assistant 消息
+            content, image_messages, vision_note = self._take_vision_requests(
+                reply.content or "", vision_state, project,
+                self._repo_provider_for(config_name),
+            )
+            if vision_note:
+                last_text = (last_text + f"\n\n（{vision_note}）").strip()
+
             if not reply.wants_tools:
-                return last_text or None
+                if reply.truncated:
+                    return await self._retry_truncated(
+                        config_llm, messages, last_text, config_name, settings, phase
+                    )
+                return content or last_text or None
 
             messages.append({
                 "role": "assistant",
-                "content": reply.content or "",
+                "content": content,
                 "tool_calls": [
                     {
                         "id": call.id,
@@ -1246,8 +1939,14 @@ class MaaAnalyzer:
                 ],
             })
 
-            per_round = max(1, int(repo_cfg.max_tool_calls_per_round or 6))
-            for call in reply.tool_calls[:per_round]:
+            executed = reply.tool_calls[:per_round]
+            skipped = reply.tool_calls[per_round:]
+            if skipped:
+                logger.info(
+                    f"[{phase}] 本轮 {len(reply.tool_calls)} 个工具调用，"
+                    f"仅执行前 {per_round} 个；其余明确告知跳过"
+                )
+            for call in executed:
                 tool_calls_total += 1
                 if call.parse_error:
                     result = f"参数解析失败：{call.parse_error}"
@@ -1255,38 +1954,194 @@ class MaaAnalyzer:
                     result = await self._dispatch_agent_tool(
                         call.name, call.arguments, repo_tools, log_tools
                     )
-                logger.info(f"[追问] 工具 {call.name} → {len(result)} 字符")
+                result = trim_to_tokens(
+                    result, tool_token_budget, suffix="\n...[工具结果已截断]"
+                )
+                logger.info(
+                    f"[{phase}] 工具 {call.name} → "
+                    f"{format_tokens(estimate_tokens(result))} tokens"
+                )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,
                     "content": result,
                 })
 
-        # 轮次/时长用尽：要求模型收敛作答。
-        #
-        # 注意：模型可能**全程只调工具、一次正文都没输出**（last_text 为空），
-        # 这在真实使用中很常见。此时绝不能直接放弃 —— 否则上层会回复
-        # 「本次追问没有获得有效回复」。必须照样要求收敛一次。
+            # 未执行的调用也必须回填 tool 结果，否则严格端点会因
+            # assistant.tool_calls 与 tool 消息不配对而返回 400。
+            for call in skipped:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": (
+                        f"本轮工具调用数超过上限（{per_round}），未执行。"
+                        "请减少并发调用或改用更精确的查询。"
+                    ),
+                })
+
+            if image_messages:
+                messages.extend(image_messages)
+
+            enforce_budget()
+
         if tool_calls_total == 0:
             return last_text or None
 
         logger.info(
-            f"[追问] 工具循环达到轮次上限（共 {tool_calls_total} 次工具调用），要求收敛"
+            f"[{phase}] 工具循环达到轮次上限（共 {tool_calls_total} 次工具调用），要求收敛"
         )
         messages.append({
             "role": "user",
-            "content": "已达到检索轮次上限，请立即基于现有信息作答，不要再调用工具。",
+            "content": convergence_prompt or (
+                "已达到检索轮次上限，请立即基于目前掌握的信息输出最终分析报告，"
+                "不要再请求调用工具。格式与之前一致。"
+            ),
         })
         try:
-            final = await self.llm.chat_messages(
-                messages, temperature=float(temperature),
-                model_override=model_override,
+            final = await self.llm.chat(
+                config_llm, messages,
+                config_name=config_name,
+                max_context_tokens=int(settings.max_context_tokens or 0),
+                phase=f"{phase}-converge",
+                use_breaker=bool(settings.circuit_breaker_enabled),
             )
             if final and final.content:
+                if final.truncated:
+                    return await self._retry_truncated(
+                        config_llm, messages, final.content,
+                        config_name, settings, phase,
+                    )
                 return final.content
         except Exception as exc:
-            logger.warning(f"[追问] 收敛调用失败：{exc}")
+            logger.warning(f"[{phase}] 收敛调用失败：{exc}")
         return last_text or None
+
+    @staticmethod
+    def _shrink_tool_results(messages: list[dict], *, aggressive: bool = False
+                             ) -> list[dict]:
+        """把历史的 tool 结果折叠到更小的预算。"""
+        result: list[dict] = []
+        for message in messages:
+            if message.get("role") != "tool":
+                result.append(message)
+                continue
+            content = str(message.get("content") or "")
+            limit = 512 if aggressive else 2048
+            folded = fold_text(content, limit) if content else content
+            result.append({**message, "content": folded})
+        return result
+
+    @staticmethod
+    def _trim_messages_to_budget(messages: list[dict], budget: int) -> list[dict]:
+        """普通调用（无工具）超限时的兜底裁剪：先丢图片，再裁文本。"""
+        result: list[dict] = []
+        for message in messages:
+            copied = dict(message)
+            content = copied.get("content")
+            if isinstance(content, list):
+                texts = [
+                    str(part.get("text") or "")
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ]
+                copied["content"] = "\n".join(text for text in texts if text)
+            result.append(copied)
+
+        total = estimate_messages_tokens(result)
+        if total <= budget:
+            return result
+        # 从最大的非系统消息开始裁剪
+        for index in sorted(
+            range(len(result)),
+            key=lambda i: estimate_tokens(str(result[i].get("content") or "")),
+            reverse=True,
+        ):
+            if total <= budget:
+                break
+            if result[index].get("role") == "system":
+                continue
+            content = str(result[index].get("content") or "")
+            if not content:
+                continue
+            share = max(256, int(budget * 0.8))
+            result[index] = {
+                **result[index],
+                "content": trim_to_tokens(content, share),
+            }
+            total = estimate_messages_tokens(result)
+        return result
+
+    def _enforce_context_budget(self, messages: list[dict], budget: int,
+                                tool_budget: int) -> list[dict]:
+        """在重发全量历史前，按 token 预算折叠较早的工具结果。"""
+        if not messages:
+            return messages
+        result = list(messages)
+        total = estimate_messages_tokens(result)
+        if total <= budget:
+            return result
+
+        # 1) 折叠工具结果（从较早的开始）
+        for index, message in enumerate(result):
+            if total <= budget:
+                break
+            if message.get("role") != "tool":
+                continue
+            content = str(message.get("content") or "")
+            if not content:
+                continue
+            folded = fold_text(content, tool_budget, head_ratio=0.3)
+            if len(folded) >= len(content):
+                continue
+            result[index] = {**message, "content": folded}
+            total = estimate_messages_tokens(result)
+
+        # 2) 仍超预算：更激进地折叠
+        if total > budget:
+            for index, message in enumerate(result):
+                if total <= budget:
+                    break
+                if message.get("role") != "tool":
+                    continue
+                content = str(message.get("content") or "")
+                if not content:
+                    continue
+                folded = trim_to_tokens(content, 256)
+                result[index] = {**message, "content": folded}
+                total = estimate_messages_tokens(result)
+
+        # 3) 最后手段：删除最旧的「非系统、非末条」消息对，保持配对
+        if total > budget:
+            keep_head = 1 if result and result[0].get("role") == "system" else 0
+            removable: list[int] = []
+            for index in range(keep_head, max(keep_head, len(result) - 2)):
+                role = result[index].get("role")
+                if role in ("user", "assistant"):
+                    removable.append(index)
+            for index in reversed(removable):
+                if total <= budget:
+                    break
+                if index < len(result):
+                    total -= estimate_messages_tokens([result[index]])
+                    result.pop(index)
+            # 清理孤立的 tool 消息
+            declared = {
+                call.get("id")
+                for message in result
+                if message.get("role") == "assistant"
+                for call in (message.get("tool_calls") or [])
+                if isinstance(call, dict)
+            }
+            result = [
+                message for message in result
+                if message.get("role") != "tool"
+                or message.get("tool_call_id") in declared
+            ]
+        return result
+
+    def _repo_provider_for(self, config_name: str) -> Optional[RepoProvider]:
+        return (self._active_repos.get(config_name)
+                or self._repos.get(config_name))
 
     # ════════════════════════════════════════════════════════════
     # 项目代码参考
@@ -1433,135 +2288,53 @@ class MaaAnalyzer:
     # agent 模式：AI 自主调用仓库工具
     # ════════════════════════════════════════════════════════════
 
-    async def _run_repo_agent(self, settings: AnalysisSettings, prompt: str,
+    async def _run_repo_agent(self, config_name: str,
+                              settings: AnalysisSettings, prompt: str,
                               provider: Optional[RepoProvider],
                               log_tools: Optional["LogArchiveTools"] = None,
                               project: Optional[ProjectConfig] = None,
+                              user_content: Any = None,
+                              vision_state: Optional[dict] = None,
                               ) -> Optional[str]:
         """
         让 AI 通过工具调用自主检索**项目仓库**与**日志压缩包**，最后输出报告。
 
-        仓库工具与日志工具合并为同一套（用 source 参数区分），
-        因此模型可以像读仓库一样读取日志包内的原始文件。
-
-        循环受三重限制：最大轮次、总时长、单次工具结果字符数。
-        任何异常都退化为「返回已有文本」，不会让分析整体失败。
+        统一走 `_run_tool_loop`：轮次、时长、单轮工具数、上下文预算一致。
         """
         repo_cfg = project.repo if project is not None else RepoConfig()
         repo_tools = RepoTools(provider, repo_cfg) if provider is not None else None
         if repo_tools is None and log_tools is None:
             return None
 
-        # 合并工具定义：有仓库则用仓库工具，另加日志工具
         tools = repo_tool_definitions(repo_cfg) if repo_tools is not None else []
         if log_tools is not None:
             tools = tools + LOG_TOOL_DEFINITIONS
-
-        max_rounds = max(1, int(repo_cfg.max_tool_rounds or 8))
-        deadline = time.monotonic() + max(60, int(repo_cfg.agent_deadline_seconds or 600))
-
-        system_prompt = self._system_prompt(settings, project)
-        temperature = settings.temperature
-        if temperature is None:
-            temperature = self.llm.temperature
-        model_override = str(settings.model or "").strip()
-
-        hint = AGENT_TOOL_HINT
-        if repo_tools is None:
-            hint = AGENT_TOOL_HINT_LOG_ONLY
-        elif log_tools is None:
-            hint = AGENT_TOOL_HINT_REPO_ONLY
-        if repo_tools is not None:
-            hint = _filter_repo_tool_hint(hint, repo_cfg)
-
-        messages: list[dict] = [
-            {"role": "system", "content": system_prompt + hint},
-            {"role": "user", "content": prompt},
+        tool_names = [
+            str(item.get("function", {}).get("name") or "")
+            for item in tools if isinstance(item, dict)
         ]
 
-        last_text = ""
-        tool_calls_total = 0
-
-        for round_index in range(1, max_rounds + 1):
-            if time.monotonic() > deadline:
-                logger.warning("[分析] agent 循环达到时长上限，使用已有结论")
-                break
-
-            reply = await self.llm.chat_messages(
-                messages,
-                temperature=float(temperature),
-                model_override=model_override,
-                tools=tools,
-            )
-            if reply is None:
-                logger.warning("[分析] agent 轮次调用失败，使用已有结论")
-                break
-
-            if reply.content:
-                last_text = reply.content
-
-            if not reply.wants_tools:
-                logger.info(f"[分析] agent 完成，共 {round_index - 1} 轮工具调用")
-                return last_text or reply.content or None
-
-            # 记录助手消息（含 tool_calls）以保持上下文连续
-            messages.append({
-                "role": "assistant",
-                "content": reply.content or "",
-                "tool_calls": [
-                    {
-                        "id": call.id,
-                        "type": "function",
-                        "function": {"name": call.name, "arguments": call.raw_arguments},
-                    }
-                    for call in reply.tool_calls
-                ],
-            })
-
-            # 单轮工具数上限，避免一次请求打爆 IO
-            per_round = max(1, int(repo_cfg.max_tool_calls_per_round or 6))
-            calls = reply.tool_calls[:per_round]
-            if len(reply.tool_calls) > per_round:
-                logger.info(f"[分析] 本轮 {len(reply.tool_calls)} 个工具调用，"
-                            f"仅执行前 {per_round} 个")
-
-            for call in calls:
-                tool_calls_total += 1
-                if call.parse_error:
-                    result = f"参数解析失败：{call.parse_error}"
-                else:
-                    result = await self._dispatch_agent_tool(
-                        call.name, call.arguments, repo_tools, log_tools
-                    )
-                logger.info(f"[分析] 工具 {call.name} → {len(result)} 字符")
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": result,
-                })
-
-        # 轮次/时长用尽：要求模型基于已有信息收敛出报告
-        if tool_calls_total == 0:
-            return last_text or None
-
-        logger.info(f"[分析] agent 达到轮次上限（共 {tool_calls_total} 次工具调用），要求收敛")
-        messages.append({
-            "role": "user",
-            "content": ("已达到检索轮次上限，请立即基于目前掌握的信息输出最终分析报告，"
-                        "不要再请求调用工具。格式与之前一致。"),
-        })
+        system_prompt = self._system_prompt(settings, project)
+        hint = build_tool_hint(tool_names)
+        messages: list[dict] = [
+            {"role": "system", "content": system_prompt + hint},
+            {"role": "user", "content": user_content if user_content else prompt},
+        ]
         try:
-            final = await self.llm.chat_messages(
-                messages,
-                temperature=float(temperature),
-                model_override=model_override,
+            return await self._run_tool_loop(
+                config_name=config_name,
+                settings=settings,
+                messages=messages,
+                tools=tools,
+                repo_tools=repo_tools,
+                log_tools=log_tools,
+                project=project,
+                phase="analysis",
+                vision_state=vision_state,
             )
-            if final and final.content:
-                return final.content
-        except Exception as exc:
-            logger.warning(f"[分析] agent 收敛调用失败：{exc}")
-
-        return last_text or None
+        finally:
+            if log_tools is not None:
+                log_tools.close()
 
     @staticmethod
     async def _dispatch_agent_tool(name: str, arguments: dict,
@@ -1656,8 +2429,10 @@ class MaaAnalyzer:
                     f"如仍需核对其他版本，在最后单独一行写 [需要核对版本: 版本号]。）"
                 )
                 response_text = await asyncio.wait_for(
-                    self._call_ai(settings, follow_up, project),
-                    timeout=max(30, int(settings.llm_timeout_seconds or 900)),
+                    self._call_ai(
+                        settings, follow_up, project, config_name=config_name
+                    ),
+                    timeout=max(30, int(settings.ai_stage_timeout_seconds or 300)),
                 ) or response_text
             except Exception as exc:
                 logger.warning(f"[分析] 版本 {wanted} 复核失败：{exc}", exc_info=True)

@@ -60,9 +60,12 @@ _FIELD_LABELS: dict[str, str] = {
     "history_max_total_mb": "历史占用上限 MB",
     "max_zip_size_mb": "zip 大小上限 MB",
     "max_log_files": "最多处理日志文件数",
-    "max_prompt_chars": "摘要最大字符数",
-    "model": "覆盖模型名（空=用全局）",
-    "temperature": "覆盖温度（空=用全局）",
+    "max_prompt_chars": "摘要字符上限（token 预算的兜底）",
+    "ai_stage_timeout_seconds": "整个 AI 阶段超时（秒）",
+    "max_context_tokens": "上下文 token 预算（0=用全局默认）",
+    "analysis_concurrency": "同时分析的任务数",
+    "analysis_cache_hours": "分析结果缓存小时数（0=关闭）",
+    "circuit_breaker_enabled": "连续失败时熔断端点",
 }
 
 _PROJECT_LABELS: dict[str, str] = {
@@ -202,6 +205,7 @@ class CommandHandler:
             "repo": (commands.read_level, self._cmd_repo),
             "jobs": (commands.read_level, self._cmd_jobs),
             "history": (commands.read_level, self._cmd_history),
+            "ai": (commands.read_level, self._cmd_ai),
             "followup": (commands.followup_level, self._cmd_followup),
             "set": (commands.write_level, self._cmd_set),
             "mode": (commands.write_level, self._cmd_mode),
@@ -261,6 +265,7 @@ class CommandHandler:
             f"  {prefix} repo              查看项目代码仓库设置",
             f"  {prefix} jobs              查看最近分析记录",
             f"  {prefix} history           查看分析历史归档（可跨天追问）",
+            f"  {prefix} ai [n]            查看最近 n 个会话（分析 + 追问）的用量",
             f"  {prefix} followup          查看追问答疑会话状态",
             "",
             "修改类（需权限）：",
@@ -311,7 +316,27 @@ class CommandHandler:
         return CommandResult(text="\n".join(lines))
 
     async def _cmd_get(self, cfg: ConfigState, args: list[str]) -> CommandResult:
-        lines = ["当前分析设置（可改项）：", ""]
+        candidates = " → ".join(
+            f"{ref.name}/{ref.model}" for ref in cfg.llm.models
+        ) or "（未声明，AI 分析不可用）"
+        lines = [
+            "模型配置：",
+            f"  候选顺序 = {candidates}",
+            f"  温度 = {cfg.llm.temperature if cfg.llm.temperature is not None else '（跟随模型）'}",
+            f"  输出上限 = {cfg.llm.max_tokens or '（跟随模型）'}",
+            "看图（vision）："
+            f"{'开' if cfg.vision.enabled else '关'}"
+            f"，最多 {cfg.vision.max_images} 张"
+            f"，单张上限 {cfg.vision.max_image_kb} KB",
+            "报告（report）："
+            f"{cfg.report.render_mode()}"
+            f"，模板 {cfg.report.template}"
+            f"，最多 {cfg.report.max_pages} 页"
+            f"，附带 Markdown {'开' if cfg.report.attach_markdown else '关'}",
+            "",
+            "当前分析设置（可改项）：",
+            "",
+        ]
         for name, info in AnalysisSettings.model_fields.items():
             if name in _PROTECTED_FIELDS or name == "repo":
                 continue
@@ -325,6 +350,50 @@ class CommandHandler:
         lines.append("")
         lines.append(f"修改：{cfg.commands.prefix} set <项> <值>")
         return CommandResult(text="\n".join(lines))
+
+    async def _cmd_ai(self, cfg: ConfigState, args: list[str]) -> CommandResult:
+        """`/maa ai [n]`：按会话（分析 + 追问）查看模型用量。"""
+        from core.ai_usage import UsageStore, format_tokens
+
+        try:
+            limit = int(args[0]) if args else 5
+        except (TypeError, ValueError):
+            return CommandResult(text="用法：/maa ai [会话数]", ok=False)
+        limit = max(1, min(20, limit))
+
+        store = UsageStore(getattr(self.s.dm, "_dir", "data"))
+        sessions = store.sessions(limit)
+        if not sessions:
+            return CommandResult(text="还没有模型调用记录。")
+
+        total_tokens = sum(item.total() for item in sessions)
+        total_calls = sum(item.calls for item in sessions)
+        failed = sum(item.failed for item in sessions)
+        header = (
+            f"最近 {len(sessions)} 个会话 · 共 {total_calls} 次调用"
+            f" · 合计 {format_tokens(total_tokens)} tokens"
+        )
+        if failed:
+            header += f" · 失败 {failed} 次"
+        lines = [header, ""]
+        for item in sessions:
+            stamp = time.strftime("%m-%d %H:%M", time.localtime(item.updated_at))
+            title = f"{stamp} · {item.config or '-'}"
+            if item.file:
+                title += f" · {item.file}"
+            lines.append(title)
+            status = f"失败 {item.failed} 次" if item.failed else "全部成功"
+            lines.append(f"  {item.phase_split()} · {status}")
+            lines.append(
+                f"  输入 {format_tokens(item.prompt_tokens)}"
+                f" · 输出 {format_tokens(item.completion_tokens)}"
+                f" · 合计 {format_tokens(item.total())} tokens"
+                f" · 用时 {item.elapsed_ms / 1000:.1f}s"
+            )
+            lines.append(f"  {item.pair_label()}")
+            lines.append("")
+        lines.append("说明：同一份日志的分析与它后续的追问计为同一个会话。")
+        return CommandResult(text="\n".join(lines).rstrip())
 
     async def _cmd_project(self, cfg: ConfigState, args: list[str]) -> CommandResult:
         """
