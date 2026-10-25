@@ -25,7 +25,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from core.models import RepoConfig
-from features.maa.repo import RepoProvider, _SKIP_DIRS
+from features.maa.repo import (
+    CHECKOUT_BUDGET_TIMEOUT,
+    CHECKOUT_FETCH_TIMEOUT,
+    CHECKOUT_PROBE_TIMEOUT,
+    RepoProvider,
+    _SKIP_DIRS,
+)
 from features.maa.safety import describe_rejection, is_sensitive_path
 
 logger = logging.getLogger("Maa.RepoTools")
@@ -598,5 +604,9 @@ class RepoTools:
         if self.update_calls >= 1:
             return "本次分析已调用过更新工具，请基于当前仓库继续分析"
         self.update_calls += 1
-        ok, message = await self.provider.update_latest()
+        ok, message = await self.provider.update_latest(
+            probe_timeout=CHECKOUT_PROBE_TIMEOUT,
+            fetch_timeout=CHECKOUT_FETCH_TIMEOUT,
+            budget=CHECKOUT_BUDGET_TIMEOUT,
+        )
         return message if ok else f"更新未成功：{message}"

@@ -60,6 +60,14 @@ SUBMODULE_TIMEOUT = 1200
 # 克隆前探测来源可达性，避免卡在无响应的镜像上
 PROBE_TIMEOUT = 60
 
+# 按需拉取 / 切换单个 ref 的联网预算。
+# 整段分析共享一个阶段超时（settings.ai_stage_timeout_seconds），
+# 一个无响应的镜像就足以把它耗光，所以这些路径必须收紧：
+# 先并发探测来源，只对可达来源做短超时 fetch，总耗时封顶。
+CHECKOUT_PROBE_TIMEOUT = 15
+CHECKOUT_FETCH_TIMEOUT = 90
+CHECKOUT_BUDGET_TIMEOUT = 180
+
 # 扫描时始终跳过的目录名
 _SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
@@ -190,6 +198,21 @@ def redact_remote_url(value: str) -> str:
         return "<invalid remote URL>"
 
 
+def _carries_credentials(value: str) -> bool:
+    """地址自身是否含凭据（userinfo / query token），这类地址不能原样进日志。"""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if "://" not in text:
+        # scp 形式 user@host:path
+        return bool(re.match(r"[^/]+@[^:]+:", text))
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return True
+    return bool(parts.username or parts.password or parts.query)
+
+
 def compact_git_error(text: str, sources: list[str], limit: int = 300) -> str:
     """Keep the useful part of a git error, without URLs or progress noise."""
     redacted = redact_remote_text(text, sources)
@@ -202,15 +225,45 @@ def compact_git_error(text: str, sources: list[str], limit: int = 300) -> str:
 
 
 def redact_remote_text(text: str, sources: list[str]) -> str:
-    """Replace configured remote URLs (and their credentials) with source labels."""
+    """
+    替换错误信息里的远端地址。
+
+    只替换**自身带凭据**的地址：这类地址一旦写进日志、群消息或模型上下文就
+    收不回来。公开地址保持原样——把它们统一藏成「主地址」并不能保护什么，
+    反而让人看不出「到底是哪条来源被 403 / 被重置」。
+
+    替换按地址从长到短进行：镜像地址往往以主地址结尾，先替换短的会把镜像
+    截成 `https://<镜像前缀>/<主地址>` 这种读不懂的形态。
+    """
     result = str(text or "")
-    for index, url in enumerate(sources, start=1):
-        if not url:
+    urls = [str(url or "").strip() for url in sources]
+    sensitive = [_carries_credentials(url) for url in urls]
+    # 镜像常把「带凭据的主地址」整段嵌在自己的路径里（形如
+    # .../api/ghproxy/https://<userinfo>@github.com/x/y）。
+    # urlsplit 看不到路径里的凭据，因此这类嵌套地址也要一并视为敏感。
+    for _ in range(2):
+        changed = False
+        for index, url in enumerate(urls):
+            if sensitive[index] or not url:
+                continue
+            if any(sensitive[j] and other and other in url
+                   for j, other in enumerate(urls) if j != index):
+                sensitive[index] = True
+                changed = True
+        if not changed:
+            break
+
+    variants: list[tuple[str, str]] = []
+    for index, url in enumerate(urls, start=1):
+        if not url or not sensitive[index - 1]:
             continue
-        label = "主地址" if index == 1 else f"备用镜像 #{index - 1}"
+        label = f"来源#{index}"
         for variant in (url, redact_remote_url(url)):
             if variant:
-                result = result.replace(variant, f"<{label}>")
+                variants.append((variant, label))
+    for variant, label in sorted(variants, key=lambda item: len(item[0]),
+                                 reverse=True):
+        result = result.replace(variant, f"<{label}>")
     return result
 
 
@@ -342,13 +395,31 @@ class RepoProvider:
         except Exception:
             return []
 
-    async def _probe_source(self, url: str, sources: list[str]) -> Optional[str]:
+    async def _probe_source(self, url: str, sources: list[str],
+                            timeout: int = PROBE_TIMEOUT) -> Optional[str]:
         """快速探测来源是否可达，避免在无响应的镜像上长时间挂起。"""
         try:
-            await _run_git(["ls-remote", "--heads", url], timeout=PROBE_TIMEOUT)
+            await _run_git(["ls-remote", "--heads", url], timeout=timeout)
             return None
         except Exception as exc:
             return compact_git_error(str(exc), sources, limit=200)
+
+    async def _reachable_sources(self, sources: list[str], *,
+                                 timeout: int = CHECKOUT_PROBE_TIMEOUT,
+                                 ) -> list[tuple[int, str]]:
+        """并发探测全部来源，按配置顺序返回可达的 (序号, 地址)。"""
+        if not sources:
+            return []
+        results = await asyncio.gather(*(
+            self._probe_source(url, sources, timeout=timeout) for url in sources
+        ))
+        reachable: list[tuple[int, str]] = []
+        for index, (url, error) in enumerate(zip(sources, results), start=1):
+            if error:
+                logger.info(f"[仓库] 来源 #{index} 不可达，跳过：{error}")
+                continue
+            reachable.append((index, url))
+        return reachable
 
     # ════════════════════════════════════════════════════════════
     # 克隆形态与子模块
@@ -374,14 +445,21 @@ class RepoProvider:
         return shallow
 
     async def _fetch(self, root: Path, url: str, refspec: str, *,
-                     timeout: int = FETCH_TIMEOUT) -> None:
-        """按仓库形态 fetch：浅克隆用 --depth 1，完整克隆拉全量并带 tag。"""
+                     timeout: int = FETCH_TIMEOUT,
+                     full_timeout: int = FULL_FETCH_TIMEOUT,
+                     fetch_tags: bool = True) -> None:
+        """
+        按仓库形态 fetch：浅克隆用 --depth 1，完整克隆拉全量并带 tag。
+
+        full_timeout / fetch_tags 可由调用方收紧：只拉一个 tag 时再带 --tags
+        会把远端全部 tag 一并下载，既慢又没有必要。
+        """
         if await self.is_shallow(root):
             await _run_git(["fetch", "--depth", "1", url, refspec],
                            cwd=root, timeout=timeout)
             return
-        await _run_git(["fetch", "--tags", url, refspec],
-                       cwd=root, timeout=max(timeout, FULL_FETCH_TIMEOUT))
+        args = ["fetch", *(["--tags"] if fetch_tags else []), url, refspec]
+        await _run_git(args, cwd=root, timeout=full_timeout)
 
     def _should_sync_submodules(self, root: Path) -> bool:
         """
@@ -394,7 +472,8 @@ class RepoProvider:
             return False
         return bool(self.cfg.preload_enabled) or (root / ".git" / "modules").exists()
 
-    async def _sync_submodules(self, root: Path) -> bool:
+    async def _sync_submodules(self, root: Path,
+                               timeout: int = SUBMODULE_TIMEOUT) -> bool:
         """把子模块对齐到当前提交；失败只告警，不阻断主仓库使用。"""
         if not self._should_sync_submodules(root):
             return True
@@ -402,7 +481,7 @@ class RepoProvider:
             await _run_git(["submodule", "sync", "--recursive"],
                            cwd=root, timeout=120)
             await _run_git(["submodule", "update", "--init", "--recursive"],
-                           cwd=root, timeout=SUBMODULE_TIMEOUT)
+                           cwd=root, timeout=timeout)
             self._submodules_ready = True
             return True
         except Exception as exc:
@@ -596,8 +675,17 @@ class RepoProvider:
         self._last_error = f"所有仓库来源均克隆失败（{detail}）"
         raise RuntimeError(self._last_error)
 
-    async def update_latest(self, root: Optional[Path] = None) -> tuple[bool, str]:
-        """Fetch and fast-forward the configured default branch from ordered remotes."""
+    async def update_latest(self, root: Optional[Path] = None, *,
+                            probe_timeout: int = PROBE_TIMEOUT,
+                            fetch_timeout: int = FULL_FETCH_TIMEOUT,
+                            budget: int = 0) -> tuple[bool, str]:
+        """
+        从按顺序配置的远端 fetch 并快进默认分支。
+
+        probe_timeout / fetch_timeout / budget 可由调用方收紧：AI 在工具循环里
+        触发的更新不能按「预下载」的预算等待，否则一个无响应的镜像就能把整个
+        分析阶段挂到超时。budget=0 表示不设总时限（预下载使用）。
+        """
         root = root or self.root
         if root is None or not (root / ".git").exists():
             return False, "当前不是可更新的 Git 仓库"
@@ -624,15 +712,26 @@ class RepoProvider:
 
         sources = await self._remote_sources(root)
         shallow = await self.is_shallow(root)
+        deadline = time.monotonic() + budget if budget > 0 else 0.0
         for index, url in enumerate(sources, start=1):
-            probe_error = await self._probe_source(url, sources)
+            if deadline and time.monotonic() >= deadline:
+                logger.warning("[仓库] 更新超出时间预算，停止尝试其余来源")
+                break
+            probe_error = await self._probe_source(
+                url, sources, timeout=probe_timeout
+            )
             if probe_error:
                 logger.warning(
                     f"[仓库] 更新来源 #{index} 不可达，跳过：{probe_error}"
                 )
                 continue
+            remaining = (max(10, int(deadline - time.monotonic()))
+                         if deadline else fetch_timeout)
+            fetch_limited = min(fetch_timeout, remaining)
             try:
-                await self._fetch(root, url, branch)
+                await self._fetch(root, url, branch,
+                                  timeout=fetch_limited,
+                                  full_timeout=fetch_limited)
                 if has_branch:
                     if shallow:
                         # 浅克隆可能缺少共同历史，逐步加深后再判断快进
@@ -646,7 +745,8 @@ class RepoProvider:
                             except Exception:
                                 await _run_git(
                                     ["fetch", f"--deepen={deepen}", url, branch],
-                                    cwd=root, timeout=FETCH_TIMEOUT,
+                                    cwd=root,
+                                    timeout=min(FETCH_TIMEOUT, fetch_limited),
                                 )
                         else:
                             await _run_git(
@@ -664,7 +764,7 @@ class RepoProvider:
                 commit = (await _run_git(
                     ["rev-parse", "--short", "HEAD"], cwd=root, timeout=30
                 )).strip()
-                source = "主地址" if index == 1 else f"备用镜像 #{index - 1}"
+                source = f"来源 #{index}"
                 return True, f"已通过{source}更新 {branch}（{commit}）"
             except Exception as exc:
                 detail = compact_git_error(str(exc), sources)
@@ -762,13 +862,25 @@ class RepoProvider:
     async def _fetch_tag_candidates(self, root: Path, version: str) -> None:
         """Try configured remotes in order for version tags."""
         sources = await self._remote_sources(root)
+        reachable = await self._reachable_sources(sources)
+        if not reachable:
+            logger.info("[仓库] 没有可达的远端，跳过 tag 拉取")
+            return
+        deadline = time.monotonic() + CHECKOUT_BUDGET_TIMEOUT
         for candidate in self._tag_candidates(version):
             if await self._tag_exists(root, candidate):
                 continue
-            for index, url in enumerate(sources, start=1):
+            for index, url in reachable:
+                budget = min(CHECKOUT_FETCH_TIMEOUT,
+                             int(deadline - time.monotonic()))
+                if budget <= 1:
+                    logger.info("[仓库] 拉取 tag 超出时间预算，改用默认分支")
+                    return
                 try:
                     await self._fetch(
-                        root, url, f"refs/tags/{candidate}:refs/tags/{candidate}"
+                        root, url,
+                        f"refs/tags/{candidate}:refs/tags/{candidate}",
+                        timeout=budget, full_timeout=budget, fetch_tags=False,
                     )
                     self._active_url = url
                     logger.info(f"[仓库] 已从来源 #{index} 拉取 tag {candidate}")
@@ -883,10 +995,18 @@ class RepoProvider:
             logger.info(f"[仓库] 切换 {ref} 失败，尝试拉取该 tag：{exc}")
 
         sources = await self._remote_sources(root)
-        for index, url in enumerate(sources, start=1):
+        reachable = await self._reachable_sources(sources)
+        deadline = time.monotonic() + CHECKOUT_BUDGET_TIMEOUT
+        for index, url in reachable:
+            budget = min(CHECKOUT_FETCH_TIMEOUT,
+                         int(deadline - time.monotonic()))
+            if budget <= 1:
+                logger.info(f"[仓库] 拉取 {ref} 超出时间预算，保持默认分支")
+                break
             try:
                 await self._fetch(
-                    root, url, f"refs/tags/{ref}:refs/tags/{ref}"
+                    root, url, f"refs/tags/{ref}:refs/tags/{ref}",
+                    timeout=budget, full_timeout=budget, fetch_tags=False,
                 )
                 await _run_git(["checkout", "--force", ref], cwd=root, timeout=timeout)
                 self._active_url = url
@@ -899,8 +1019,31 @@ class RepoProvider:
                 logger.info(f"[仓库] 来源 #{index} 拉取 {ref} 失败：{detail}")
         return False
 
+    async def _local_ref_available(self, root: Path, value: str,
+                                   is_commit: bool) -> bool:
+        """目标 ref 是否已存在于本地（预下载 / 完整克隆通常已有全部 tag）。"""
+        if is_commit:
+            try:
+                await _run_git(
+                    ["rev-parse", "--verify", "--quiet", f"{value}^{{commit}}"],
+                    cwd=root, timeout=30,
+                )
+                return True
+            except Exception:
+                return False
+        return await self.tag_exists(root, value)
+
     async def checkout_remote_ref(self, ref: str) -> tuple[bool, str]:
-        """Fetch a validated tag or commit from configured mirrors, then check it out."""
+        """
+        切换到指定 tag / commit，必要时才联网获取。
+
+        预下载（完整克隆）已经拉全了历史与 tag，因此能本地解析的就纯本地
+        `checkout`，不做任何网络请求；只有本地确实没有时才按预算联网兜底。
+
+        联网阶段受 CHECKOUT_* 预算约束：先并发探测来源，只对可达来源做短超时
+        fetch，总耗时封顶。失败时立刻把原因交回去，绝不把工具循环挂住——
+        模型应当基于当前版本给出结论。
+        """
         root = self.root
         value = str(ref or "").strip()
         if root is None or not (root / ".git").exists():
@@ -918,22 +1061,58 @@ class RepoProvider:
             self._current_ref = value
             return True, f"已从本地仓库切换到 {value}"
 
-        fetch_ref = value if is_commit else f"refs/tags/{value}:refs/tags/{value}"
         sources = await self._remote_sources(root)
-        for index, url in enumerate(sources, start=1):
+        if await self._local_ref_available(root, value, is_commit):
             try:
-                await self._fetch(root, url, fetch_ref)
+                await _run_git(["checkout", "--force", value],
+                               cwd=root, timeout=FETCH_TIMEOUT)
+                self._current_ref = value
+                await self._sync_submodules(root,
+                                            timeout=CHECKOUT_FETCH_TIMEOUT)
+                logger.info(f"[仓库] 本地已有 {value}，未联网直接切换")
+                return True, f"已切换到本地已有的 {value}（无需联网）"
+            except Exception as exc:
+                detail = compact_git_error(str(exc), sources, limit=160)
+                logger.info(f"[仓库] 本地切换 {value} 失败，改从远端获取：{detail}")
+
+        fetch_ref = value if is_commit else f"refs/tags/{value}:refs/tags/{value}"
+        if not sources:
+            return False, f"未配置可用的远端来源，无法获取 {value}"
+        reachable = await self._reachable_sources(sources)
+        if not reachable:
+            return False, (
+                f"本地没有 {value}，且所有 {len(sources)} 个远端都不可达，"
+                f"已跳过切换（保持 {self.current_ref}），请基于当前代码继续分析"
+            )
+
+        deadline = time.monotonic() + CHECKOUT_BUDGET_TIMEOUT
+        errors: list[str] = []
+        for index, url in reachable:
+            budget = min(CHECKOUT_FETCH_TIMEOUT,
+                         int(deadline - time.monotonic()))
+            if budget <= 1:
+                errors.append("超出切换时间预算")
+                break
+            try:
+                await self._fetch(root, url, fetch_ref,
+                                  timeout=budget, full_timeout=budget,
+                                  fetch_tags=False)
                 target = "FETCH_HEAD" if is_commit else value
                 await _run_git(["checkout", "--force", target],
                                cwd=root, timeout=FETCH_TIMEOUT)
                 self._active_url = url
                 self._current_ref = value
-                await self._sync_submodules(root)
-                return True, f"已从配置来源 #{index} 获取并切换到 {value}"
+                await self._sync_submodules(root, timeout=CHECKOUT_FETCH_TIMEOUT)
+                return True, f"已从来源 #{index} 获取并切换到 {value}"
             except Exception as exc:
                 detail = compact_git_error(str(exc), sources, limit=160)
-                logger.info(f"[仓库] 配置来源 #{index} 获取 ref 失败：{detail}")
-        return False, f"所有配置的远端均未能获取 ref {value}"
+                errors.append(f"来源 #{index}: {detail}")
+                logger.info(f"[仓库] 来源 #{index} 获取 ref {value} 失败：{detail}")
+        reason = "；".join(errors[-3:]) or "未知原因"
+        return False, (
+            f"未能获取 {value}（{reason}）。已保持当前版本 {self.current_ref}，"
+            "请直接基于当前代码给出结论，不要重复请求切换版本"
+        )
 
     async def remember_current_ref(self, root: Optional[Path] = None) -> str:
         """
