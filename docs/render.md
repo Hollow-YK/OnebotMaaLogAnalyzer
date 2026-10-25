@@ -162,10 +162,13 @@ AI 输出 Markdown（含 section / page-break / 附件指令）
 --headless=new --disable-gpu --hide-scrollbars --no-first-run
 --no-default-browser-check --disable-extensions --disable-sync
 --disable-background-networking --disable-component-update --disable-dev-shm-usage
+--no-sandbox --disable-setuid-sandbox    # 仅以 root 运行时追加（否则 Chromium 直接退出）
 --user-data-dir=<data/_browser_profile>   # 独立配置目录，不碰用户配置
 --remote-debugging-port=0                 # 端口从 DevToolsActivePort 读取
 --host-resolver-rules="MAP * 0.0.0.0"     # 阻断一切外联
 ```
+
+启动失败时浏览器 stderr 写入 `data/_browser_stderr.log`，并把末尾几行带进 `[渲染]` 日志。
 
 探测顺序（`browser_path` 为空时）：
 
@@ -367,6 +370,7 @@ AI 输出与模板都属于不可信输入：
 | 现象 | 原因与处理 |
 | --- | --- |
 | 报告变成纯文本 | 浏览器未找到 / 渲染失败。查看日志中的 `[渲染]` 行与通知群提示；装 Edge/Chrome/Chromium 或设 `browser_path` |
+| 日志出现「调试端口未就绪 … exit=1」 | 浏览器启动即退出。看 `data/_browser_stderr.log`：root 用户需 `--no-sandbox`（本程序已自动追加）；其余多为缺依赖库（`apt install -y libnss3 libatk-bridge2.0-0 libgbm1 libasound2`） |
 | 日志出现「模板 X 缺少 page.html」 | 模板目录缺文件，已回退 `default` |
 | 图片里出现 `{{content}}` 字样 | `page.html` 用了不支持的写法（例如全角括号），改用 `{{content}}` 或 `<内容>` |
 | 中文显示为方块 | 系统缺 CJK 字体；在 `report.font_family` 指定已安装字体 |

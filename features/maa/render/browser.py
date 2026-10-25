@@ -38,6 +38,15 @@ logger = logging.getLogger("Maa.Render.Browser")
 _START_TIMEOUT = 15.0
 # 单页 PNG 超过该体积时改拍 JPEG（内部阈值：仅为控制消息体积，不对外配置）
 _MAX_PNG_BYTES = 4 * 1024 * 1024
+# 非 root 运行时也会出现的正常噪音，不能当作失败原因上报
+_STDERR_NOISE = (
+    "Failed to connect to the bus",
+    "chrome_crashpad_handler",
+    "recvmsg:",
+    "ERROR:dbus",
+    "dconf-CRITICAL",
+    "Fontconfig",
+)
 
 
 class BrowserUnavailable(RuntimeError):
@@ -91,6 +100,41 @@ def find_browser(browser_path: str = "") -> Optional[str]:
         if candidate and Path(candidate).is_file():
             return candidate
     return None
+
+
+def _sandbox_args() -> list[str]:
+    """
+    root 下 Chromium 无法建立有效沙箱（没有更低的身份可降权），fail-closed 直接退出，
+    必须显式关闭沙箱才能启动。非 root 不追加，保持原有安全边界。
+    """
+    getuid = getattr(os, "geteuid", None)
+    if getuid is not None and getuid() == 0:
+        return ["--no-sandbox", "--disable-setuid-sandbox"]
+    return []
+
+
+def _read_tail(path: Path, limit: int = 8, max_chars: int = 240) -> str:
+    """
+    读取浏览器 stderr 末尾若干行，用于把失败原因带进日志/通知。
+
+    过滤 bus / crashpad 等噪音行（非 root 运行时正常也会刷），去重后截断，
+    避免把整屏无关输出塞进群消息。
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if any(noise in line for noise in _STDERR_NOISE):
+            continue
+        if line not in lines:
+            lines.append(line)
+    detail = " | ".join(lines[-limit:])
+    return detail if len(detail) <= max_chars else detail[:max_chars] + "…"
 
 
 class _CDP:
@@ -202,6 +246,7 @@ class BrowserRenderer:
             "--disable-background-networking",
             "--disable-component-update",
             "--disable-dev-shm-usage",
+            *_sandbox_args(),
             f"--user-data-dir={self._profile}",
             "--remote-debugging-port=0",
             '--host-resolver-rules=MAP * 0.0.0.0',
@@ -211,12 +256,23 @@ class BrowserRenderer:
         if sys.platform.startswith("win"):
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         logger.info(f"[渲染] 启动浏览器：{exe}（profile={self._profile}）")
-        self._proc = subprocess.Popen(
-            args,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-        )
+        # 保留 stderr：浏览器拒绝启动时（沙箱 / 参数 / 依赖缺失）原因只在这里
+        stderr_log: Optional[Path] = self.data_dir / "_browser_stderr.log"
+        stderr_target: Any = subprocess.DEVNULL
+        try:
+            stderr_target = open(stderr_log, "wb")
+        except OSError:
+            stderr_log = None
+        try:
+            self._proc = subprocess.Popen(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_target,
+                creationflags=creationflags,
+            )
+        finally:
+            if stderr_target is not subprocess.DEVNULL:
+                stderr_target.close()
 
         port_file = self._profile / "DevToolsActivePort"
         deadline = time.monotonic() + _START_TIMEOUT
@@ -242,8 +298,12 @@ class BrowserRenderer:
                 f"[渲染] 调试端口未就绪：port_file={port_file.exists()}"
                 f" lines={len(lines)} exit={self._proc.poll()}"
             )
+            detail = _read_tail(stderr_log) if stderr_log else ""
+            if detail:
+                logger.warning(f"[渲染] 浏览器输出：{detail}")
             raise BrowserUnavailable(
                 "浏览器未在超时内暴露调试端口（可能是启动参数被拒绝或配置目录被占用）"
+                + (f"；浏览器输出：{detail}" if detail else "")
             )
 
         port, path = lines[0].strip(), lines[1].strip()
