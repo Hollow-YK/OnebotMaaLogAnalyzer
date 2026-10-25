@@ -114,7 +114,7 @@
 | `bot.configs.<名称>.report` | 图片化报告设置 |
 | `log.log_to_file` | 是否输出日志到文件 |
 | `log.log_level` | 日志等级：`DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `log.log_dir` | 日志目录，每次启动生成 `YYYY-MM-DD_HH-MM-SS.log` |
+| `log.log_dir` | 日志目录，每次启动生成 `YYYY-MM-DD_HH-MM-SS.log`；行内 `[配置名]` 标注该行属于哪个配置 |
 | `debug.enabled` | 启用调试模式（默认 `false`），见 [调试](debugging.md) |
 | `debug.http_port` | 调试 HTTP 端口（默认 `8765`，仅 `127.0.0.1`） |
 | `debug.data_dir` | 调试模式使用的测试数据目录（默认 `data/test`） |

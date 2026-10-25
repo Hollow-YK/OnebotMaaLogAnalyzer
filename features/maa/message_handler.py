@@ -17,6 +17,7 @@ from features.maa.commands import CommandHandler
 from features.maa.followup import FollowupStore
 from features.maa.text_utils import split_text
 from core.llm_pool import new_session_id
+from core.log_context import config_log_context
 
 if TYPE_CHECKING:
     from core.service import MaaService
@@ -61,6 +62,15 @@ class MessageHandler:
 
         # ── 1. 指令 ──
         cfg = self.s.resolve_config(group_str)
+        # 指令与追问的日志都标注配置名（无法解析配置时保持无前缀）
+        with config_log_context(cfg.name if cfg is not None else ""):
+            await self._dispatch(
+                cfg, group_str=group_str, user_id=user_id, text=text,
+                is_admin=is_admin, event=event,
+            )
+
+    async def _dispatch(self, cfg, *, group_str: str, user_id: str,
+                        text: str, is_admin: bool, event: dict) -> None:
         if cfg is not None and cfg.commands.enabled:
             args = CommandHandler.match(text, cfg.commands)
             if args is not None:

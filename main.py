@@ -30,6 +30,7 @@ from bot.handler import EventHandler
 from core.ai_usage import UsageStore
 from core.data_manager import DataManager
 from core.llm_pool import LLMPool, detect_legacy_llm, validate_llm_config
+from core.log_context import ConfigNameFormatter
 from core.service import MaaService
 from features.maa.analyzer import MaaAnalyzer
 from features.maa.followup import FollowupStore
@@ -39,13 +40,15 @@ from features.maa.watcher import LogWatcher
 
 logger = logging.getLogger("Maa")
 
-LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+# %(config_prefix)s 由 ConfigNameFormatter 填入当前配置名（如 " [MAN]"）
+LOG_FORMAT = "%(asctime)s [%(levelname)s]%(config_prefix)s %(name)s: %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+# 首次运行时的最小控制台日志：格式化器尚未装好，不能引用 config_prefix
+BOOTSTRAP_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
-# 最小控制台日志 — 确保首次运行（无 config.json）时也能看到输出
 logging.basicConfig(
     level=logging.INFO,
-    format=LOG_FORMAT,
+    format=BOOTSTRAP_LOG_FORMAT,
     datefmt=LOG_DATE_FORMAT,
 )
 
@@ -83,7 +86,7 @@ def setup_logging(log_cfg: dict):
 
     console = logging.StreamHandler()
     console.setLevel(log_level)
-    console.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+    console.setFormatter(ConfigNameFormatter(LOG_FORMAT, LOG_DATE_FORMAT))
     root.addHandler(console)
 
     if log_to_file:
@@ -92,7 +95,7 @@ def setup_logging(log_cfg: dict):
         log_file = _unique_log_file(log_path)
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(log_level)
-        file_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+        file_handler.setFormatter(ConfigNameFormatter(LOG_FORMAT, LOG_DATE_FORMAT))
         root.addHandler(file_handler)
         logger.info(f"日志输出到文件: {log_file} (level={logging.getLevelName(log_level)})")
 

@@ -16,6 +16,7 @@ import time
 from typing import TYPE_CHECKING, Any, Optional
 
 from core.archive_names import ui_key_from_file_name
+from core.log_context import config_log_context
 from core.models import ConfigState, LogFileItem
 from features.maa.analyzer import MaaAnalyzer
 from features.maa.archive_profile import parse_archive_part
@@ -168,7 +169,16 @@ class LogWatcher:
         if cfg is None:
             # 群未被监听，或同时属于多个配置（无法确定使用哪套设置）
             return
+        # 整段处理（下载 / 分析 / 发送）的日志都标注配置名
+        with config_log_context(cfg.name):
+            await self._handle_for_config(
+                cfg, group_id=group_id, file_name=file_name,
+                file_info=file_info, uploader=uploader, source=source,
+            )
 
+    async def _handle_for_config(self, cfg: ConfigState, *, group_id: str,
+                                 file_name: str, file_info: dict,
+                                 uploader: str, source: str = "") -> None:
         settings = cfg.settings
         if not settings.enabled:
             return

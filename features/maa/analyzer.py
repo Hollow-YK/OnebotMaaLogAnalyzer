@@ -27,6 +27,7 @@ from core.models import (
 )
 from core.ai_usage import format_tokens
 from core.llm_pool import current_session_id, new_session_id, session_context
+from core.log_context import config_log_context
 from core.tokens import (
     estimate_messages_tokens,
     estimate_tokens,
@@ -438,10 +439,16 @@ class MaaAnalyzer:
                 "attempt": 0,
                 "detail": "",
             }
-            task = asyncio.create_task(self._preload_repo(name, state.project))
+            task = asyncio.create_task(self._preload_repo_task(name, state.project))
             self._repo_preload_tasks[name] = task
             tasks.append(task)
         return tasks
+
+    async def _preload_repo_task(self, config_name: str,
+                                 project: ProjectConfig) -> None:
+        """预下载任务入口：先绑定配置名，让其日志可区分配置。"""
+        with config_log_context(config_name):
+            await self._preload_repo(config_name, project)
 
     def repo_preload_status(self, config_name: str) -> str:
         status = self._repo_preload_status.get(config_name)
@@ -536,7 +543,9 @@ class MaaAnalyzer:
         # 一次分析 + 其后续追问共用一个会话 ID，用量与报告页脚统计都按它聚合
         session_id = new_session_id(config_name)
         try:
-            with session_context(session_id, config_name, file_name):
+            with config_log_context(config_name), session_context(
+                session_id, config_name, file_name
+            ):
                 if needs_repo_lock:
                     async with lock:
                         outcome = await self._analyze_serialized(
@@ -1683,7 +1692,9 @@ class MaaAnalyzer:
         同一次分析及其后续追问共用一个 `session_id`，用量因此可以按会话聚合。
         """
         sid = session_id or new_session_id(config_name)
-        with session_context(sid, config_name, file_name):
+        with config_log_context(config_name), session_context(
+            sid, config_name, file_name
+        ):
             return await self._answer_followup_inner(
                 settings=settings,
                 messages=messages,
