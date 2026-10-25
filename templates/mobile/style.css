@@ -1,0 +1,292 @@
+/* 移动端友好报告模板：基于 default，放大字号、行距与间距，减少窄屏溢出 */
+
+.page {
+  padding: 32px 34px 26px;
+  background: #ffffff;
+  color: #22262b;
+  font-size: 18px;
+  line-height: 1.8;
+}
+
+.page-header {
+  border-bottom: 2px solid #2f6fde;
+  padding-bottom: 12px;
+  margin-bottom: 22px;
+}
+
+.report-title {
+  margin: 0 0 8px;
+  font-size: 27px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: #1f2a37;
+  word-break: break-word;
+}
+
+.report-meta {
+  font-size: 14px;
+  line-height: 1.6;
+  color: #6b7785;
+  word-break: break-all;
+}
+
+.content {
+  padding: 0;
+  margin: 0;
+}
+
+.block {
+  margin: 0 0 26px;
+  break-inside: avoid;
+}
+
+.block .block-title {
+  margin: 0 0 12px;
+  padding-left: 12px;
+  border-left: 5px solid #2f6fde;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #23303d;
+}
+
+.block.block-lead .block-title {
+  border-left-color: #e08a1e;
+}
+
+.block p {
+  margin: 0 0 12px;
+}
+
+/* 附件指令前后会留下空段落，移动端不保留这些空隙 */
+.block p:empty {
+  display: none;
+}
+
+.block p,
+.block li,
+.block td,
+.block th {
+  overflow-wrap: anywhere;
+}
+
+.block h1,
+.block h2,
+.block h3 {
+  margin: 18px 0 10px;
+  font-size: 19px;
+  line-height: 1.5;
+  color: #2b3a4a;
+}
+
+.block ul,
+.block ol {
+  margin: 0 0 12px;
+  padding-left: 26px;
+}
+
+.block li {
+  margin: 4px 0;
+}
+
+.block li:last-child {
+  margin-bottom: 0;
+}
+
+.block code {
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 15px;
+  background: #f2f4f7;
+  border: 1px solid #e3e7ed;
+  border-radius: 5px;
+  padding: 1px 6px;
+  word-break: break-all;
+}
+
+.block pre {
+  margin: 0 0 14px;
+  padding: 14px 16px;
+  background: #f7f8fa;
+  border: 1px solid #e3e7ed;
+  border-radius: 8px;
+  font-size: 15px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.block pre code {
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  font-size: 15px;
+}
+
+.block blockquote {
+  margin: 0 0 14px;
+  padding: 10px 16px;
+  border-left: 4px solid #c5ced9;
+  background: #fafbfc;
+  color: #4a5663;
+}
+
+.block blockquote > *:last-child {
+  margin-bottom: 0;
+}
+
+.block hr {
+  border: none;
+  border-top: 1px solid #e3e7ed;
+  margin: 18px 0;
+}
+
+.block table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 14px;
+  table-layout: auto;
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+.block th,
+.block td {
+  border: 1px solid #dfe4ea;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.block th {
+  background: #f2f5f9;
+  font-weight: 600;
+}
+
+.block a {
+  color: #2f6fde;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-all;
+}
+
+.attach-image {
+  margin: 0 0 16px;
+  padding: 10px;
+  border: 1px solid #e3e7ed;
+  border-radius: 8px;
+  background: #fafbfc;
+  break-inside: avoid;
+}
+
+.attach-image img {
+  display: block;
+  /* 等比缩放到正文宽度（左右两端对齐），不裁切 */
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  max-height: var(--maa-content-max-height, 3200px);
+  object-fit: contain;
+  margin: 0 auto;
+  border-radius: 6px;
+}
+
+.attach-image figcaption {
+  margin-top: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #6b7785;
+  text-align: center;
+  word-break: break-all;
+}
+
+.attach-file {
+  display: block;
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border: 1px dashed #c5ced9;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+
+.attach-name {
+  display: block;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: #2b3a4a;
+  word-break: break-all;
+}
+
+.attach-meta {
+  display: block;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #6b7785;
+  word-break: break-all;
+}
+
+.attach-missing .attach-name,
+.attach-image-skipped .attach-name {
+  color: #b24a3a;
+  font-weight: 500;
+}
+
+/* 块级流式布局：不依赖 flex / grid，保持测量结果稳定 */
+.page-footer {
+  margin-top: 22px;
+  padding-top: 12px;
+  border-top: 1px solid #e3e7ed;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #6b7785;
+  overflow: hidden;
+}
+
+/* 左侧署名 + 右侧页码 */
+.footer-line {
+  display: flow-root;
+}
+
+.footer-note {
+  float: left;
+  max-width: 68%;
+  font-size: 14px;
+  color: #6b7785;
+}
+
+.pager {
+  float: right;
+  font-size: 14px;
+  color: #6b7785;
+}
+
+/* 本次会话的 token 与模型用量 */
+.footer-usage {
+  display: flow-root;
+  margin: 4px 0 6px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #6b7785;
+  word-break: break-all;
+}
+
+.footer-usage:empty {
+  display: none;
+}
+
+.footer-usage-left {
+  float: left;
+  max-width: 62%;
+  font-size: 14px;
+  color: #6b7785;
+}
+
+.footer-usage-right {
+  float: right;
+  max-width: 36%;
+  font-size: 14px;
+  color: #6b7785;
+  text-align: right;
+}
