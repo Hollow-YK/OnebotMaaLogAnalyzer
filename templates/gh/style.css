@@ -1,0 +1,427 @@
+/* GitHub 风格报告模板：白底、灰度层次、蓝色链接、GitHub Markdown 排版 */
+
+.page {
+  --gh-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+    "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  --gh-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  padding: 24px 28px 20px;
+  background: #ffffff;
+  color: #1f2328;
+  font-family: var(--gh-font);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ── 页眉：仓库式面包屑 + 标题 ── */
+
+.page-header {
+  margin: -24px -28px 20px;
+  background: #ffffff;
+  border-bottom: 1px solid #d0d7de;
+}
+
+.gh-breadcrumb {
+  padding: 7px 20px;
+  background: #f6f8fa;
+  border-bottom: 1px solid #d0d7de;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #656d76;
+  display: flow-root;
+}
+
+.gh-brand,
+.gh-project {
+  color: #0969da;
+  font-weight: 500;
+}
+
+.gh-sep {
+  margin: 0 6px;
+  color: #8b949e;
+}
+
+.gh-time {
+  float: right;
+  font-family: var(--gh-mono);
+  color: #656d76;
+}
+
+.gh-head {
+  padding: 14px 20px 12px;
+}
+
+.report-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #0969da;
+  word-break: break-word;
+}
+
+/* GitHub 状态标签：填充绿底，只用于「已生成」这一个语义标签 */
+.gh-state {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 8px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: #ffffff;
+  background: #1f883d;
+  border: 1px solid #1b7f37;
+  border-radius: 2em;
+  vertical-align: middle;
+  position: relative;
+  top: -2px;
+  white-space: nowrap;
+}
+
+.gh-link {
+  color: #0969da;
+}
+
+.report-meta {
+  margin-top: 4px;
+  font-family: var(--gh-mono);
+  font-size: 12px;
+  color: #656d76;
+  word-break: break-all;
+}
+
+.content {
+  position: relative;
+  margin: 0;
+  /* 顶部 33px 留给绝对定位的框头，其余为正文内边距 */
+  padding: 49px 20px 20px;
+  background: #ffffff;
+  border-radius: 6px;
+  /* 用 1px ring 代替 border，避免分页测量漏算边框高度 */
+  box-shadow: 0 0 0 1px #d0d7de;
+}
+
+/* GitHub repo 页面式的框头：浅灰底 + 下边框 */
+.gh-box-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+  height: 33px;
+  padding: 0 16px;
+  line-height: 32px;
+  background: #f6f8fa;
+  border-bottom: 1px solid #d0d7de;
+  border-radius: 6px 6px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1f2328;
+}
+
+.content > .block:last-child {
+  margin-bottom: 0;
+}
+
+/* ── 内容块：GitHub Markdown 的扁平排版（不套卡片） ── */
+
+.block {
+  margin: 0 0 22px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  break-inside: avoid;
+}
+
+.block .block-title {
+  margin: 0 0 12px;
+  padding: 0 0 6px;
+  border-bottom: 1px solid #d0d7de;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #1f2328;
+}
+
+/* 概览块只把标题染成链接蓝，避免在正文框里再套一层卡片 */
+.block-lead .block-title {
+  color: #0969da;
+}
+
+.block p {
+  margin: 0 0 10px;
+}
+
+/* Markdown 里附件指令前后会留下空段落，避免多余空隙 */
+.block p:empty {
+  display: none;
+}
+
+.block > *:last-child {
+  margin-bottom: 0;
+}
+
+.block strong {
+  font-weight: 600;
+}
+
+.block h1,
+.block h2,
+.block h3,
+.block h4,
+.block h5,
+.block h6 {
+  margin: 18px 0 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #1f2328;
+}
+
+.block h1 {
+  font-size: 19px;
+}
+
+.block h2 {
+  font-size: 17px;
+}
+
+.block h3 {
+  font-size: 15px;
+}
+
+.block h4,
+.block h5,
+.block h6 {
+  font-size: 14px;
+}
+
+.block ul,
+.block ol {
+  margin: 0 0 10px;
+  padding-left: 22px;
+}
+
+.block li {
+  margin: 2px 0;
+}
+
+.block li:last-child {
+  margin-bottom: 0;
+}
+
+.block li > p {
+  margin: 0;
+}
+
+.block code {
+  padding: 0.2em 0.4em;
+  font-family: var(--gh-mono);
+  font-size: 85%;
+  background: rgba(175, 184, 193, 0.2);
+  border-radius: 6px;
+  color: #1f2328;
+  word-break: break-all;
+}
+
+.block pre {
+  margin: 0 0 12px;
+  padding: 16px;
+  background: #f6f8fa;
+  border-radius: 6px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.block pre code {
+  padding: 0;
+  background: none;
+  border-radius: 0;
+  font-size: 12px;
+}
+
+.block blockquote {
+  margin: 0 0 12px;
+  padding: 0 12px;
+  border-left: 4px solid #d0d7de;
+  color: #656d76;
+}
+
+.block blockquote > *:last-child {
+  margin-bottom: 0;
+}
+
+.block hr {
+  height: 4px;
+  margin: 20px 0;
+  border: 0;
+  background: #d0d7de;
+}
+
+.block table {
+  width: 100%;
+  margin: 0 0 14px;
+  border-collapse: collapse;
+  font-size: 13px;
+  table-layout: auto;
+}
+
+.block th,
+.block td {
+  padding: 6px 13px;
+  border: 1px solid #d0d7de;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.block th {
+  background: #f6f8fa;
+  font-weight: 600;
+  color: #1f2328;
+}
+
+.block tbody tr:nth-child(2n) td {
+  background: #f6f8fa;
+}
+
+.block a {
+  color: #0969da;
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.block a:hover {
+  text-decoration: underline;
+}
+
+.block img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+
+/* ── 附件 ── */
+
+.attach-image {
+  margin: 0 0 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  break-inside: avoid;
+}
+
+.attach-image img {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  max-height: var(--maa-content-max-height, 3200px);
+  object-fit: contain;
+  margin: 0 auto;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.attach-image figcaption {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #656d76;
+  text-align: center;
+  word-break: break-all;
+}
+
+.attach-file {
+  display: block;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: #f6f8fa;
+}
+
+.attach-name {
+  display: block;
+  font-weight: 600;
+  color: #1f2328;
+  word-break: break-all;
+}
+
+.attach-meta {
+  display: block;
+  font-size: 12px;
+  color: #656d76;
+  word-break: break-all;
+}
+
+.attach-file.attach-missing {
+  background: #ffebe9;
+}
+
+.attach-file.attach-image-skipped {
+  background: #fff8c5;
+}
+
+.attach-missing .attach-name {
+  color: #cf222e;
+}
+
+.attach-image-skipped .attach-name {
+  color: #9a6700;
+}
+
+/* ── 页脚：白底 + 顶部细分隔线，左署名 / 右页码 ── */
+
+.page-footer {
+  margin: 20px -28px -20px;
+  padding: 10px 20px;
+  background: #ffffff;
+  border-top: 1px solid #d0d7de;
+  font-size: 11px;
+  line-height: 1.6;
+  color: #656d76;
+  overflow: hidden;
+}
+
+.footer-usage {
+  display: flow-root;
+  margin: 0 0 4px;
+  font-size: 11px;
+  color: #656d76;
+  word-break: break-all;
+}
+
+.footer-usage:empty {
+  display: none;
+}
+
+.footer-usage-left {
+  float: left;
+}
+
+.footer-usage-right {
+  float: right;
+  font-family: var(--gh-mono);
+}
+
+.footer-line {
+  display: flow-root;
+}
+
+.footer-note {
+  float: left;
+}
+
+.pager {
+  float: right;
+  padding: 0 6px;
+  font-family: var(--gh-mono);
+  font-size: 11px;
+  color: #0969da;
+  background: #ffffff;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+}
