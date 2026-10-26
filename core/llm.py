@@ -34,6 +34,16 @@ _CONTEXT_ERROR = re.compile(
     re.IGNORECASE,
 )
 
+# 429 响应里常见的「配额/额度」特征：这类限流按分钟或更长时间恢复，
+# 秒级重试没有意义，应直接冷却端点而不是消耗重试次数。
+_QUOTA_ERROR = re.compile(
+    r"\btpm\b|\btpd\b|\brpm\b|\brpd\b"
+    r"|quota|exhausted|insufficient|balance"
+    r"|per[\s_-]*minute|per[\s_-]*day"
+    r"|token.{0,12}limit",
+    re.IGNORECASE,
+)
+
 # 重试后的退避上限（秒）
 _MAX_BACKOFF = 8.0
 
@@ -54,14 +64,16 @@ class LLMError(RuntimeError):
     LLM 调用错误，保留 HTTP 状态码与错误分类。
 
     kind: auth / rate / context / server / network / empty / other
+    quota: kind=rate 时，是否属于配额耗尽（TPM/RPM/额度）而非瞬时限流
     """
 
     def __init__(self, message: str, status: int = 0, kind: str = "other",
-                 retry_after: float = 0.0):
+                 retry_after: float = 0.0, quota: bool = False):
         super().__init__(message)
         self.status = int(status or 0)
         self.kind = str(kind or "other")
         self.retry_after = max(0.0, float(retry_after or 0.0))
+        self.quota = bool(quota)
 
 
 class ContextOverflowError(LLMError):
@@ -281,7 +293,9 @@ class LLMClient:
                 retry_after = float(headers.get("Retry-After", 0) or 0)
             except (TypeError, ValueError, AttributeError):
                 retry_after = 0.0
-            return LLMError(f"HTTP 429: {snippet}", status, "rate", retry_after)
+            quota = bool(_QUOTA_ERROR.search(body or ""))
+            return LLMError(f"HTTP 429: {snippet}", status, "rate",
+                            retry_after, quota=quota)
         if status == 400 and _CONTEXT_ERROR.search(body or ""):
             return ContextOverflowError(f"HTTP 400（上下文超限）: {snippet}", status)
         if status >= 500:

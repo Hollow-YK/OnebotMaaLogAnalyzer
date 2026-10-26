@@ -266,6 +266,8 @@ def default_config() -> dict:
             "circuit_breaker": {
                 "failure_threshold": 3,
                 "cooldown_seconds": 300,
+                "rate_cooldown_seconds": 60,
+                "auth_cooldown_seconds": 1800,
             },
         },
         "debug": {

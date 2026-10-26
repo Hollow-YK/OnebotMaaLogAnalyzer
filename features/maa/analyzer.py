@@ -398,6 +398,21 @@ class MaaAnalyzer:
         state = self._state(config_name)
         return state.vision if state is not None else VisionConfig()
 
+    def llm_unavailable_summary(self, config_name: str = "") -> str:
+        """
+        该配置候选端点全部不可用时的失败原因（供降级报告与追问提示展示）。
+
+        仍可用时返回空串；调试模式的模拟客户端没有这个方法，也按空串处理。
+        """
+        summarize = getattr(self.llm, "unavailable_summary", None)
+        if not callable(summarize):
+            return ""
+        try:
+            return str(summarize(self._llm_cfg(config_name)) or "")
+        except Exception as exc:  # 摘要失败不能影响主流程
+            logger.debug(f"[分析] 读取端点失败原因失败：{exc}")
+            return ""
+
     def _report_cfg(self, config_name: str) -> ReportConfig:
         state = self._state(config_name)
         return state.report if state is not None else ReportConfig()
@@ -780,7 +795,9 @@ class MaaAnalyzer:
             ai_fallback = False
             if not response_text:
                 # 全部候选失败 / 熔断：降级为模板报告，而不是只回一句错误
-                response_text = self._fallback_report(digest, project)
+                response_text = self._fallback_report(
+                    digest, project, self.llm_unavailable_summary(config_name)
+                )
                 ai_fallback = True
                 logger.warning("[分析] AI 无有效输出，已降级为基础摘要报告")
             elif not self._looks_formatted(response_text):
@@ -1405,7 +1422,8 @@ class MaaAnalyzer:
 
     @staticmethod
     def _fallback_report(digest: Optional[DigestResult],
-                         project: Optional[ProjectConfig]) -> str:
+                         project: Optional[ProjectConfig],
+                         failure: str = "") -> str:
         """模型全部失败（含熔断）时的兜底报告：只陈述已知事实。"""
         project_name = (
             (digest.project_name if digest is not None else "")
@@ -1417,21 +1435,26 @@ class MaaAnalyzer:
         notes = getattr(digest, "notes", []) if digest is not None else []
         lines = [
             "<!-- section: 结论 -->",
-            f"{project_name} 的 AI 分析暂时不可用（端点无响应或已熔断），"
+            f"{project_name} 的 AI 分析暂时不可用（端点无响应、鉴权失败或配额耗尽），"
             "以下为日志包的基础信息，请稍后重试。",
+        ]
+        if failure:
+            lines.extend(["", f"失败原因：{failure}"])
+        lines.extend([
             "",
             "<!-- section: 关键证据 -->",
             f"- 日志文件：{len(log_files)} 个"
             + (f"（{'、'.join(str(n) for n in log_files[:4])}）" if log_files else ""),
             f"- 错误截图：{len(error_images)} 张",
-        ]
+        ])
         if notes:
             lines.extend(f"- {note}" for note in notes[:6])
         lines.extend([
             "",
             "<!-- section: 处理建议 -->",
             "1. 稍后重新上传日志包再试一次。",
-            "2. 检查 `llm.providers[]` 的地址与密钥，或发送 `/maa ai` 查看失败原因。",
+            "2. 鉴权失败请在 `llm.providers[].api_key` 填面板「设置」页里的密钥；"
+            "配额耗尽（429）请等待配额窗口恢复、降低并发或补充其他端点。",
         ])
         return "\n".join(lines)
 

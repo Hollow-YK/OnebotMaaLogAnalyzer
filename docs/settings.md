@@ -189,7 +189,7 @@ MaaFramework 的日志按大小轮转：写满当前 `maafw.log` 后把它改名
 | `max_context_tokens` | `0` | 上下文 token 预算；`0` = 用 `llm.defaults.max_context_tokens` |
 | `digest_timeout_seconds` | `0` | 摘要提取超时，`0` = 不限制 |
 | `analysis_cache_hours` | `0` | 分析结果缓存小时数（进程内，按 file_id 命中，重载即清空）；`0` = 关闭 |
-| `circuit_breaker_enabled` | `true` | 连续失败时熔断端点并降级为模板报告 |
+| `circuit_breaker_enabled` | `true` | 连续失败时熔断端点并降级为模板报告（冷却时长见 `llm.circuit_breaker`） |
 
 > 模型选择与温度已下移到 `bot.configs.<名称>.llm`，见
 > [配置 · LLM](configuration.md#llm端点与候选模型)。

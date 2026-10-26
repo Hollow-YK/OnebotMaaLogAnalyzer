@@ -146,6 +146,12 @@ class CircuitBreakerConfig(BaseModel):
 
     failure_threshold: int = 3
     cooldown_seconds: int = 300
+    # 配额/限流（429）单独冷却：TPM / RPM 通常按分钟恢复，
+    # 用通用冷却会把端点在配额恢复后仍锁住。
+    rate_cooldown_seconds: int = 60
+    # 鉴权失败（401/403）冷却更长，但冷却后允许一次半开试探，
+    # 这样在面板上改好 key 后无需重启即可自动恢复。
+    auth_cooldown_seconds: int = 1800
 
     model_config = {"populate_by_name": True, "alias_generator": _to_camel}
 

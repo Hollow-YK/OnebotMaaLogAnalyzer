@@ -87,7 +87,12 @@
       "max_tokens": 8192,
       "max_context_tokens": 48000
     },
-    "circuit_breaker": { "failure_threshold": 3, "cooldown_seconds": 300 }
+    "circuit_breaker": {
+      "failure_threshold": 3,
+      "cooldown_seconds": 300,
+      "rate_cooldown_seconds": 60,
+      "auth_cooldown_seconds": 1800
+    }
   },
   "debug": { "enabled": false, "http_port": 8765, "data_dir": "data/test" },
   "log": { "log_to_file": true, "log_level": "INFO", "log_dir": "logs" }
@@ -108,7 +113,7 @@
 | `bot.configs` | **多群配置**：配置名 → 监听群 / 通知群 / 设置覆盖 / 指令设置 |
 | `llm.providers[]` | **端点与密钥**（OpenAI 兼容），每个端点声明自己的 `models[]` 与能力 |
 | `llm.defaults` | 全局参数兜底：`temperature` / `top_p` / `max_tokens` / `max_context_tokens` |
-| `llm.circuit_breaker` | 端点级熔断：`failure_threshold` / `cooldown_seconds` |
+| `llm.circuit_breaker` | 端点级熔断：`failure_threshold` / `cooldown_seconds` / `rate_cooldown_seconds` / `auth_cooldown_seconds` |
 | `bot.configs.<名称>.llm.models[]` | 该配置按优先级尝试的候选 `{name, model}` 列表 |
 | `bot.configs.<名称>.vision` | 多模态（看图）设置 |
 | `bot.configs.<名称>.report` | 图片化报告设置 |
@@ -154,6 +159,17 @@
   启动会打印迁移提示；`python main.py --print-config-template` 可输出新模板
 - 每个端点一把并发信号量（`max_concurrency`），跨配置共享；`settings.analysis_concurrency`
   控制任务级并发，两者互不替代
+- 失败转移：401/403（鉴权）、429（限流/配额）、5xx、网络错误、空响应都会**立即换下一个候选**，
+  不会把整次分析卡在当前端点
+- 熔断冷却按失败类型区分：`cooldown_seconds`（通用，默认 300s）、
+  `rate_cooldown_seconds`（限流/配额，默认 60s，对齐 TPM/RPM 分钟窗口）、
+  `auth_cooldown_seconds`（鉴权失败，默认 1800s）
+- 配额类 429（`tpm exhausted` / `quota exceeded` / `insufficient quota` 等）**不做秒级重试**，
+  直接进入冷却并换候选；服务端给了 `Retry-After` 时以它为准（取更大值）
+- 冷却结束是**半开**：放行一次试探，成功即恢复。鉴权失败同理——
+  在面板改好 key 后不必重启，等冷却结束就会自动重新启用该端点
+- 全部候选都不可用时降级为模板报告，并在报告里写明失败原因
+  （如 `main/x：鉴权失败（HTTP 401 …）；backup/y：配额耗尽（HTTP 429 …）`）
 
 ## vision：多模态
 

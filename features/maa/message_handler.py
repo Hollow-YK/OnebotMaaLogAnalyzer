@@ -158,15 +158,25 @@ class MessageHandler:
         if answer is None or not answer.text:
             # 模型没给出任何可用内容（如全程只调工具、收敛也失败）。
             # 给一句可操作、可区分原因的提示，而不是笼统的「无效回复」。
+            reason = self.analyzer.llm_unavailable_summary(config_name)
             logger.warning(
                 f"[追问] 群 {group_id} 未获得有效回答"
-                f"（工具可用={provider is not None or getattr(session, 'digest', None) is not None}）"
+                f"（工具可用={provider is not None or getattr(session, 'digest', None) is not None}"
+                f"，端点异常={reason or '无'}）"
             )
-            await self.s.send_text(
-                int(group_id),
-                "这次追问没能整理出结论（可能是问题范围太大或检索未命中）。\n"
-                "可以试着把问题说得更具体，或换一种问法再引用一次。",
-            )
+            if reason:
+                text = (
+                    f"这次追问没能整理出结论：模型端点不可用。\n"
+                    f"原因：{reason}\n"
+                    "稍后重试即可；鉴权失败需更正 `llm.providers[].api_key`，"
+                    "配额耗尽需等待恢复或补充其他端点。"
+                )
+            else:
+                text = (
+                    "这次追问没能整理出结论（可能是问题范围太大或检索未命中）。\n"
+                    "可以试着把问题说得更具体，或换一种问法再引用一次。"
+                )
+            await self.s.send_text(int(group_id), text)
             return
 
         self.followup.append(group_id, question, answer.text)

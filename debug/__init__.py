@@ -313,6 +313,12 @@ class DebugLLMClient:
     def context_budget(self, config_llm=None, override: int = 0) -> int:
         return int(override or 48000)
 
+    def failure_summary(self, config_llm=None, need=()) -> str:
+        return ""
+
+    def unavailable_summary(self, config_llm=None, need=()) -> str:
+        return ""
+
     def session_summary(self, session_id: str = "") -> dict:
         """调试模式不产生真实用量，返回全 0 的安全摘要。"""
         return {

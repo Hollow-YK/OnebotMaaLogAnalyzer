@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -201,8 +202,54 @@ class Candidate:
 class _BreakerState:
     failures: int = 0
     opened_at: float = 0.0
-    auth_failed: bool = False
+    # 本次熔断的触发类型：auth / rate / server / network / empty / other
+    open_kind: str = ""
+    # 服务端给出的 Retry-After（秒），用于放宽冷却时间
+    cooldown_override: float = 0.0
+    last_kind: str = ""
     last_error: str = ""
+    last_quota: bool = False
+
+
+# 失败类型 → 面向用户/日志的简述
+_KIND_LABELS = {
+    "auth": "鉴权失败",
+    "rate": "限流",
+    "context": "上下文超限",
+    "server": "服务端错误",
+    "network": "网络错误",
+    "empty": "返回内容为空",
+    "circuit": "熔断中",
+    "other": "调用失败",
+}
+
+
+def _shorten(text: str, limit: int = 120) -> str:
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+# 失败原因会写进报告并发到群里，顺手抹掉可能回显的凭据
+_SECRET_PATTERNS = (
+    (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{4,}"), r"\1 ******"),
+    (re.compile(r"(?i)\bsk-[A-Za-z0-9._\-]{4,}"), "sk-******"),
+    (re.compile(r"(?i)([?&]key=)[^&\s\"'，；]+"), r"\1******"),
+)
+
+
+def _sanitize(text: str) -> str:
+    for pattern, repl in _SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def describe_failure(kind: str, error: str, quota: bool = False) -> str:
+    """把 `kind + 原始错误` 压成一句可读原因。"""
+    label = _KIND_LABELS.get(kind, kind or "调用失败")
+    if kind == "rate" and quota:
+        label = "配额耗尽"
+    detail = _shorten(_sanitize(str(error or "")))
+    return f"{label}（{detail}）" if detail else label
 
 
 class CircuitOpenError(LLMError):
@@ -304,45 +351,89 @@ class LLMPool:
     def _breaker(self, provider: str) -> _BreakerState:
         return self._breakers.setdefault(provider, _BreakerState())
 
-    def _available(self, provider: str) -> bool:
+    def _cooldown_for(self, kind: str, override: float = 0.0) -> float:
+        """按失败类型取冷却时长；服务端 Retry-After 更长时以它为准。"""
+        if kind == "auth":
+            base = self.breaker_cfg.auth_cooldown_seconds
+        elif kind == "rate":
+            base = self.breaker_cfg.rate_cooldown_seconds
+        else:
+            base = self.breaker_cfg.cooldown_seconds
+        return max(1.0, float(base or 0), float(override or 0.0))
+
+    def _open_reason(self, provider: str) -> str:
+        """
+        端点仍在熔断时返回触发类型，否则返回空串。
+
+        只读，不改变状态——半开的那次试探由 `_available()` 触发。
+        """
         state = self._breaker(provider)
-        if state.auth_failed:
-            return False
         threshold = max(1, int(self.breaker_cfg.failure_threshold or 3))
         if state.failures < threshold:
-            return True
-        cooldown = max(1, int(self.breaker_cfg.cooldown_seconds or 300))
+            return ""
+        cooldown = self._cooldown_for(state.open_kind, state.cooldown_override)
         if time.monotonic() - state.opened_at >= cooldown:
+            return ""
+        return state.open_kind or "other"
+
+    def _available(self, provider: str) -> bool:
+        if self._open_reason(provider):
+            return False
+        state = self._breaker(provider)
+        threshold = max(1, int(self.breaker_cfg.failure_threshold or 3))
+        if state.failures >= threshold:
             # 冷却结束，半开：允许一次尝试
             state.failures = threshold - 1
-            return True
-        return False
+        return True
 
     def _report_success(self, provider: str) -> None:
         state = self._breaker(provider)
         state.failures = 0
         state.opened_at = 0.0
+        state.open_kind = ""
+        state.cooldown_override = 0.0
+        state.last_kind = ""
         state.last_error = ""
+        state.last_quota = False
 
-    def _report_failure(self, provider: str, kind: str, error: str) -> None:
+    def _report_failure(self, provider: str, kind: str, error: str,
+                        *, retry_after: float = 0.0,
+                        quota: bool = False) -> None:
         state = self._breaker(provider)
+        state.last_kind = kind
         state.last_error = error
+        state.last_quota = bool(quota)
+        threshold = max(1, int(self.breaker_cfg.failure_threshold or 3))
+
         if kind == "auth":
-            state.auth_failed = True
+            # 鉴权失败重试没有意义，直接冷却；冷却后仍给一次半开试探，
+            # 这样在面板上改好 key 也不必重启进程。
+            state.failures = threshold
+            state.open_kind = "auth"
+            state.opened_at = time.monotonic()
+            state.cooldown_override = 0.0
+            cooldown = self._cooldown_for("auth")
             logger.error(
-                f"[LLM] 端点 {provider} 鉴权失败，本次运行不再使用该端点。"
-                "请核对 llm.providers[].api_key。"
+                f"[LLM] 端点 {provider} 鉴权失败（{_shorten(_sanitize(error))}），"
+                f"暂停使用 {int(cooldown)}s 后自动重试。请核对 llm.providers[].api_key。"
             )
             return
+
         if kind in ("rate", "server", "network", "empty", "other"):
             state.failures += 1
-            threshold = max(1, int(self.breaker_cfg.failure_threshold or 3))
+            if quota and state.failures < threshold:
+                # 配额类 429 一次就足以说明端点当前不可用，
+                # 不必等连续 N 次，也不该把重试预算浪费在秒级重试上。
+                state.failures = threshold
             if state.failures >= threshold:
+                state.open_kind = kind
                 state.opened_at = time.monotonic()
-                cooldown = max(1, int(self.breaker_cfg.cooldown_seconds or 300))
+                state.cooldown_override = max(0.0, float(retry_after or 0.0))
+                cooldown = self._cooldown_for(kind, state.cooldown_override)
+                reason = describe_failure(kind, error, quota)
                 logger.warning(
-                    f"[LLM] 端点 {provider} 连续失败 {state.failures} 次，"
-                    f"熔断 {cooldown}s"
+                    f"[LLM] 端点 {provider} 失败 {state.failures} 次"
+                    f"（{reason}），熔断 {int(cooldown)}s"
                 )
 
     # ── 参数合并 ──
@@ -510,9 +601,15 @@ class LLMPool:
                     )
                     if use_breaker:
                         self._report_failure(
-                            candidate.provider.name, exc.kind, str(exc)
+                            candidate.provider.name, exc.kind, str(exc),
+                            retry_after=exc.retry_after, quota=exc.quota,
                         )
-                    if exc.kind in ("server", "network", "rate") and attempt < attempts:
+                    # 配额/额度类 429 按分钟恢复，秒级重试只会白烧预算：
+                    # 不重试，直接换下一个候选。
+                    if exc.kind == "rate" and exc.quota:
+                        break
+                    if (exc.kind in ("server", "network", "rate")
+                            and attempt < attempts):
                         await asyncio.sleep(backoff_seconds(attempt, exc.retry_after))
                         continue
                     break
@@ -523,10 +620,55 @@ class LLMPool:
                     self._report_failure(candidate.provider.name, "other", str(exc))
                     break
 
+        summary = self.failure_summary(config_llm, need)
         logger.error(
             f"[LLM] 配置「{config_name or '未知'}」的全部候选均失败"
+            + (f"：{summary}" if summary else "")
         )
         return None
+
+    def failure_summary(self, config_llm: Optional[ConfigLLM] = None,
+                        need: Iterable[str] = ()) -> str:
+        """
+        本次候选列表的失败原因摘要，供报告/追问提示直接展示。
+
+        形如 `main/x：鉴权失败（HTTP 401 …）；backup/y：配额耗尽（HTTP 429 …）`。
+        没有失败记录时返回空串。
+        """
+        parts: list[str] = []
+        for candidate in self.resolve(config_llm, need):
+            name = candidate.provider.name
+            state = self._breaker(name)
+            open_kind = self._open_reason(name)
+            if state.last_kind:
+                detail = describe_failure(
+                    state.last_kind, state.last_error, state.last_quota
+                )
+            elif open_kind:
+                detail = describe_failure(open_kind, state.last_error)
+            else:
+                continue
+            if open_kind:
+                cooldown = self._cooldown_for(open_kind, state.cooldown_override)
+                remain = int(max(0.0, cooldown - (time.monotonic() - state.opened_at)))
+                detail += f"，冷却中（剩余 {remain}s）"
+            parts.append(f"{candidate.label()}：{detail}")
+        return "；".join(parts)
+
+    def unavailable_summary(self, config_llm: Optional[ConfigLLM] = None,
+                            need: Iterable[str] = ()) -> str:
+        """
+        仅当候选端点全都在冷却时才返回失败原因摘要。
+
+        只要还有一个端点是可用的，就返回空串——此时“没输出”是模型自己的
+        问题（例如只调工具、返回空正文），不该误报成端点故障。
+        """
+        candidates = self.resolve(config_llm, need)
+        if not candidates:
+            return ""
+        if any(not self._open_reason(item.provider.name) for item in candidates):
+            return ""
+        return self.failure_summary(config_llm, need)
 
     async def chat_text(
         self,

@@ -1040,6 +1040,8 @@ const LABELS = {
   'defaults.max_context_tokens': '默认上下文 token',
   'circuit_breaker.failure_threshold': '失败阈值',
   'circuit_breaker.cooldown_seconds': '冷却时间（秒）',
+  'circuit_breaker.rate_cooldown_seconds': '限流/配额冷却（秒）',
+  'circuit_breaker.auth_cooldown_seconds': '鉴权失败冷却（秒）',
   'provider.name': '端点名称',
   'provider.kind': '协议类型',
   'provider.base_url': 'Base URL',
