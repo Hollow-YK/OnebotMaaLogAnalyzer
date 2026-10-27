@@ -314,15 +314,16 @@ def build_report_segments(
     digest: Optional[DigestResult],
     *,
     repo_files: Optional[dict[str, bytes]] = None,
-    max_attachments: int = 4,
+    max_images: int = 4,
+    max_files: int = 4,
     max_image_bytes: int = 0,
     max_file_bytes: int = DEFAULT_MAX_FILE_MB * 1024 * 1024,
-    allow_files: bool = True,
 ) -> tuple[list[OutSegment], list[str]]:
     """
     把报告切成片段，并为每个附件取出字节。
 
     repo_files: {仓库相对路径: 字节}，由调用方预先收集（支持任意扩展名）。
+    max_images / max_files: 图片与文件**分别计数**的上限，`0` = 不发送该类。
     max_image_bytes: `0` = 不限制（图片在渲染时按内容宽度等比缩放）。
     返回 (片段列表, 备注列表)。未声明附件时只返回文本片段。
     """
@@ -344,7 +345,9 @@ def build_report_segments(
         repo_full.setdefault(rel.replace("\\", "/").lower(), (rel, data))
 
     used: set[str] = set()
-    sent = 0
+    sent_images = 0
+    sent_files = 0
+    noted_cap: set[str] = set()
     out: list[OutSegment] = []
 
     for seg in segments:
@@ -352,13 +355,28 @@ def build_report_segments(
             out.append(seg)
             continue
 
-        if seg.kind == "file" and not allow_files:
-            notes.append(f"{seg.label} 是文件附件，当前已关闭文件发送")
-            continue
-
-        if max_attachments > 0 and sent >= max_attachments:
-            notes.append(f"已达附件数上限 {max_attachments}，其余未发送")
-            continue
+        if seg.kind == "image":
+            if max_images <= 0:
+                if "image" not in noted_cap:
+                    noted_cap.add("image")
+                    notes.append("图片附件已关闭（send_images 或 max_report_images）")
+                continue
+            if sent_images >= max_images:
+                if "image" not in noted_cap:
+                    noted_cap.add("image")
+                    notes.append(f"已达图片数上限 {max_images}，其余未发送")
+                continue
+        else:
+            if max_files <= 0:
+                if "file" not in noted_cap:
+                    noted_cap.add("file")
+                    notes.append("文件附件已关闭（send_files 或 max_report_files）")
+                continue
+            if sent_files >= max_files:
+                if "file" not in noted_cap:
+                    noted_cap.add("file")
+                    notes.append(f"已达文件数上限 {max_files}，其余未发送")
+                continue
 
         wanted = seg.label.replace("\\", "/").lower()
         limit = max_image_bytes if seg.kind == "image" else max_file_bytes
@@ -387,11 +405,18 @@ def build_report_segments(
             missing.append(f"{seg.label}（{where}）")
             logger.info(f"[附件] 未在{where}中找到：{seg.label}")
             continue
+        if not data:
+            # 空内容不能进片段：发送层会变成 base64:// 空图片 / 0 字节文件
+            logger.info(f"[附件] {seg.label} 内容为空，已跳过")
+            continue
 
         if source.lower() in used:
             continue
         used.add(source.lower())
-        sent += 1
+        if seg.kind == "image":
+            sent_images += 1
+        else:
+            sent_files += 1
 
         path = seg.label.replace("\\", "/")
         if seg.kind == "image":
@@ -411,9 +436,16 @@ def build_report_segments(
 
     logger.info(
         f"[附件] 解析 {len(segments)} 段，发送 "
-        f"{sum(1 for s in out if s.kind != 'text')} 个附件，缺失 {len(missing)} 个"
+        f"{sum(1 for s in out if s.kind != 'text')} 个附件"
+        f"（图片 {sent_images}/{max_images}，文件 {sent_files}/{max_files}），"
+        f"缺失 {len(missing)} 个"
     )
     return out, notes
+
+
+def text_segments(report: str) -> list[OutSegment]:
+    """只要文本片段（附件全部关闭时使用，避免留下空数据的附件段）。"""
+    return [seg for seg in split_report(report) if seg.kind == "text"]
 
 
 def find_repo_attachment_names(report: str) -> list[str]:

@@ -371,7 +371,7 @@ data/
 | `max_tool_rounds` | `int` / `8` | **agent** 工具调用最大轮次 | `"max_tool_rounds": 6` |
 | `max_tool_calls_per_round` | `int` / `6` | **agent** 单轮最多执行的工具数 | `"max_tool_calls_per_round": 4` |
 | `max_tool_result_chars` | `int` / `30000` | **agent** 单次工具结果字符上限 | `"max_tool_result_chars": 12000` |
-| `max_tool_result_tokens` | `int` / `0` | **agent** 单次工具结果 token 上限；`0` = 由 `max_tool_result_chars` 估算 | `"max_tool_result_tokens": 4000` |
+| `max_tool_result_tokens` | `int` / `0` | **agent** 单次工具结果 token 上限；`0` = 由 `max_tool_result_chars` 估算，非 0 时最小 64 | `"max_tool_result_tokens": 4000` |
 | `max_tool_context_tokens` | `int` / `0` | 工具结果累计 token 预算；`0` = 不超过本次上下文预算的 50% | `"max_tool_context_tokens": 16000` |
 | `agent_deadline_seconds` | `int` / `600` | **agent** 循环总时长上限 | `"agent_deadline_seconds": 900` |
 | `extensions` | `string[]` / `json/jsonc/yaml/yml/toml/md/txt` | 参与扫描的文件扩展名 | `"extensions": [".json", ".yaml"]` |
@@ -572,11 +572,11 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `send_summary` | `bool` / `true` | 是否发送分析结果 | `"send_summary": true` |
 | `reply_chunk_chars` | `int` / `3500` | 回复分段字符数（最小 1000） | `"reply_chunk_chars": 2000` |
 | `send_images` | `bool` / `true` | 是否允许模型附图 | `"send_images": false` |
-| `max_report_images` | `int` / `4` | 最多附带图片数 | `"max_report_images": 6` |
+| `max_report_images` | `int` / `4` | 最多附带图片数；`0` = 不发图片（与文件上限分别计数） | `"max_report_images": 6` |
 | `send_repo_images` | `bool` / `true` | 是否允许从仓库取模板图 | `"send_repo_images": false` |
 | `send_files` | `bool` / `true` | 是否允许附带任意文件（如配置、pipeline JSON） | `"send_files": false` |
-| `max_report_files` | `int` / `2` | 最多附带文件数 | `"max_report_files": 4` |
-| `max_file_attachment_mb` | `int` / `20` | 单个非图片附件大小上限 MB | `"max_file_attachment_mb": 50` |
+| `max_report_files` | `int` / `2` | 最多附带文件数；`0` = 不发文件（与图片上限分别计数） | `"max_report_files": 4` |
+| `max_file_attachment_mb` | `int` / `20` | 单个非图片附件大小上限 MB；`0` = 关闭文件附件 | `"max_file_attachment_mb": 50` |
 | `inline_attachments` | `bool` / `true` | 旧配置兼容项：附件位置由渲染流程决定，当前版本不读取该字段 | `"inline_attachments": false` |
 | `followup_enabled` | `bool` / `true` | 是否允许分析后追问答疑 | `"followup_enabled": false` |
 | `followup_window_minutes` | `int` / `0` | 追问会话有效分钟数；`0` = 跟随历史保留期 | `"followup_window_minutes": 120` |

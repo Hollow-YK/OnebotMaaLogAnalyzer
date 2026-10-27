@@ -95,11 +95,11 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `send_images` | `true` | 是否允许模型附图 |
-| `max_report_images` | `4` | 最多附带图片数 |
+| `max_report_images` | `4` | 最多附带图片数（`0` = 不发图片；与文件上限分别计数） |
 | `send_repo_images` | `true` | 是否允许从仓库取模板图 |
 | `send_files` | `true` | 是否允许附带任意文件 |
-| `max_report_files` | `2` | 最多附带文件数 |
-| `max_file_attachment_mb` | `20` | 单个**非图片**附件大小上限 MB |
+| `max_report_files` | `2` | 最多附带文件数（`0` = 不发文件；与图片上限分别计数） |
+| `max_file_attachment_mb` | `20` | 单个**非图片**附件大小上限 MB；`0` = 关闭文件附件 |
 | `inline_attachments` | `true` | 附件是否插在文字中间（旧配置兼容项） |
 
 > 图片没有单张体积上限：渲染时按正文宽度等比缩放。呈现方式（内联 / 单独发送、
@@ -190,7 +190,7 @@ MaaFramework 的日志按大小轮转：写满当前 `maafw.log` 后把它改名
 | `context_compact_enabled` | `true` | 估算输入超过阈值时自动压缩历史；端点返回超限时也会强制压缩并重试 |
 | `context_compact_ratio` | `0.8` | 触发压缩的预算占比（0.5–0.95） |
 | `context_retain_ratio` | `0.25` | 压缩后保留最近对话的 token 占比（0.1–0.5） |
-| `context_prune_tool_result_tokens` | `512` | 压缩时把历史工具结果裁剪到的 token 上限；`0` = 不裁剪 |
+| `context_prune_tool_result_tokens` | `512` | 压缩时把历史工具结果裁剪到的 token 上限；`0` = 不裁剪，非 0 时最小按 64 处理 |
 | `context_summary_tokens` | `1500` | 压缩摘要本身的目标 token 上限 |
 | `digest_timeout_seconds` | `0` | 摘要提取超时，`0` = 不限制 |
 | `analysis_cache_hours` | `0` | 分析结果缓存小时数（进程内，按 file_id 命中，重载即清空）；`0` = 关闭 |

@@ -97,15 +97,19 @@ MFAAvalonia 在 `debug/on_error/`，MaaFwApp 可能没有错误截图。路径�
 
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `send_images` | `true` | 是否允许模型附图（总开关，同时受 `max_report_images` 限制） |
-| `max_report_images` | `4` | 最多附带几张图 |
+| `send_images` | `true` | 是否允许模型附图（总开关；关闭等价 `max_report_images=0`） |
+| `max_report_images` | `4` | 最多附带几张图；`0` = 不发图片 |
 | `send_repo_images` | `true` | 是否允许从项目仓库取图（仅本地仓库可用） |
-| `send_files` | `true` | 是否允许附带任意文件（以群文件上传） |
-| `max_report_files` | `2` | 最多附带几个文件 |
-| `max_file_attachment_mb` | `20` | 单个**非图片**附件大小上限 MB |
+| `send_files` | `true` | 是否允许附带任意文件（以群文件上传；关闭等价 `max_report_files=0`） |
+| `max_report_files` | `2` | 最多附带几个文件；`0` = 不发文件 |
+| `max_file_attachment_mb` | `20` | 单个**非图片**附件大小上限 MB；`0` = 关闭文件附件 |
 | `inline_attachments` | `true` | 旧配置兼容项；图片化报告下由 `report.embed_attachments` 控制 |
 | `report.embed_attachments` | `true` | 图片是否内联进报告图（`false` = 单独发送图片消息） |
 | `report.attach_markdown` | `false` | 是否在图片后额外上传一份 `.md` |
 
+> 图片与文件**分别计数**：`max_report_images=2, max_report_files=1` 表示最多 2 张图
+> 和 1 个文件，二者互不挤占预算。两类上限都为 0 时报告只保留文本片段，
+> 不会留下空数据的附件段（旧版本会发 `base64://` 空图片与 0 字节文件）。
+>
 > 图片**没有单张体积上限**（旧的 `max_image_mb` 已删除）：渲染时按正文宽度等比缩放，
 > 大图不会导致失败或跳过，详见 [图片化报告与模板](render.md)。
