@@ -24,7 +24,7 @@ import zipfile
 from pathlib import PurePosixPath
 from typing import Any, Optional
 
-from core.tokens import trim_to_tokens
+from core.tokens import clamp_tool_result_tokens, trim_to_tokens
 from features.maa.log_digest import IMAGE_SUFFIXES
 from features.maa.safety import (
     describe_rejection,
@@ -62,7 +62,7 @@ class LogArchiveTools:
         self.max_read_bytes = max(64, int(max_file_kb or 512)) * 1024
         self.max_result_chars = max(2000, int(max_result_chars or 30000))
         self.max_search_files = max(50, int(max_search_files or 2000))
-        self.max_result_tokens = max(0, int(max_result_tokens or 0))
+        self.max_result_tokens = clamp_tool_result_tokens(max_result_tokens)
         # 压缩包常被多次工具调用反复读取：进程内缓存句柄与成员索引
         self._archive: Optional[zipfile.ZipFile] = None
         self._member_list: Optional[list[zipfile.ZipInfo]] = None
@@ -129,6 +129,33 @@ class LogArchiveTools:
             return text
         return trim_to_tokens(text, self.max_result_tokens)
 
+    def _read_member_lines(self, archive: zipfile.ZipFile,
+                           info: zipfile.ZipInfo
+                           ) -> tuple[list[str], bool]:
+        """
+        按行读取成员，最多 `max_read_bytes` 字节。
+
+        不走 `ZipFile.read()`：那会把整个成员解压进内存，构造的压缩包
+        （压缩比极高的大日志）可以直接把进程打爆。这里逐行累计字节，
+        超过上限立即停止并标记截断。
+        """
+        limit = int(self.max_read_bytes or 0)
+        lines: list[str] = []
+        used = 0
+        truncated = False
+        try:
+            with archive.open(info) as handle:
+                for raw in handle:
+                    if limit > 0 and used + len(raw) > limit:
+                        truncated = True
+                        break
+                    used += len(raw)
+                    lines.append(raw.decode("utf-8", "ignore").rstrip("\r\n"))
+        except (OSError, RuntimeError, zipfile.BadZipFile, EOFError):
+            # 损坏的成员：返回已读到的部分，让调用方标注不完整
+            return lines, True
+        return lines, truncated
+
     # ════════════════════════════════════════════════════════════
     # 工具实现
     # ════════════════════════════════════════════════════════════
@@ -194,6 +221,7 @@ class LogArchiveTools:
         hits: list[str] = []
         scanned = 0
         truncated = False
+        capped: list[str] = []
         prefix = f"{rel}/" if rel else ""
         for info in self._members(archive):
             name = self._normalize(info.filename)
@@ -208,18 +236,16 @@ class LogArchiveTools:
                 break
 
             scanned += 1
-            try:
-                with archive.open(info) as handle:
-                    for lineno, raw in enumerate(handle, 1):
-                        line = raw.decode("utf-8", "ignore").rstrip("\r\n")
-                        if not regex.search(line):
-                            continue
-                        hits.append(f"{name}:{lineno}: {line.strip()[:300]}")
-                        if len(hits) >= limit:
-                            truncated = True
-                            break
-            except (OSError, RuntimeError, zipfile.BadZipFile):
-                continue
+            lines, file_capped = self._read_member_lines(archive, info)
+            if file_capped:
+                capped.append(name)
+            for lineno, line in enumerate(lines, 1):
+                if not regex.search(line):
+                    continue
+                hits.append(f"{name}:{lineno}: {line.strip()[:300]}")
+                if len(hits) >= limit:
+                    truncated = True
+                    break
             if truncated:
                 break
 
@@ -230,6 +256,12 @@ class LogArchiveTools:
                 + ("，已达上限" if truncated else "")
                 + f"，扫描 {scanned} 个文件）：\n")
         text += "\n".join(hits)
+        if capped:
+            text += (f"\n...[{len(capped)} 个文件超过单文件读取上限 "
+                     f"{self.max_read_bytes // 1024} KB，只扫描了前 "
+                     f"{self.max_read_bytes // 1024} KB："
+                     + "、".join(capped[:3])
+                     + ("…" if len(capped) > 3 else "") + "]")
         if truncated:
             text += "\n...[结果已截断，可用更精确的 pattern 或限定 path]"
         return self._finish(text)
@@ -258,14 +290,13 @@ class LogArchiveTools:
         if not self._is_text_member(rel):
             return f"这是二进制文件，无法按文本读取：{rel}"
 
-        try:
-            raw = archive.read(target)
-        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-            return f"读取失败：{exc}"
-
-        text = raw.decode("utf-8", "ignore")
-        lines = text.splitlines()
+        lines, capped = self._read_member_lines(archive, target)
         total = len(lines)
+        size = int(target.file_size or 0)
+        limit_kb = self.max_read_bytes // 1024
+        if total == 0:
+            return (f"日志包 {rel} 没有可读取的文本内容"
+                    f"（{size} 字节）")
 
         def _as_int(value: Any) -> Optional[int]:
             try:
@@ -275,8 +306,8 @@ class LogArchiveTools:
 
         start = _as_int(start_line) or 1
         end = _as_int(end_line) or total
-        start = max(1, min(start, total)) if total else 1
-        end = max(start, min(end, total)) if total else 1
+        start = max(1, min(start, total))
+        end = max(start, min(end, total))
 
         budget = self.max_result_chars
         chunk: list[str] = []
@@ -290,12 +321,19 @@ class LogArchiveTools:
             used += len(line) + 1
             last = lineno
 
-        header = (f"日志包 {rel}（共 {total} 行，{len(raw)} 字节）"
+        detail = (
+            f"已读取 {total} 行（仅前 {limit_kb} KB）" if capped
+            else f"共 {total} 行"
+        )
+        header = (f"日志包 {rel}（{detail}，{size} 字节）"
                   f" 显示 行 {start}-{last}：\n")
         body = "\n".join(chunk)
         if last < end:
             body += (f"\n...[受结果长度限制，行 {last + 1}-{end} 未显示，"
                      f"可用 start_line 继续读]")
+        elif capped:
+            body += (f"\n...[文件超过单文件读取上限 {limit_kb} KB，"
+                     f"其后的内容未读取]")
         return self._finish(header + body)
 
     async def list_images(self) -> str:
