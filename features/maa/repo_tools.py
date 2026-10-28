@@ -35,6 +35,7 @@ from features.maa.repo import (
 from features.maa.safety import (
     resolve_repo_path,
 )
+from features.maa.text_utils import truncate_line
 
 logger = logging.getLogger("Maa.RepoTools")
 
@@ -325,9 +326,11 @@ class RepoTools:
 
     def _limit_result(self, text: str) -> str:
         """按 token 预算裁剪工具结果（0 = 由字符上限估算）。"""
-        from core.tokens import estimate_tokens, trim_to_tokens
+        from core.tokens import clamp_tool_result_tokens, estimate_tokens, trim_to_tokens
 
-        tokens = int(self.cfg.max_tool_result_tokens or 0)
+        tokens = clamp_tool_result_tokens(
+            int(self.cfg.max_tool_result_tokens or 0)
+        )
         if tokens <= 0:
             tokens = max(512, int(self.cfg.max_tool_result_chars or 30000) // 4)
         if estimate_tokens(text) <= tokens:
@@ -518,13 +521,28 @@ class RepoTools:
         except OSError as exc:
             return f"无法读取文件信息：{exc}"
 
+        # 按字节上限读取：大文件只读开头一段，避免整文件读入内存
+        limit = int(self._max_read_bytes or 0)
         try:
-            text = target.read_text(encoding="utf-8", errors="ignore")
-        except (OSError, ValueError) as exc:
+            with target.open("rb") as handle:
+                raw = handle.read(limit + 1) if limit > 0 else handle.read()
+        except OSError as exc:
             return f"读取失败：{exc}"
+        capped = limit > 0 and len(raw) > limit
+        if capped:
+            raw = raw[:limit]
+            # 丢弃被截断的最后一行，避免输出半行
+            cut = raw.rfind(b"\n")
+            if cut > 0:
+                raw = raw[:cut]
 
-        lines = text.splitlines()
+        text = raw.decode("utf-8", "ignore")
+        # 单行上限：一行超长 JSON 不应吃掉整段结果预算
+        lines = [truncate_line(line) for line in text.splitlines()]
         total = len(lines)
+        rel = self._display(self.provider.root, target)
+        if total == 0:
+            return f"{rel} 没有可读取的文本内容（{size} 字节）"
 
         def _as_int(value: Any) -> Optional[int]:
             try:
@@ -532,9 +550,12 @@ class RepoTools:
             except (TypeError, ValueError):
                 return None
 
-        start = _as_int(args.get("start_line")) or 1
+        start = max(1, _as_int(args.get("start_line")) or 1)
+        if start > total:
+            return (f"start_line={start} 超出范围：{rel} "
+                    + (f"已读取 {total} 行（仅前 {limit // 1024} KB）" if capped
+                       else f"共 {total} 行"))
         end = _as_int(args.get("end_line")) or total
-        start = max(1, min(start, total))
         end = max(start, min(end, total))
 
         # 单次返回字符预算
@@ -550,12 +571,22 @@ class RepoTools:
             used += len(line) + 1
             last = lineno
 
-        rel = self._display(self.provider.root, target)
-        header = (f"{rel}（共 {total} 行，{size} 字节）"
+        limit_kb = limit // 1024
+        detail = (
+            f"已读取 {total} 行（仅前 {limit_kb} KB）" if capped
+            else f"共 {total} 行"
+        )
+        header = (f"{rel}（{detail}，{size} 字节）"
                   f" 显示 行 {start}-{last}：\n")
         body = "\n".join(chunk)
         if last < end:
-            body += f"\n...[受 max_tool_result_chars 限制，行 {last + 1}-{end} 未显示，可用 start_line 继续读]"
+            body += (f"\n...[受 max_tool_result_chars 限制，可用 "
+                     f"start_line={last + 1} 继续读]")
+        elif capped:
+            body += (f"\n...[仅读取前 {limit_kb} KB，其后内容未读取；"
+                     f"可让仓库维护者调大 max_file_kb]")
+        elif end < total:
+            body += f"\n...[已到 end_line，可用 start_line={last + 1} 继续读]"
         return header + body
 
     async def _list_tags(self, args: dict) -> str:

@@ -3,36 +3,51 @@
 
 分析时 Bot 只把「摘要」交给模型，摘要必然有取舍；当模型需要核对
 摘要之外的原始内容（例如某条完整堆栈、某个配置项的原文、某个截图是否
-存在）时，可以用这里的工具直接读取压缩包。
+存在）时，可以用这里的工具直接读取日志包。
+
+实现方式与 dsh 对齐：先把压缩包**安全解压到临时目录**，工具本身只面向
+解压后的普通文件（行号窗口、单行宽度、字节上限与仓库工具同一套规则）。
+解压按需触发（模型第一次调用工具时才做），`close()` 时删除临时目录。
 
 暴露的操作:
-  - list_files  列出压缩包内某目录的文件
-  - search      在压缩包的文本成员中按正则搜索
-  - read_file   读取某个文本成员（支持行范围）
+  - list_files  列出某个目录下的文件
+  - search      在文本文件中按正则搜索
+  - read_file   读取某个文本文件（支持行范围）
+  - list_images 列出图片
 
 安全边界:
-  - 路径必须是包内相对路径，拒绝绝对路径与任何 `..` 上跳组件
-  - 拒绝凭据 / 密钥类文件名（与仓库侧共用 safety 策略）
-  - 单文件读取受字节上限、单次返回受字符上限约束
-  - 只读，不落盘（不把压缩包解压到磁盘）
+  - 路径必须是相对路径，拒绝绝对路径与任何 `..` 上跳组件
+  - 解压阶段拒绝符号链接、凭据类文件，并限制单文件/总字节/成员数
+  - 单次读取受字节、行数与字符上限约束
 """
 from __future__ import annotations
 
 import logging
 import re
 import zipfile
-from pathlib import PurePosixPath
-from typing import Any, Optional
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterator, Optional
 
-from core.tokens import trim_to_tokens
+from core.tokens import clamp_tool_result_tokens, trim_to_tokens
+from features.maa.archive_extract import (
+    DEFAULT_TOTAL_LIMIT_MB,
+    ExtractedArchive,
+)
 from features.maa.log_digest import IMAGE_SUFFIXES
 from features.maa.safety import (
     describe_rejection,
     is_sensitive_path,
     normalize_tool_path,
 )
+from features.maa.text_utils import MAX_LINE_CHARS, truncate_line
 
 logger = logging.getLogger("Maa.LogTools")
+
+# 逐块读取的块大小：内存占用与文件大小无关
+_CHUNK_BYTES = 64 * 1024
+# 单行缓冲上限（字节）。超过即视为超长行：丢弃多余字节并在输出时标注，
+# 避免“整条日志没有换行”把内存吃满。
+_MAX_LINE_BYTES = MAX_LINE_CHARS * 4
 
 # 明显是二进制、不适合按文本读取的扩展名
 _BINARY_SUFFIXES = {
@@ -43,51 +58,89 @@ _BINARY_SUFFIXES = {
     ".db3", ".sqlite", ".sqlite3",
 }
 
-# 日志包内可直接按文本读取的扩展名（其余需显式尝试）
-_TEXT_SUFFIXES = {
-    ".log", ".txt", ".json", ".jsonc", ".yaml", ".yml", ".toml", ".ini",
-    ".cfg", ".conf", ".csv", ".md", ".xml", ".js", ".ts", ".py", ".bat",
-    ".sh", ".ps1", ".env", ".properties",
-}
-
 
 class LogArchiveTools:
-    """在日志压缩包内执行 AI 请求的工具调用（只读、不落盘）。"""
+    """把日志压缩包解压到临时目录后执行 AI 请求的工具调用。"""
 
     def __init__(self, zip_path: str, *, max_file_kb: int = 512,
                  max_result_chars: int = 30000,
                  max_search_files: int = 2000,
-                 max_result_tokens: int = 0):
+                 max_result_tokens: int = 0,
+                 max_total_mb: int = 0,
+                 extract_dir: str = ""):
         self.zip_path = str(zip_path or "")
         self.max_read_bytes = max(64, int(max_file_kb or 512)) * 1024
         self.max_result_chars = max(2000, int(max_result_chars or 30000))
         self.max_search_files = max(50, int(max_search_files or 2000))
-        self.max_result_tokens = max(0, int(max_result_tokens or 0))
-        # 压缩包常被多次工具调用反复读取：进程内缓存句柄与成员索引
-        self._archive: Optional[zipfile.ZipFile] = None
-        self._member_list: Optional[list[zipfile.ZipInfo]] = None
+        self.max_result_tokens = clamp_tool_result_tokens(max_result_tokens)
+        total_mb = int(max_total_mb or 0) or DEFAULT_TOTAL_LIMIT_MB
+        # 解压后总大小由 `probe_archive` 统一把关（下载后、AI 之前），
+        # 这里只负责把同一上限交给解压器复核，不再单独设单文件上限。
+        # extract_dir 为空时退化为系统临时目录（用完即删）。
+        self._extract = ExtractedArchive(
+            self.zip_path,
+            target_dir=extract_dir,
+            max_total_mb=total_mb,
+            max_members=3000,
+        )
+
+    # ════════════════════════════════════════════════════════════
+    # 生命周期
+    # ════════════════════════════════════════════════════════════
+
+    def available(self) -> bool:
+        """压缩包是否可作为日志源（存在且是合法 zip；不触发解压）。"""
+        if not self.zip_path:
+            return False
+        try:
+            return zipfile.is_zipfile(self.zip_path)
+        except OSError:
+            return False
+
+    def close(self) -> None:
+        """释放内存状态，不删除已解压目录（下次追问可直接复用）。"""
+        self._extract.close()
+
+    def discard(self) -> None:
+        """删除解压目录（没有历史记录、或本次分析未能归档时调用）。"""
+        self._extract.discard()
+
+    def release(self) -> None:
+        """结束使用：目录可复用时只释放内存，临时目录直接删掉。"""
+        if self.persistent:
+            self.close()
+        else:
+            self.discard()
+
+    @property
+    def persistent(self) -> bool:
+        """解压结果是否由调用方指定位置持久保存。"""
+        return bool(self._extract.target_dir)
+
+    @property
+    def extract_dir(self) -> Optional[Path]:
+        """解压目录（尚未解压时返回计划位置）。"""
+        return self._extract.root or self._extract.target_dir
+
+    def _root(self) -> Optional[Path]:
+        root = self._extract.ensure()
+        if root is None:
+            notes = [note for note in self._extract.notes if note]
+            logger.info(
+                "[日志工具] 解压不可用：" + ("；".join(notes[:3]) or "未知原因")
+            )
+        return root
+
+    def _unavailable(self) -> str:
+        notes = [note for note in self._extract.notes if note]
+        detail = f"（{'；'.join(notes[:3])}）" if notes else ""
+        if self._extract.overflow:
+            return (f"日志包内容过多，工具不可用{detail}")
+        return f"日志包不可用（可能已被清理或无法解压）{detail}"
 
     # ════════════════════════════════════════════════════════════
     # 内部工具
     # ════════════════════════════════════════════════════════════
-
-    def available(self) -> bool:
-        """压缩包是否可读（存在且是合法 zip）。"""
-        if not self.zip_path:
-            return False
-        if self._archive is not None:
-            return True
-        return self._open() is not None
-
-    def close(self) -> None:
-        """关闭缓存的压缩包句柄（分析结束时调用）。"""
-        archive, self._archive = self._archive, None
-        self._member_list = None
-        if archive is not None:
-            try:
-                archive.close()
-            except Exception:
-                pass
 
     @staticmethod
     def _normalize(rel: str) -> Optional[str]:
@@ -95,33 +148,9 @@ class LogArchiveTools:
         return normalize_tool_path(rel)
 
     @staticmethod
-    def _is_text_member(name: str) -> bool:
+    def _is_text_file(name: str) -> bool:
         suffix = PurePosixPath(name).suffix.lower()
-        if suffix in _BINARY_SUFFIXES:
-            return False
-        return True
-
-    def _open(self) -> Optional[zipfile.ZipFile]:
-        if self._archive is not None:
-            return self._archive
-        try:
-            self._archive = zipfile.ZipFile(self.zip_path)
-            self._members(self._archive)
-            return self._archive
-        except (zipfile.BadZipFile, OSError) as exc:
-            logger.warning(f"[日志工具] 无法打开压缩包：{exc}")
-            return None
-
-    def _members(self, archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
-        if self._member_list is None:
-            self._member_list = [
-                info for info in archive.infolist()
-                if not info.is_dir()
-                and self._normalize(info.filename) not in (None, "")
-                and not is_sensitive_path(info.filename)
-                and not is_sensitive_path(self._normalize(info.filename))
-            ]
-        return self._member_list
+        return suffix not in _BINARY_SUFFIXES
 
     def _finish(self, text: str) -> str:
         """按 token 预算裁剪工具结果（0 = 不限）。"""
@@ -129,33 +158,110 @@ class LogArchiveTools:
             return text
         return trim_to_tokens(text, self.max_result_tokens)
 
+    @staticmethod
+    def _append_line_bytes(buffer: bytearray, piece: bytes) -> None:
+        """把片段追加到行缓冲；超过单行上限时丢弃多余部分。"""
+        if not piece:
+            return
+        room = _MAX_LINE_BYTES - len(buffer)
+        if room <= 0:
+            return
+        buffer += piece[:room]
+
+    def _iter_file_lines(self, path: Path,
+                         state: dict[str, Any]) -> Iterator[tuple[int, str]]:
+        """
+        逐块读取解压后的文件，产出 `(行号, 文本)`。
+
+        内存占用与文件大小无关：每次只读 `_CHUNK_BYTES`、单行缓冲封顶、
+        累计读取字节受 `max_read_bytes` 限制。
+
+        `state` 回填：`truncated`（因字节上限提前停止）、
+        `complete`（是否读到文件末尾）。
+        """
+        limit = int(self.max_read_bytes or 0)
+        state["truncated"] = False
+        state["complete"] = False
+        used = 0
+        line_no = 0
+        buffer = bytearray()
+
+        def take_line() -> tuple[int, str]:
+            nonlocal line_no
+            text = truncate_line(
+                bytes(buffer).decode("utf-8", "ignore").rstrip("\r")
+            )
+            buffer.clear()
+            line_no += 1
+            return line_no, text
+
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(_CHUNK_BYTES)
+                    if not chunk:
+                        state["complete"] = True
+                        break
+                    hit_limit = False
+                    if limit > 0:
+                        room = limit - used
+                        if room <= 0:
+                            state["truncated"] = True
+                            break
+                        if len(chunk) > room:
+                            chunk = chunk[:room]
+                            hit_limit = True
+                    used += len(chunk)
+                    start = 0
+                    while True:
+                        newline = chunk.find(b"\n", start)
+                        if newline < 0:
+                            self._append_line_bytes(buffer, chunk[start:])
+                            break
+                        self._append_line_bytes(buffer, chunk[start:newline])
+                        yield take_line()
+                        start = newline + 1
+                    if hit_limit:
+                        state["truncated"] = True
+                        break
+                if buffer:
+                    yield take_line()
+        except OSError:
+            # 读失败：交出已读到的部分并标记不完整
+            state["truncated"] = True
+            if buffer:
+                yield take_line()
+
     # ════════════════════════════════════════════════════════════
     # 工具实现
     # ════════════════════════════════════════════════════════════
 
     async def list_files(self, path: str = "") -> str:
-        """列出压缩包内某个目录下的文件。"""
+        """列出某个目录下的文件。"""
         rel = self._normalize(path)
         if rel is None:
             return f"路径非法（须为包内相对路径）：{path}"
 
-        archive = self._open()
-        if archive is None:
-            return "日志包不可用（可能已被清理）"
+        root = self._root()
+        if root is None:
+            return self._unavailable()
         prefix = f"{rel}/" if rel else ""
         files: list[str] = []
         dirs: set[str] = set()
-        for info in self._members(archive):
-            name = self._normalize(info.filename)
-            if prefix and not name.startswith(prefix):
+        for member in self._extract.members:
+            if prefix and not member.startswith(prefix):
                 continue
-            rest = name[len(prefix):]
+            rest = member[len(prefix):]
             if not rest:
                 continue
             if "/" in rest:
                 dirs.add(rest.split("/", 1)[0] + "/")
-            else:
-                files.append(f"{rest}  ({info.file_size} 字节)")
+                continue
+            try:
+                size = (root / member).stat().st_size
+            except OSError:
+                continue
+            files.append(f"{rest}  ({size} 字节)")
 
         if not files and not dirs:
             where = rel or "压缩包根目录"
@@ -168,7 +274,7 @@ class LogArchiveTools:
 
     async def search(self, pattern: str, path: str = "",
                      max_results: int = 60) -> str:
-        """在压缩包的文本成员中按正则搜索。"""
+        """在日志包的文本文件中按正则搜索。"""
         pattern_text = str(pattern or "").strip()
         if not pattern_text:
             return "缺少 pattern 参数"
@@ -187,39 +293,39 @@ class LogArchiveTools:
             limit = 60
         limit = max(1, min(200, limit))
 
-        archive = self._open()
-        if archive is None:
-            return "日志包不可用（可能已被清理）"
+        root = self._root()
+        if root is None:
+            return self._unavailable()
 
         hits: list[str] = []
         scanned = 0
         truncated = False
+        capped: list[str] = []
         prefix = f"{rel}/" if rel else ""
-        for info in self._members(archive):
-            name = self._normalize(info.filename)
-            if prefix and not name.startswith(prefix):
+        for member in self._extract.members:
+            if prefix and not member.startswith(prefix):
                 continue
-            if not self._is_text_member(name):
-                continue
-            if is_sensitive_path(name):
+            if not self._is_text_file(member):
                 continue
             if scanned >= self.max_search_files:
                 truncated = True
                 break
 
             scanned += 1
+            state: dict[str, Any] = {}
+            iterator = self._iter_file_lines(root / member, state)
             try:
-                with archive.open(info) as handle:
-                    for lineno, raw in enumerate(handle, 1):
-                        line = raw.decode("utf-8", "ignore").rstrip("\r\n")
-                        if not regex.search(line):
-                            continue
-                        hits.append(f"{name}:{lineno}: {line.strip()[:300]}")
-                        if len(hits) >= limit:
-                            truncated = True
-                            break
-            except (OSError, RuntimeError, zipfile.BadZipFile):
-                continue
+                for lineno, line in iterator:
+                    if not regex.search(line):
+                        continue
+                    hits.append(f"{member}:{lineno}: {line.strip()[:300]}")
+                    if len(hits) >= limit:
+                        truncated = True
+                        break
+            finally:
+                iterator.close()
+            if state.get("truncated"):
+                capped.append(member)
             if truncated:
                 break
 
@@ -230,42 +336,35 @@ class LogArchiveTools:
                 + ("，已达上限" if truncated else "")
                 + f"，扫描 {scanned} 个文件）：\n")
         text += "\n".join(hits)
+        if capped:
+            text += (f"\n...[{len(capped)} 个文件超过单文件读取上限 "
+                     f"{self.max_read_bytes // 1024} KB，只扫描了前 "
+                     f"{self.max_read_bytes // 1024} KB："
+                     + "、".join(capped[:3])
+                     + ("…" if len(capped) > 3 else "") + "]")
         if truncated:
             text += "\n...[结果已截断，可用更精确的 pattern 或限定 path]"
         return self._finish(text)
 
     async def read_file(self, path: str, start_line: Optional[int] = None,
                         end_line: Optional[int] = None) -> str:
-        """读取压缩包内某个文本成员（支持行范围）。"""
+        """读取日志包内某个文本文件（支持行范围）。"""
         rel = self._normalize(path)
         if rel is None:
             return f"路径非法（须为包内相对路径）：{path}"
         if not rel:
             return "缺少 path 参数"
+
+        root = self._root()
+        if root is None:
+            return self._unavailable()
         if is_sensitive_path(rel):
             return describe_rejection(rel)
-
-        archive = self._open()
-        if archive is None:
-            return "日志包不可用（可能已被清理）"
-        target = None
-        for info in self._members(archive):
-            if self._normalize(info.filename) == rel:
-                target = info
-                break
-        if target is None:
+        target = self._extract.file_path(rel)
+        if target is None or not target.is_file():
             return f"日志包中不存在该文件：{rel}"
-        if not self._is_text_member(rel):
+        if not self._is_text_file(rel):
             return f"这是二进制文件，无法按文本读取：{rel}"
-
-        try:
-            raw = archive.read(target)
-        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-            return f"读取失败：{exc}"
-
-        text = raw.decode("utf-8", "ignore")
-        lines = text.splitlines()
-        total = len(lines)
 
         def _as_int(value: Any) -> Optional[int]:
             try:
@@ -273,41 +372,81 @@ class LogArchiveTools:
             except (TypeError, ValueError):
                 return None
 
-        start = _as_int(start_line) or 1
-        end = _as_int(end_line) or total
-        start = max(1, min(start, total)) if total else 1
-        end = max(start, min(end, total)) if total else 1
+        start = max(1, _as_int(start_line) or 1)
+        requested_end = _as_int(end_line)
+        if requested_end is not None:
+            requested_end = max(start, requested_end)
 
+        try:
+            size = target.stat().st_size
+        except OSError:
+            size = 0
+        limit_kb = self.max_read_bytes // 1024
         budget = self.max_result_chars
-        chunk: list[str] = []
+        state: dict[str, Any] = {}
+        rendered: list[str] = []
         used = 0
+        seen = 0
         last = start - 1
-        for lineno in range(start, end + 1):
-            line = f"[行 {lineno}] {lines[lineno - 1]}"
-            if used + len(line) + 1 > budget:
-                break
-            chunk.append(line)
-            used += len(line) + 1
-            last = lineno
+        cut_by_budget = False
+        iterator = self._iter_file_lines(target, state)
+        try:
+            for lineno, text in iterator:
+                seen = lineno
+                if lineno < start:
+                    continue
+                if requested_end is not None and lineno > requested_end:
+                    break
+                line = f"[行 {lineno}] {text}"
+                if used + len(line) + 1 > budget:
+                    cut_by_budget = True
+                    break
+                rendered.append(line)
+                used += len(line) + 1
+                last = lineno
+        finally:
+            iterator.close()
 
-        header = (f"日志包 {rel}（共 {total} 行，{len(raw)} 字节）"
+        if seen == 0:
+            return f"日志包 {rel} 没有可读取的文本内容（{size} 字节）"
+        if last < start:
+            if state.get("complete"):
+                return (f"start_line={start} 超出范围：日志包 {rel} "
+                        f"共 {seen} 行")
+            return (f"start_line={start} 超出已读取范围：日志包 {rel} 已读取 "
+                    f"{seen} 行（仅前 {limit_kb} KB）")
+
+        if state.get("complete"):
+            total_detail = f"共 {seen} 行"
+        elif state.get("truncated"):
+            total_detail = f"已读取 {seen} 行（仅前 {limit_kb} KB）"
+        else:
+            total_detail = f"至少 {seen} 行"
+        header = (f"日志包 {rel}（{total_detail}，{size} 字节）"
                   f" 显示 行 {start}-{last}：\n")
-        body = "\n".join(chunk)
-        if last < end:
-            body += (f"\n...[受结果长度限制，行 {last + 1}-{end} 未显示，"
-                     f"可用 start_line 继续读]")
+        body = "\n".join(rendered)
+        if cut_by_budget:
+            body += f"\n...[受结果长度限制，可用 start_line={last + 1} 继续读]"
+        elif state.get("truncated"):
+            body += f"\n...[仅读取前 {limit_kb} KB，其后内容未读取]"
+        elif requested_end is not None and last >= requested_end:
+            body += f"\n...[已到 end_line，可用 start_line={last + 1} 继续读]"
         return self._finish(header + body)
 
     async def list_images(self) -> str:
-        """列出压缩包内的全部图片（便于模型判断能附哪些图）。"""
-        archive = self._open()
-        if archive is None:
-            return "日志包不可用（可能已被清理）"
-        images = [
-            f"{self._normalize(info.filename)}  ({info.file_size} 字节)"
-            for info in self._members(archive)
-            if PurePosixPath(info.filename).suffix.lower() in IMAGE_SUFFIXES
-        ]
+        """列出日志包内的全部图片（便于模型判断能附哪些图）。"""
+        root = self._root()
+        if root is None:
+            return self._unavailable()
+        images: list[str] = []
+        for member in self._extract.members:
+            if PurePosixPath(member).suffix.lower() not in IMAGE_SUFFIXES:
+                continue
+            try:
+                size = (root / member).stat().st_size
+            except OSError:
+                continue
+            images.append(f"{member}  ({size} 字节)")
         if not images:
             return "日志包内没有图片"
         return self._finish(

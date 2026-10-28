@@ -93,6 +93,8 @@ class DigestResult:
     all_members: list[str] = field(default_factory=list)
     # 压缩包路径（供后续按名提取图片字节）
     zip_path: str = ""
+    # 已解压目录（存在时日志工具直接复用，避免反复解压）
+    extract_dir: str = ""
     # 摘要提示词的估算 token 数（用于上下文预算与日志）
     prompt_tokens: int = 0
 
@@ -125,9 +127,12 @@ def build_log_digest(
 
         total_uncompressed = sum(max(0, int(info.file_size)) for info in infos)
         if total_uncompressed > opts.max_total_uncompressed_bytes:
+            # 正常流程里 `probe_archive()` 已在下载后拦下超限包，这里是兜底：
+            # 直接调用摘要、或设置在中途被改小时仍不会全量解压。
             notes.append(
-                f"压缩包解压后大小 {format_bytes(total_uncompressed)} 超过软限制 "
-                f"{format_bytes(opts.max_total_uncompressed_bytes)}；插件未全量解压，仅按上限读取重点日志。"
+                f"压缩包解压后大小 {format_bytes(total_uncompressed)} 超过上限 "
+                f"{format_bytes(opts.max_total_uncompressed_bytes)}；"
+                f"仅按上限读取重点日志。"
             )
 
         safe_infos = [info for info in infos if _is_safe_member(info.filename)]

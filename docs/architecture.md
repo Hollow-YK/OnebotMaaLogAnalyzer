@@ -46,17 +46,18 @@ OnebotMaaLogAnalyzer/
 ├── features/            # [功能] 所有业务功能
 │   └── maa/             #   [日志分析]
 │       ├── watcher.py          # 日志包监听（主要触发入口）
-│       ├── analyzer.py         # 下载 → 摘要 → 仓库检索 → LLM → 报告 流程编排
+│       ├── analyzer.py         # 下载 → 内容闸门 → 摘要 → 仓库检索 → LLM → 报告 流程编排
 │       ├── archive_profile.py  # 日志包 UI 类型 / 软件版本 / MaaFramework 版本识别
 │       ├── log_digest.py       # 日志摘要提取（核心算法，按 UI 布局选择日志）
 │       ├── repo.py             # 项目代码检索（仓库/版本/tag 管理）
 │       ├── repo_tools.py       # agent 模式的仓库工具集（含路径沙箱）
-│       ├── log_tools.py        # 日志包工具（AI 自主读压缩包内原始文件）
+│       ├── log_tools.py        # 日志包工具（读历史记录里解压后的真实文件）
+│       ├── archive_extract.py  # 安全解压 + 复用标记（路径/符号链接/敏感文件/字节上限）
 │       ├── attachments.py      # 结果附件（来源限定 + 相对路径沙箱 + 看图指令）
 │       ├── render/             # 图片化报告（Markdown → 无头浏览器 → 分页截图）
 │       ├── safety.py           # 路径安全策略（凭据/密钥类文件禁止外发）
 │       ├── followup.py         # 追问答疑会话管理（内存 + 落盘，重启后可续）
-│       ├── history.py          # 分析历史归档（日志包 / 消息 ID / 会话状态 / 周期清理）
+│       ├── history.py          # 分析历史归档（日志包 / 解压内容 / 消息 ID / 会话状态 / 周期清理）
 │       ├── commands.py         # QQ 指令解析与执行（含权限）
 │       ├── message_handler.py  # 文本消息路由（指令 / 追问）
 │       ├── onebot_files.py     # 群文件递归列出 / 查找 / 下载
@@ -77,7 +78,7 @@ OnebotMaaLogAnalyzer/
 │       ├── settings.json     # 分析设置覆盖（/maa set）
 │       ├── project.json      # 项目配置覆盖（/maa project set）
 │       ├── commands.json     # 指令与权限设置
-│       ├── history/          # 分析历史（日志包 + 追问上下文 + 会话状态，按周期自动清理）
+│       ├── history/          # 分析历史（日志包 + 解压内容 + 追问上下文 + 会话状态，按周期自动清理）
 │       └── jobs/records.json # 分析任务记录
 ├── templates/           # 图片化报告模板（发布包必须包含）
 │   └── default/         #   内置模板：page.html / header.html / footer.html / style.css

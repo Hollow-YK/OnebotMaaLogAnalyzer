@@ -36,6 +36,7 @@ from core.compaction import (
 from core.llm_pool import current_session_id, new_session_id, session_context
 from core.log_context import config_log_context
 from core.tokens import (
+    clamp_tool_result_tokens,
     estimate_messages_tokens,
     estimate_tokens,
     fold_text,
@@ -46,6 +47,7 @@ from features.maa.archive_profile import (
     ArchiveProfile,
     parse_archive_part,
 )
+from features.maa.archive_extract import probe_archive
 from features.maa.log_digest import (
     IMAGE_SUFFIXES,
     DigestOptions,
@@ -68,9 +70,9 @@ from features.maa.attachments import (
     build_report_segments,
     find_repo_attachment_names,
     parse_vision_requests,
-    split_report,
     strip_attachments,
     strip_vision_requests,
+    text_segments,
 )
 from features.maa.text_utils import format_bytes, split_text
 
@@ -184,7 +186,7 @@ def build_digest_options(settings: AnalysisSettings,
     return DigestOptions(
         max_prompt_chars=prompt_chars,
         max_zip_members=max(20, int(settings.max_zip_members or 300)),
-        max_total_uncompressed_bytes=max(10, int(settings.max_total_uncompressed_mb or 120)) * 1024 * 1024,
+        max_total_uncompressed_bytes=max(1, int(settings.max_total_uncompressed_mb or 1024)) * 1024 * 1024,
         max_file_read_bytes=max(64, int(settings.max_log_file_read_kb or 512)) * 1024,
         small_log_full_read_bytes=max(1, int(settings.small_log_full_read_mb or 5)) * 1024 * 1024,
         stream_medium_logs=bool(settings.stream_medium_logs),
@@ -455,8 +457,8 @@ class MaaAnalyzer:
             retain_ratio=_ratio(
                 getattr(settings, "context_retain_ratio", 0.25), 0.1, 0.5
             ),
-            tool_result_tokens=max(
-                0, int(getattr(settings, "context_prune_tool_result_tokens", 512) or 0)
+            tool_result_tokens=clamp_tool_result_tokens(
+                int(getattr(settings, "context_prune_tool_result_tokens", 512) or 0)
             ),
             summary_tokens=max(
                 256, int(getattr(settings, "context_summary_tokens", 1500) or 1500)
@@ -681,6 +683,9 @@ class MaaAnalyzer:
         work_dir = self._build_work_dir(config_name, group_id, file_name, file_id)
         zip_path = work_dir / "source.zip"
         job = None
+        # 日志包工具实例：解压目录在分析期间是暂存区，归档后并入历史记录
+        log_tools: Optional[LogArchiveTools] = None
+        extract_persisted = False
 
         try:
             job = self.s.add_job(
@@ -737,6 +742,22 @@ class MaaAnalyzer:
                         "仅分析当前分卷。"
                     )
             logger.info(f"[分析] 已下载 {file_name}，大小 {format_bytes(downloaded)}")
+
+            # 内容闸门：只读 zip 中央目录，解压后总大小超限的直接跳过，
+            # 不提取摘要、不准备仓库、不调用 AI。通过之后下游无需再比对总量。
+            overflow = self.archive_limit_error(settings, str(zip_path))
+            if overflow:
+                self._finish_job(config_name, job, "已跳过", overflow)
+                logger.info(f"[分析] {overflow}（{file_name}）")
+                return AnalysisOutcome(
+                    ok=False,
+                    skipped=True,
+                    file_name=file_name,
+                    downloaded=downloaded,
+                    error=overflow,
+                )
+            logger.info(f"[分析] 内容检查通过：{file_name}")
+
             if progress:
                 await progress("日志包已下载，正在提取错误摘要。")
 
@@ -819,20 +840,19 @@ class MaaAnalyzer:
                         logger.warning(f"[分析] {tool_note}")
                     stage_timeout = max(30, int(settings.ai_stage_timeout_seconds or 300))
                     if use_tools and (repo_prep.provider is not None or zip_path.exists()):
+                        if settings.log_tools_enabled:
+                            log_tools = self._make_log_tools(
+                                config_name, settings, project,
+                                current_session_id() or new_session_id(config_name),
+                                str(zip_path),
+                            )
                         response_text = await asyncio.wait_for(
                             self._run_repo_agent(
                                 config_name, settings, prompt, repo_prep.provider,
                                 project=project,
                                 user_content=user_content,
                                 vision_state=vision_state,
-                                log_tools=LogArchiveTools(
-                                    str(zip_path),
-                                    max_file_kb=max(64, int(settings.max_log_file_read_kb or 512)),
-                                    max_result_chars=max(
-                                        2000, int(project.repo.max_tool_result_chars or 30000)
-                                    ),
-                                    max_result_tokens=int(project.repo.max_tool_result_tokens or 0),
-                                ) if settings.log_tools_enabled else None,
+                                log_tools=log_tools,
                             ),
                             timeout=stage_timeout,
                         )
@@ -916,9 +936,16 @@ class MaaAnalyzer:
             )
 
             followup_context = self._build_followup_context(
-                file_name, prompt, repo_prep.context, response_text
+                file_name, prompt, repo_prep.context,
+                budget=max(
+                    1024,
+                    int(self._context_budget(
+                        settings, self.llm, self._llm_cfg(config_name)
+                    ) * 0.7),
+                ),
             )
-            # 归档日志包与上下文（使追问可跨天）。必须在 finally 清理前完成。
+            # 归档日志包、解压结果与上下文（使追问可跨天）。
+            # 解压目录会整体并入历史记录，因此追问期间不必重复解压。
             history_id, archived_zip = self._archive_history(
                 config_name=config_name,
                 settings=settings,
@@ -931,11 +958,17 @@ class MaaAnalyzer:
                 report=response_text,
                 log_count=len(digest.log_files),
                 image_count=len(digest.error_images),
+                extract_dir=log_tools.extract_dir if log_tools is not None else None,
             )
             # 归档后 zip 已移出工作目录（工作目录稍后会被清理），
             # 把 digest 的路径指向归档副本，使追问仍能从日志包取附件。
             if archived_zip:
                 digest.zip_path = archived_zip
+            if history_id:
+                extract_persisted = True
+                digest.extract_dir = str(
+                    self.history.extracted_dir(config_name, history_id)
+                ) if self.history is not None else ""
 
             return AnalysisOutcome(
                 ok=True,
@@ -973,6 +1006,13 @@ class MaaAnalyzer:
                 self._finish_job(config_name, job, "执行失败", str(exc)[:300])
             return AnalysisOutcome(ok=False, file_name=file_name, error=str(exc))
         finally:
+            # 解压结果：已并入历史记录的保留（追问期间直接复用），
+            # 其余（历史关闭 / 归档失败 / 提前跳过）立即删除，避免残留。
+            if log_tools is not None:
+                if extract_persisted:
+                    log_tools.close()
+                else:
+                    log_tools.discard()
             # 无论成功失败，都还原仓库位置，避免影响下一次分析
             await self._restore_repo_latest(config_name, settings)
             self._active_repos.pop(config_name, None)
@@ -1013,6 +1053,46 @@ class MaaAnalyzer:
             self.s, group_id, file_name, file_size=file_size
         )
         return found.file_id if found else None
+
+    def _make_log_tools(self, config_name: str, settings: AnalysisSettings,
+                        project: ProjectConfig, session_id: str,
+                        zip_path: str) -> LogArchiveTools:
+        """
+        构造日志包工具。
+
+        解压目录：历史归档开启时放在 `data/<配置>/history/.staging/<会话>`，
+        分析成功后整体并入记录目录（`history/<记录>/extracted`），
+        于是“解压结果保留到不能再追问”由历史清理统一负责；历史关闭时
+        退化为系统临时目录，分析结束即删除。
+        """
+        extract_dir = ""
+        if self.history is not None and settings.history_enabled:
+            extract_dir = str(self.history.staging_dir(config_name, session_id))
+        return LogArchiveTools(
+            zip_path,
+            max_file_kb=max(64, int(settings.max_log_file_read_kb or 512)),
+            max_result_chars=max(
+                2000, int(project.repo.max_tool_result_chars or 30000)
+            ),
+            max_result_tokens=int(project.repo.max_tool_result_tokens or 0),
+            max_total_mb=int(settings.max_total_uncompressed_mb or 0),
+            extract_dir=extract_dir,
+        )
+
+    @staticmethod
+    def archive_limit_error(settings: AnalysisSettings, zip_path: str) -> str:
+        """
+        内容闸门：解压后总大小超限时返回给用户看的提示，否则空串。
+
+        下载完成后、摘要与 AI 之前调用一次即可——通过之后，摘要与日志工具
+        都不再比对总量；解压时只按实际写出字节复核，防止 zip 头造假。
+        """
+        probe = probe_archive(
+            zip_path, int(settings.max_total_uncompressed_mb or 0)
+        )
+        if probe.ok:
+            return ""
+        return probe.reason or "日志包内容无法分析。"
 
     @staticmethod
     def _skip_reason(digest: DigestResult, project: ProjectConfig) -> str:
@@ -1651,12 +1731,14 @@ class MaaAnalyzer:
                          group_id: int, file_name: str, file_id: str,
                          uploader: str, zip_path: Path, context: str,
                          report: str, log_count: int,
-                         image_count: int) -> tuple[str, str]:
+                         image_count: int,
+                         extract_dir: Optional[Path] = None) -> tuple[str, str]:
         """
-        归档日志包与追问上下文到历史目录。
+        归档日志包、解压结果与追问上下文到历史目录。
 
         返回 (history_id, 归档后的 zip 路径)；未启用或失败时返回 ("", "")。
-        归档成功后工作目录中的 source.zip 会被移走，因此 cleanup 不会误删。
+        归档成功后工作目录中的 source.zip 会被移走，因此 cleanup 不会误删；
+        `extract_dir` 会整体移入记录目录，其生命周期与追问能力一致。
         """
         if self.history is None or not settings.history_enabled:
             return "", ""
@@ -1673,6 +1755,7 @@ class MaaAnalyzer:
                 uploader=uploader,
                 log_count=log_count,
                 image_count=image_count,
+                extract_dir=extract_dir,
             )
             if record is None:
                 return "", ""
@@ -1702,19 +1785,24 @@ class MaaAnalyzer:
         if not report:
             return [], []
         try:
-            max_images = max(0, int(settings.max_report_images or 0))
-            max_files = max(0, int(settings.max_report_files or 0))
-            if not settings.send_images:
-                max_images = 0
-            if not (settings.send_files and allow_files):
+            max_images = (
+                0 if not settings.send_images
+                else max(0, int(settings.max_report_images or 0))
+            )
+            max_files = (
+                0 if not (settings.send_files and allow_files)
+                else max(0, int(settings.max_report_files or 0))
+            )
+            # 单文件体积上限：0 = 关闭文件附件（与 send_files=false 等价），
+            # 不再静默回退成 20 MB。
+            raw_mb = settings.max_file_attachment_mb
+            file_limit_mb = 20 if raw_mb is None else int(raw_mb)
+            if file_limit_mb <= 0:
                 max_files = 0
+            max_file_bytes = max(1, file_limit_mb) * 1024 * 1024
             if max_images <= 0 and max_files <= 0:
-                # 不允许任何附件，但仍需剥离指令行
-                return split_report(report), []
-
-            max_file_bytes = max(
-                64, int(settings.max_file_attachment_mb or 20)
-            ) * 1024 * 1024
+                # 两类附件都关闭：只保留文本片段，不能留下空数据的附件段
+                return text_segments(report), []
 
             # 从本地仓库取附件（仅 @项目 来源；@日志 由压缩包直接读取）
             repo_files: dict[str, bytes] = {}
@@ -1733,15 +1821,15 @@ class MaaAnalyzer:
             return build_report_segments(
                 report, digest,
                 repo_files=repo_files,
-                max_attachments=max_images + max_files,
+                max_images=max_images,
+                max_files=max_files,
                 # 图片不再按体积裁剪：渲染时按内容宽度等比缩放
                 max_image_bytes=0,
                 max_file_bytes=max_file_bytes,
-                allow_files=max_files > 0,
             )
         except Exception as exc:
             logger.warning(f"[附件] 解析失败，已跳过：{exc}", exc_info=True)
-            return split_report(report), []
+            return text_segments(report), []
 
     @staticmethod
     def _limit_attachment_requests(paths: list[str], max_images: int,
@@ -1764,24 +1852,112 @@ class MaaAnalyzer:
 
     @staticmethod
     def _build_followup_context(file_name: str, prompt: str, repo_context: str,
-                                report: str) -> str:
+                                *, budget: int = 0) -> str:
         """
         构造追问会话的首轮上下文。
 
         **顺序很重要**：把日志摘要原样放在最前面，使其与分析阶段的首条
         user 消息共享前缀，从而命中 provider 的提示词缓存；文件名等
         本次分析独有的信息放在末尾，避免开头就发生分歧。
+
+        `budget > 0` 时按 token 预算裁剪：先保留开头（日志摘要/代码参考，
+        与缓存前缀一致），再补末尾说明；预算不足时从尾部开始丢，
+        绝不让追问种子无声超限。
         """
         parts = [prompt]
         # analyze() 传入的 prompt 已经拼接了代码参考；只有确实缺失时才补
         if repo_context and repo_context.strip() and repo_context.strip() not in prompt:
             parts.extend(["", repo_context])
-        parts.extend([
-            "",
+        tail = (
             f"【本次分析信息】日志包：{file_name}。"
-            "以上内容是分析时提供的原始摘要，可直接引用，无需重新上传日志。",
-        ])
-        return "\n".join(parts)
+            "以上内容是分析时提供的原始摘要，可直接引用，无需重新上传日志。"
+        )
+        body = "\n".join(parts)
+        if budget <= 0:
+            return body + "\n\n" + tail
+        if estimate_tokens(body) + estimate_tokens(tail) <= budget:
+            return body + "\n\n" + tail
+
+        tail_budget = estimate_tokens(tail)
+        if tail_budget >= budget:
+            return trim_to_tokens(body, budget)
+        trimmed = trim_to_tokens(
+            body, budget - tail_budget,
+            suffix="\n...[原始摘要已按追问预算裁剪，可用工具重新检索]",
+        )
+        logger.info(
+            f"[追问] 种子上下文按预算裁剪：{estimate_tokens(body)} → "
+            f"{estimate_tokens(trimmed)} tokens（预算 {budget}）"
+        )
+        return (trimmed + "\n\n" + tail).strip()
+
+    @staticmethod
+    def _budget_followup_seed(messages: list[dict], budget: int) -> list[dict]:
+        """
+        按优先级把追问种子消息裁到预算内。
+
+        种子 = `[system, user(日志摘要), assistant(上次报告), …QA]`。
+        日志摘要与分析阶段共享前缀缓存，优先保留；上次报告只占剩余预算，
+        被裁时明确告知模型“可用工具重新检索”，避免它拿残报告当全文引用。
+        其余 QA 历史交给压缩器。
+        """
+        if budget <= 0 or len(messages) < 3:
+            return messages
+        result = list(messages)
+        head = result[0]
+        system_tokens = (
+            estimate_tokens(str(head.get("content") or ""))
+            if head.get("role") == "system" else 0
+        )
+        # 末尾还要追加追问指令（约 200 tokens），先预留
+        available = budget - system_tokens - 256
+        if available <= 0:
+            return result
+
+        index = next(
+            (i for i, message in enumerate(result) if message.get("role") == "user"),
+            None,
+        )
+        if index is None:
+            return result
+        summary = result[index].get("content")
+        if not isinstance(summary, str):
+            return result
+
+        summary_tokens = estimate_tokens(summary)
+        summary_budget = max(1024, int(available * 0.7))
+        if summary_tokens > summary_budget:
+            trimmed = trim_to_tokens(
+                summary, summary_budget,
+                suffix="\n...[追问摘要已按预算裁剪，可用工具重新检索]",
+            )
+            result[index] = {**result[index], "content": trimmed}
+            summary_tokens = estimate_tokens(trimmed)
+            logger.info(
+                f"[追问] 首轮摘要按预算裁剪："
+                f"{estimate_tokens(summary)} → {summary_tokens} tokens"
+            )
+
+        report_index = index + 1
+        if (report_index < len(result)
+                and result[report_index].get("role") == "assistant"):
+            report = result[report_index].get("content")
+            if isinstance(report, str):
+                remaining = max(256, available - summary_tokens)
+                if estimate_tokens(report) > remaining:
+                    result[report_index] = {
+                        **result[report_index],
+                        "content": trim_to_tokens(
+                            report, remaining,
+                            suffix="\n...[上次报告已按追问预算裁剪，"
+                                   "结论请以本次回答为准]",
+                        ),
+                    }
+                    logger.info(
+                        f"[追问] 上次报告按预算裁剪："
+                        f"{estimate_tokens(report)} → {remaining} tokens 以内"
+                    )
+        return result
 
     async def answer_followup(self, *, settings: AnalysisSettings,
                               messages: list[dict], question: str,
@@ -1843,6 +2019,9 @@ class MaaAnalyzer:
                         2000, int(repo_cfg.max_tool_result_chars or 30000)
                     ),
                     max_result_tokens=int(repo_cfg.max_tool_result_tokens or 0),
+                    max_total_mb=int(settings.max_total_uncompressed_mb or 0),
+                    # 归档目录里的解压结果：存在就直接复用，不重复解压
+                    extract_dir=str(getattr(digest, "extract_dir", "") or ""),
                 )
                 if candidate.available():
                     log_tools = candidate
@@ -1875,11 +2054,12 @@ class MaaAnalyzer:
         schema_tokens = (
             estimate_tokens(json.dumps(tools, ensure_ascii=False)) if tools else 0
         )
-        compactor = self._compactor(
-            config_name, settings, "followup",
-            max(2048, self._context_budget(settings, self.llm, config_llm)
-                - schema_tokens),
+        budget = max(
+            2048,
+            self._context_budget(settings, self.llm, config_llm) - schema_tokens,
         )
+        base = self._budget_followup_seed(base, budget)
+        compactor = self._compactor(config_name, settings, "followup", budget)
         base = compactor.prepare(
             base,
             first_user_ratio=(
@@ -1957,7 +2137,7 @@ class MaaAnalyzer:
             return None
         finally:
             if log_tools is not None:
-                log_tools.close()
+                log_tools.release()
 
         if not raw:
             return None
@@ -2525,7 +2705,7 @@ class MaaAnalyzer:
             )
         finally:
             if log_tools is not None:
-                log_tools.close()
+                log_tools.release()
 
     @staticmethod
     async def _dispatch_agent_tool(name: str, arguments: dict,

@@ -300,6 +300,10 @@ class MaaService:
         但文件其实已经发出去。因此这里保留文件，由下次发送时统一清理。
         """
         name = Path(str(file_name or "file.bin")).name or "file.bin"
+        if not data:
+            # 0 字节附件对用户没有意义，且部分协议端会直接报错
+            logger.warning(f"[发送] 文件内容为空，已跳过：{name}")
+            return False
         temp_dir = Path(self.dm._dir) / "_outbox"
         target: Optional[Path] = None
         try:

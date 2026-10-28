@@ -218,6 +218,8 @@ class _BreakerState:
     open_kind: str = ""
     # 服务端给出的 Retry-After（秒），用于放宽冷却时间
     cooldown_override: float = 0.0
+    # 冷却结束后放行的那一次试探：失败必须立刻重新熔断
+    half_open: bool = False
     last_kind: str = ""
     last_error: str = ""
     last_quota: bool = False
@@ -395,8 +397,10 @@ class LLMPool:
         state = self._breaker(provider)
         threshold = max(1, int(self.breaker_cfg.failure_threshold or 3))
         if state.failures >= threshold:
-            # 冷却结束，半开：允许一次尝试
-            state.failures = threshold - 1
+            # 冷却结束：放行一次试探并标记半开。
+            # 试探失败由 `_report_failure` 立即重新熔断，不再把计数减到阈值以下，
+            # 否则熔断会在“阈值 − 1”附近震荡而实际失效。
+            state.half_open = True
         return True
 
     def _report_success(self, provider: str) -> None:
@@ -405,6 +409,7 @@ class LLMPool:
         state.opened_at = 0.0
         state.open_kind = ""
         state.cooldown_override = 0.0
+        state.half_open = False
         state.last_kind = ""
         state.last_error = ""
         state.last_quota = False
@@ -417,6 +422,9 @@ class LLMPool:
         state.last_error = error
         state.last_quota = bool(quota)
         threshold = max(1, int(self.breaker_cfg.failure_threshold or 3))
+        # 半开的那次试探失败：直接重新熔断，不参与“连续 N 次”计数
+        half_open = state.half_open
+        state.half_open = False
 
         if kind == "auth":
             # 鉴权失败重试没有意义，直接冷却；冷却后仍给一次半开试探，
@@ -433,7 +441,7 @@ class LLMPool:
             return
 
         if kind in ("rate", "server", "network", "empty", "other"):
-            state.failures += 1
+            state.failures = threshold if half_open else state.failures + 1
             if quota and state.failures < threshold:
                 # 配额类 429 一次就足以说明端点当前不可用，
                 # 不必等连续 N 次，也不该把重试预算浪费在秒级重试上。
@@ -667,7 +675,8 @@ class LLMPool:
                     logger.warning(
                         f"[LLM] {candidate.label()} 未预期异常：{exc}", exc_info=True
                     )
-                    self._report_failure(candidate.provider.name, "other", str(exc))
+                    if use_breaker:
+                        self._report_failure(candidate.provider.name, "other", str(exc))
                     break
 
         summary = self.failure_summary(config_llm, need)

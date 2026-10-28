@@ -390,8 +390,13 @@ class FollowupStore:
             logger.warning(f"[追问] 重建日志索引失败：{exc}")
             return None
         if digest is not None:
+            # 归档目录里的解压结果：存在时日志工具直接复用，不必再解压
+            extract_dir = self.history.extracted_dir(name, record.id)
+            if extract_dir.is_dir():
+                digest.extract_dir = str(extract_dir)
             logger.info(
-                f"[追问] 已由归档日志包重建索引（{len(digest.all_members)} 个成员）"
+                f"[追问] 已由归档日志包重建索引（{len(digest.all_members)} 个成员"
+                + ("，复用已解压目录）" if digest.extract_dir else "）")
             )
         return digest
 

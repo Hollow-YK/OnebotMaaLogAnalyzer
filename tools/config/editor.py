@@ -1004,7 +1004,7 @@ const LABELS = {
   'settings.cleanup_after_done': '完成后清理临时文件',
   'settings.save_digest_debug': '保存摘要调试文件',
   'settings.max_zip_size_mb': '压缩包上限（MB）',
-  'settings.max_total_uncompressed_mb': '解压总量上限（MB）',
+  'settings.max_total_uncompressed_mb': '解压总量上限（MB，超限直接跳过分析）',
   'settings.max_prompt_chars': '提示词字符上限',
   'settings.max_zip_members': '成员数上限',
   'settings.max_log_files': '日志文件数上限',

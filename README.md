@@ -13,7 +13,7 @@
 - **自动分析** — 匹配到日志包立即下载分析，无需任何人操作
 - **多 UI 适配** — 自动识别 MXU / MFAAvalonia / MaaFwApp 日志包布局与命名，解析 UI 类型、软件版本、资源版本、MaaFramework 版本；**无需配置文件名前缀**，下载后校验布局避免误判；自动合并分卷包
 - **智能摘要** — 按 UI 布局选择框架日志 / UI 日志 / 运行记录，提取错误/警告/失败/异常/OCR 识别失败片段与配置摘要；大日志流式扫描，按签名去重只保留关键片段
-- **AI 可读原始文件** — 摘要之外，AI 可用工具自主检索**日志压缩包**与**项目代码仓库**内的原始内容（只读、不落盘）
+- **AI 可读原始文件** — 摘要之外，AI 可用工具自主检索**日志压缩包**与**项目代码仓库**内的原始内容（只读；压缩包按需解压到临时目录，用完即删）
 - **图片化报告** — 报告正文、截图与文件卡片由无头浏览器渲染成图片发送，取消单条 3500 字限制；浏览器缺失时自动回退纯文本
 - **多模态看图** — 错误截图可自动注入视觉模型；AI 也可用 `[看图@日志: xxx.png]` 主动请求查看（不发送给用户）
 - **模型自主附件** — AI 用 `[附件@日志: xxx.png]` / `[附件@项目: yyy.json]` 声明，Bot 按来源与相对路径取出；图片内联、文件上传群文件
@@ -154,7 +154,7 @@ MaaFwApp 取 `device_info.txt` 的 `Version` / `MaaFwApp` / `Framework`。未知
 
 - **附件路径沙箱** — 只接受相对路径，拒绝绝对路径与任何 `..` 上跳组件；项目路径解析符号链接后必须仍在仓库根目录内，请求路径与实际路径均校验凭据密钥规则；必须指定来源（`@日志` / `@项目`），不跨来源回退
 - **凭据保护** — `.git` / `.env` / `id_rsa` / `.pem` 等凭据密钥类文件一律禁止外发（详见[结果附件](docs/attachments.md#敏感文件保护)）
-- **安全读取** — 通过 `get_group_file_url` 下载，zip 只在临时目录解析，不直接解压到外部路径
+- **安全读取** — 通过 `get_group_file_url` 下载；下载后先只读 zip 目录校验解压后总大小（默认上限 1 GB，超限直接回「内容过多」并跳过分析），通过后才解压到临时目录并在用完后删除
 - **仓库只读** — 只读取仓库文本文件，**绝不执行任何仓库代码**；路径先 `resolve` 再校验位于仓库根内
 - **保护本地开发** — 工作区有未提交改动时拒绝 `checkout`（`refuse_dirty_worktree`），分析后精确还原到分析前的 ref
 - **提示词隔离** — 使用专用 `system_prompt`，不复用聊天人设或历史上下文；`system_prompt` 不可通过指令修改
@@ -166,7 +166,7 @@ MaaFwApp 取 `device_info.txt` 的 `Version` / `MaaFwApp` / `Framework`。未知
 - [OneBot v11](https://github.com/botuniverse/onebot-11)
 - [MaaFramework](https://github.com/MaaXYZ/MaaFramework)
   ![license](https://img.shields.io/github/license/MaaXYZ/MaaFramework?style=flat-square) 基于图像识别的自动化黑盒测试框架
-- [MaaFramework](https://github.com/deepseek-ai/deepseek-harness)
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
   ![license](https://img.shields.io/github/license/deepseek-ai/deepseek-harness?style=flat-square) DeepSeek Harness: Everything is a Plugin.
 
 ### 贡献/参与者

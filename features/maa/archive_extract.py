@@ -1,0 +1,389 @@
+"""
+安全解压日志压缩包 — 让文件工具按**普通文件**读取，而不是在内存里解压 ZIP 成员。
+
+对齐 dsh 的做法：模型侧的文件工具面向真实文件系统（`read` / 搜索 / 列目录），
+解压是一次性的准备工作。这样：
+
+  - 读取逻辑与仓库工具一致（行号窗口、单行宽度、续读提示）；
+  - 多次工具调用不必反复打开压缩包、重建成员索引；
+  - 解压结果可以**跨追问复用**：目录放在 `data/<配置>/history/` 下，
+    与历史记录同生命周期（`history/<记录>/extracted/`），文件工具直接命中，
+    不再重复解压；记录被清理时整目录一起删除。
+  - 内存占用与成员大小无关（解压是流式落盘，不是整体读入）。
+
+**解压后总大小是唯一闸门**：`probe_archive()` 在下载完成后、摘要与 AI 之前
+只读 zip 中央目录求和，超限直接判定“内容过多”并跳过整次分析。因此进入后续
+流程的压缩包一律视为“已符合大小限制”，下游不再各自比对总量。
+
+解压本身是攻击面，所以所有校验都在**写盘之前**完成：
+
+  - 成员名走 `normalize_tool_path`：拒绝绝对路径、盘符、`..` 与空字节
+  - 拒绝符号链接条目（zip 的高位属性），避免把链接指向根目录之外
+  - 拒绝凭据 / 密钥类文件名（`.env`、`.git`、私钥等）
+  - 成员数上限；解压时按**实际写出字节**复核总大小（zip 头可能被伪造），
+    超限即中止整次解压并清理
+  - 落盘路径必须位于解压根目录内（`resolve` 后再校验一次）
+
+失败一律降级：跳过该成员/中止解压并记录 notes，绝不向调用方抛异常。
+"""
+from __future__ import annotations
+
+import json
+import logging
+import shutil
+import stat
+import tempfile
+import time
+import zipfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from features.maa.safety import (
+    is_sensitive_path,
+    normalize_tool_path,
+    resolve_repo_path,
+)
+from features.maa.text_utils import format_bytes
+
+logger = logging.getLogger("Maa.ArchiveExtract")
+
+_CHUNK_BYTES = 64 * 1024
+# 解压后总大小默认上限（MB），与 settings.max_total_uncompressed_mb 一致
+DEFAULT_TOTAL_LIMIT_MB = 1024
+# 复用标记：记录压缩包指纹与成员列表，命中即可跳过解压
+_MARKER = ".maa-extracted.json"
+
+
+@dataclass
+class ArchiveProbe:
+    """解压前的廉价体检结果（只读中央目录，不解压任何成员）。"""
+
+    ok: bool
+    total_bytes: int = 0
+    member_count: int = 0
+    reason: str = ""
+
+    def summary(self) -> str:
+        return f"{format_bytes(self.total_bytes)} / {self.member_count} 个文件"
+
+
+def probe_archive(zip_path: str, max_total_mb: int = 0) -> ArchiveProbe:
+    """
+    只读 zip 中央目录，判断解压后总大小是否超限。
+
+    这是整套流程的**唯一大小闸门**：通过之后，摘要与日志工具都无需再比对总量。
+    zip 头声明的大小可能被伪造，因此解压时仍按实际写出字节复核一次——
+    那属于同一闸门的执行，而不是第二套策略。
+    """
+    limit_bytes = max(1, int(max_total_mb or DEFAULT_TOTAL_LIMIT_MB)) * 1024 * 1024
+    if not zip_path or not Path(zip_path).is_file():
+        return ArchiveProbe(ok=False, reason="压缩包不存在或不可读")
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            infos = archive.infolist()
+    except (OSError, zipfile.BadZipFile) as exc:
+        return ArchiveProbe(
+            ok=False, reason=f"压缩包无法读取（{type(exc).__name__}）"
+        )
+
+    total = sum(max(0, int(info.file_size or 0)) for info in infos)
+    count = sum(1 for info in infos if not info.is_dir())
+    if total > limit_bytes:
+        return ArchiveProbe(
+            ok=False, total_bytes=total, member_count=count,
+            reason=(
+                f"日志包内容过多：解压后约 {format_bytes(total)}"
+                f"（{count} 个文件），超过上限 {format_bytes(limit_bytes)}，"
+                f"已跳过分析。确需分析请调大 max_total_uncompressed_mb。"
+            ),
+        )
+    return ArchiveProbe(ok=True, total_bytes=total, member_count=count)
+
+
+def _is_symlink_entry(info: zipfile.ZipInfo) -> bool:
+    """zip 成员是否声明为符号链接（unix 模式位在高 16 位）。"""
+    mode = (info.external_attr >> 16) & 0xFFFF
+    return stat.S_ISLNK(mode)
+
+
+def cleanup_stale_dirs(base_dir: Path, max_age_hours: float = 6.0) -> int:
+    """
+    清理 `base_dir` 下超过时限的子目录（崩溃遗留的解压/暂存目录）。
+
+    只按 mtime 判断年龄，因此只能传“专用于解压产物”的容器目录
+    （如 `history/.staging`、`extract/`），不要传历史记录目录本身。
+    返回删除的目录数。
+    """
+    root = Path(base_dir)
+    if not root.is_dir():
+        return 0
+    cutoff = time.time() - max(0.0, float(max_age_hours)) * 3600
+    removed = 0
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            if entry.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+            logger.info(f"[解压] 清理遗留目录：{entry}")
+        except OSError:
+            continue
+    return removed
+
+
+class ExtractedArchive:
+    """
+    一个已安全解压的日志压缩包（按需解压、可跨多次调用/追问复用）。
+
+    `target_dir` 指定解压位置（通常是 `data/<配置>/history/<记录>/extracted`），
+    存在且标记与压缩包一致时**直接复用**，不再重复解压；`close()` 只释放内存状态，
+    删除目录由调用方用 `discard()` 决定，从而让解压结果的生命周期与历史记录
+    （也就是追问能力）对齐。
+    """
+
+    def __init__(self, zip_path: str, *, target_dir: str = "",
+                 max_total_mb: int = 0, max_members: int = 3000):
+        self.zip_path = str(zip_path or "")
+        self.target_dir = Path(target_dir) if target_dir else None
+        self.max_total_mb = max(1, int(max_total_mb or DEFAULT_TOTAL_LIMIT_MB))
+        self.max_total_bytes = self.max_total_mb * 1024 * 1024
+        self.max_members = max(1, int(max_members or 3000))
+        self.root: Optional[Path] = None
+        # 已成功落盘的成员（posix 相对路径），按压缩包内顺序
+        self.members: list[str] = []
+        self.notes: list[str] = []
+        # 内容超过上限：整次解压作废，工具全部拒绝服务
+        self.overflow = False
+        # 本次是否复用了已有目录（用于日志与统计）
+        self.reused = False
+        self._done = False
+        self._written = 0
+        # 实际使用的目录：即使 close() 清了 root，discard() 仍能找到它
+        self._created_root: Optional[Path] = None
+
+    # ── 生命周期 ──
+
+    def ensure(self) -> Optional[Path]:
+        """按需解压一次；返回根目录，失败或超限返回 None。"""
+        if self._done:
+            return self.root
+        self._done = True
+        if not self.zip_path or not Path(self.zip_path).is_file():
+            self.notes.append("压缩包不存在或不可读")
+            return None
+
+        # 闸门：先只读中央目录判断总大小，超限的包一个字节都不落盘
+        probe = probe_archive(self.zip_path, self.max_total_mb)
+        if not probe.ok:
+            self.overflow = probe.total_bytes > 0
+            self.notes.append(probe.reason)
+            logger.info(f"[解压] 跳过：{probe.reason}")
+            return None
+
+        # 已有可用目录：直接复用（追问 / 重启后不必再解压一遍）
+        reused = self._load_marker()
+        if reused is not None:
+            self.root = self.target_dir
+            self._created_root = self.target_dir
+            self.members = reused
+            self.reused = True
+            logger.info(
+                f"[解压] 复用已解压目录（{len(self.members)} 个文件）："
+                f"{self.target_dir}"
+            )
+            return self.root
+
+        try:
+            self.root = self.target_dir or Path(tempfile.mkdtemp(prefix="maa_logs_"))
+            self._created_root = self.root
+            if self.root.exists():
+                # 标记对不上（压缩包换过 / 目录被改过）：整目录重来，避免残留混合
+                shutil.rmtree(self.root, ignore_errors=True)
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._extract()
+            if self.overflow:
+                # zip 头声明与实际不符：解压中途发现超限，整次作废
+                self.notes.append(
+                    f"实际解压超出上限 {format_bytes(self.max_total_bytes)}，"
+                    f"已中止并清理"
+                )
+                self.discard()
+                return None
+            if not self.members:
+                self.notes.append("压缩包内没有可读取的文件")
+            else:
+                self._write_marker()
+        except Exception as exc:   # 解压失败一律降级为“工具不可用”
+            logger.warning(f"[解压] 失败，工具不可用：{exc}")
+            self.notes.append(f"解压失败：{type(exc).__name__}")
+            self.discard()
+        return self.root
+
+    def close(self) -> None:
+        """
+        释放内存状态，**不删除目录**。
+
+        解压结果的生命周期由调用方决定：写进历史记录的保留到追问失效，
+        没有历史记录的在分析结束时 `discard()`。
+        """
+        self.root = None
+        self.members = []
+
+    def discard(self) -> None:
+        """删除解压目录（没有历史记录、或解压失败时调用）。"""
+        root = self._created_root or self.root or self.target_dir
+        self.root = None
+        self.members = []
+        self._created_root = None
+        if root is not None:
+            shutil.rmtree(root, ignore_errors=True)
+
+    # ── 复用标记 ──
+
+    def _marker_path(self) -> Optional[Path]:
+        return (self.target_dir / _MARKER) if self.target_dir else None
+
+    def _zip_signature(self) -> dict:
+        try:
+            stat_result = Path(self.zip_path).stat()
+        except OSError:
+            return {}
+        return {"zip_size": stat_result.st_size, "zip_mtime": int(stat_result.st_mtime)}
+
+    def _load_marker(self) -> Optional[list[str]]:
+        """标记与当前压缩包一致时返回成员列表，否则 None（需要重新解压）。"""
+        marker = self._marker_path()
+        if marker is None or not marker.is_file():
+            return None
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get("signature") != self._zip_signature():
+            return None
+        members = data.get("members")
+        if not isinstance(members, list):
+            return None
+        # 目录被外部删掉了一部分：宁可重新解压，也不要返回残缺结果
+        root = self.target_dir
+        assert root is not None
+        for rel in members:
+            if not isinstance(rel, str) or not (root / rel).is_file():
+                return None
+        return [str(rel) for rel in members]
+
+    def _write_marker(self) -> None:
+        marker = self._marker_path()
+        if marker is None:
+            return
+        try:
+            marker.write_text(
+                json.dumps({
+                    "signature": self._zip_signature(),
+                    "members": self.members,
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.info(f"[解压] 写入复用标记失败（不影响读取）：{exc}")
+
+    # ── 解压 ──
+
+    def _extract(self) -> None:
+        root = self.root
+        assert root is not None
+        with zipfile.ZipFile(self.zip_path) as archive:
+            infos = archive.infolist()
+            if len(infos) > self.max_members:
+                self.notes.append(
+                    f"压缩包成员 {len(infos)} 个，超过上限 {self.max_members}，"
+                    f"只解压前 {self.max_members} 个"
+                )
+            for info in infos[: self.max_members]:
+                if info.is_dir():
+                    continue
+                rel = normalize_tool_path(info.filename)
+                if not rel:
+                    self.notes.append(f"跳过非法路径：{info.filename}")
+                    continue
+                if is_sensitive_path(rel):
+                    self.notes.append(f"跳过敏感文件：{rel}")
+                    continue
+                if _is_symlink_entry(info):
+                    self.notes.append(f"跳过符号链接：{rel}")
+                    continue
+                if not self._extract_one(archive, info, rel):
+                    # 实际解压字节超出闸门：中止整次解压（不回退为部分内容）
+                    self.overflow = True
+                    break
+
+    def _extract_one(self, archive: zipfile.ZipFile,
+                     info: zipfile.ZipInfo, rel: str) -> bool:
+        """解压单个成员；返回 False 表示实际解压量超限，应中止整次解压。"""
+        root = self.root
+        assert root is not None
+        candidate = root / rel
+        try:
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            # 先落一个空文件，再用严格解析确认真实路径仍在根目录内；
+            # 解压过程只写我们自己创建的文件，不跟随任何符号链接。
+            candidate.touch(exist_ok=True)
+        except OSError as exc:
+            self.notes.append(f"跳过无法创建的路径 {rel}：{exc.__class__.__name__}")
+            return True
+        target, _error = resolve_repo_path(root, rel)
+        if target is None:
+            self.notes.append(f"跳过越界路径：{rel}")
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return True
+
+        written = 0
+        try:
+            with archive.open(info) as source, target.open("wb") as sink:
+                while True:
+                    chunk = source.read(_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    # 先判断上限再写：written 始终等于真正落盘的字节数
+                    if self._written + written + len(chunk) > self.max_total_bytes:
+                        try:
+                            target.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        return False
+                    sink.write(chunk)
+                    written += len(chunk)
+        except Exception as exc:
+            # 单个成员失败（损坏的压缩数据、非法文件名等）只跳过该成员
+            self.notes.append(f"跳过无法解压的 {rel}：{exc.__class__.__name__}")
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return True
+
+        self._written += written
+        self.members.append(rel)
+        return True
+
+    # ── 查询 ──
+
+    def file_path(self, rel: str) -> Optional[Path]:
+        """把包内相对路径解析为解压后的真实路径（越界/敏感返回 None）。"""
+        root = self.root
+        if root is None:
+            return None
+        path, _error = resolve_repo_path(root, rel)
+        return path

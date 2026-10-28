@@ -492,12 +492,19 @@ class LogWatcher:
                 continue
 
             if seg.kind == "image":
+                if not seg.data:
+                    # 空数据会变成 base64:// 空图片，不能发出去
+                    logger.warning(f"[监听] 图片片段内容为空，已跳过：{seg.label}")
+                    continue
                 buffer.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(seg.data).decode()
                 }})
                 continue
 
             # 文件：混排缓冲区先发完，再单独上传
+            if not seg.data:
+                logger.warning(f"[监听] 文件片段内容为空，已跳过：{seg.label}")
+                continue
             await flush()
             try:
                 ok = await self.s.send_file(group_id, seg.name, seg.data)
