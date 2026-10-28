@@ -166,7 +166,7 @@ MaaFwApp 取 `device_info.txt` 的 `Version` / `MaaFwApp` / `Framework`。未知
 - [OneBot v11](https://github.com/botuniverse/onebot-11)
 - [MaaFramework](https://github.com/MaaXYZ/MaaFramework)
   ![license](https://img.shields.io/github/license/MaaXYZ/MaaFramework?style=flat-square) 基于图像识别的自动化黑盒测试框架
-- [MaaFramework](https://github.com/deepseek-ai/deepseek-harness)
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
   ![license](https://img.shields.io/github/license/deepseek-ai/deepseek-harness?style=flat-square) DeepSeek Harness: Everything is a Plugin.
 
 ### 贡献/参与者
