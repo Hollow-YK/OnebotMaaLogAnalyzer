@@ -605,7 +605,7 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `cleanup_after_done` | `bool` / `true` | 分析完成后清理临时文件 | `"cleanup_after_done": false` |
 | `save_digest_debug` | `bool` / `false` | 把实际发送给 AI 的摘要保存到 `data/debug_digests` | `"save_digest_debug": true` |
 | `max_zip_size_mb` | `int` / `100` | zip 下载大小上限 MB | `"max_zip_size_mb": 200` |
-| `max_total_uncompressed_mb` | `int` / `120` | 解压总大小上限 MB | `"max_total_uncompressed_mb": 250` |
+| `max_total_uncompressed_mb` | `int` / `120` | 解压总大小上限 MB（摘要提取与日志包工具解压共用） | `"max_total_uncompressed_mb": 250` |
 | `max_prompt_chars` | `int` / `200000` | 摘要字符上限（token 预算的兜底，按优先级裁剪） | `"max_prompt_chars": 150000` |
 | `max_zip_members` | `int` / `300` | 压缩包内成员数上限 | `"max_zip_members": 500` |
 | `max_log_files` | `int` / `6` | 最多处理日志文件数（按 UI 布局优先选框架日志 / UI 日志 / 运行记录） | `"max_log_files": 8` |

@@ -3,6 +3,7 @@
 Run with: python -m unittest discover -s tests -v.
 """
 import asyncio
+import stat
 import tempfile
 import threading
 import unittest
@@ -235,13 +236,12 @@ class ToolReadCapTests(unittest.TestCase):
         )
         (self.repo_root / "oneline.txt").write_text("E" * 200_000, encoding="utf-8")
 
-    def _log_tools(self):
-        return LogArchiveTools(str(self.zip_path), max_file_kb=64)
+    def _log_tools(self, **kwargs):
+        return LogArchiveTools(str(self.zip_path), max_file_kb=64, **kwargs)
 
     def test_log_read_is_byte_capped(self):
         # 结果字符预算放大到 200k，让 64 KB 的单文件读取上限先触发
-        tools = LogArchiveTools(str(self.zip_path), max_file_kb=64,
-                                max_result_chars=200000)
+        tools = self._log_tools(max_result_chars=200000)
         try:
             out = asyncio.run(tools.read_file("logs/huge.log"))
             self.assertIn("仅前 64 KB", out)
@@ -315,6 +315,91 @@ class ToolReadCapTests(unittest.TestCase):
         ))
         self.assertIn("超出范围", out)
         self.assertIn("1 行", out)
+
+
+class ArchiveExtractionTests(unittest.TestCase):
+    """解压到临时目录的安全边界（对齐 dsh 的“工具读真实文件”）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="maa_extract_"))
+        self.zip_path = self.tmp / "logs.zip"
+        with zipfile.ZipFile(self.zip_path, "w") as archive:
+            archive.writestr("logs/ok.log", "hello\nworld\n")
+            archive.writestr("logs/sub/deep.log", "deep\n")
+            archive.writestr("logs/.env", "SECRET=1\n")
+            archive.writestr("../escape.txt", "escaped\n")
+            archive.writestr("logs/", "")
+            link = zipfile.ZipInfo("logs/link.log")
+            link.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(link, "../../etc/passwd")
+
+    def test_extracts_only_safe_members(self):
+        tools = LogArchiveTools(str(self.zip_path))
+        try:
+            root_listing = asyncio.run(tools.list_files())
+            self.assertIn("logs/", root_listing)
+            listing = asyncio.run(tools.list_files("logs"))
+            self.assertIn("ok.log", listing)
+            self.assertIn("sub/", listing)
+            self.assertNotIn(".env", listing)
+            self.assertNotIn("link.log", listing)
+            self.assertNotIn("escape", listing)
+            out = asyncio.run(tools.read_file("logs/ok.log"))
+            self.assertIn("[行 1] hello", out)
+            self.assertIn("[行 2] world", out)
+        finally:
+            tools.close()
+
+    def test_rejects_traversal_escape_and_sensitive_reads(self):
+        tools = LogArchiveTools(str(self.zip_path))
+        try:
+            self.assertIn("路径非法", asyncio.run(tools.read_file("../escape.txt")))
+            self.assertIn("拒绝", asyncio.run(tools.read_file("logs/.env")))
+        finally:
+            tools.close()
+
+    def test_available_does_not_extract(self):
+        tools = LogArchiveTools(str(self.zip_path))
+        try:
+            self.assertTrue(tools.available())
+            self.assertIsNone(tools._extract.root)   # 未触发解压
+            asyncio.run(tools.list_files())
+            self.assertIsNotNone(tools._extract.root)  # 首次工具调用才解压
+        finally:
+            tools.close()
+
+    def test_temp_dir_removed_on_close_and_reused_between_calls(self):
+        tools = LogArchiveTools(str(self.zip_path))
+        asyncio.run(tools.list_files())
+        root = tools._extract.root
+        self.assertIsNotNone(root)
+        self.assertTrue(Path(root).is_dir())
+        asyncio.run(tools.list_files())            # 复用同一目录
+        self.assertEqual(tools._extract.root, root)
+        tools.close()
+        self.assertFalse(Path(root).exists())
+
+    def test_total_cap_stops_extraction(self):
+        big = self.tmp / "big.zip"
+        with zipfile.ZipFile(big, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("a.log", "x" * (2 * 1024 * 1024))
+            archive.writestr("b.log", "y" * (2 * 1024 * 1024))
+        tools = LogArchiveTools(str(big), max_total_mb=1)
+        try:
+            asyncio.run(tools.list_files())
+            notes = "；".join(tools._extract.notes)
+            self.assertIn("总解压上限", notes)
+            self.assertEqual(len(tools._extract.members), 1)
+        finally:
+            tools.close()
+
+    def test_missing_zip_reports_unavailable(self):
+        tools = LogArchiveTools(str(self.tmp / "nope.zip"))
+        try:
+            self.assertFalse(tools.available())
+            self.assertIn("不可用", asyncio.run(tools.read_file("a.log")))
+        finally:
+            tools.close()
 
 
 if __name__ == "__main__":   # pragma: no cover

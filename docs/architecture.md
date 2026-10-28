@@ -51,7 +51,8 @@ OnebotMaaLogAnalyzer/
 │       ├── log_digest.py       # 日志摘要提取（核心算法，按 UI 布局选择日志）
 │       ├── repo.py             # 项目代码检索（仓库/版本/tag 管理）
 │       ├── repo_tools.py       # agent 模式的仓库工具集（含路径沙箱）
-│       ├── log_tools.py        # 日志包工具（AI 自主读压缩包内原始文件）
+│       ├── log_tools.py        # 日志包工具（解压到临时目录后按普通文件读取）
+│       ├── archive_extract.py  # 安全解压（路径/符号链接/敏感文件/字节上限）
 │       ├── attachments.py      # 结果附件（来源限定 + 相对路径沙箱 + 看图指令）
 │       ├── render/             # 图片化报告（Markdown → 无头浏览器 → 分页截图）
 │       ├── safety.py           # 路径安全策略（凭据/密钥类文件禁止外发）

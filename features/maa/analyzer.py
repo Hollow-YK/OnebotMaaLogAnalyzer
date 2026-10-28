@@ -833,6 +833,7 @@ class MaaAnalyzer:
                                         2000, int(project.repo.max_tool_result_chars or 30000)
                                     ),
                                     max_result_tokens=int(project.repo.max_tool_result_tokens or 0),
+                                    max_total_mb=int(settings.max_total_uncompressed_mb or 0),
                                 ) if settings.log_tools_enabled else None,
                             ),
                             timeout=stage_timeout,
@@ -1943,6 +1944,7 @@ class MaaAnalyzer:
                         2000, int(repo_cfg.max_tool_result_chars or 30000)
                     ),
                     max_result_tokens=int(repo_cfg.max_tool_result_tokens or 0),
+                    max_total_mb=int(settings.max_total_uncompressed_mb or 0),
                 )
                 if candidate.available():
                     log_tools = candidate

@@ -134,7 +134,7 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `max_zip_size_mb` | `100` | zip 下载大小上限 MB |
-| `max_total_uncompressed_mb` | `120` | 解压总大小上限 MB |
+| `max_total_uncompressed_mb` | `120` | 解压总大小上限 MB（摘要提取与日志包工具的解压共用此上限） |
 | `max_zip_members` | `300` | 压缩包内成员数上限 |
 | `max_prompt_chars` | `200000` | 摘要字符上限（作为 token 预算的兜底；按优先级裁剪，不会先丢关键证据） |
 | `max_log_files` | `6` | 最多处理日志文件数（按 UI 布局优先选择框架日志 / UI 日志 / 运行记录） |
