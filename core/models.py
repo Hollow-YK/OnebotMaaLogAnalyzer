@@ -506,7 +506,10 @@ class AnalysisSettings(BaseModel):
 
     # ── 压缩包与摘要 ──
     max_zip_size_mb: int = 100
-    max_total_uncompressed_mb: int = 120
+    # 解压后总大小上限（MB）：下载完成后只读 zip 中央目录求和，
+    # 超限直接判定“内容过多”并跳过整次分析（不提取摘要、不调用 AI）。
+    # 通过之后下游不再比对总量。
+    max_total_uncompressed_mb: int = 1024
     max_prompt_chars: int = 200000
     max_zip_members: int = 300
     max_log_files: int = 6

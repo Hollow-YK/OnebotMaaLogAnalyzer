@@ -46,7 +46,7 @@ OnebotMaaLogAnalyzer/
 ├── features/            # [功能] 所有业务功能
 │   └── maa/             #   [日志分析]
 │       ├── watcher.py          # 日志包监听（主要触发入口）
-│       ├── analyzer.py         # 下载 → 摘要 → 仓库检索 → LLM → 报告 流程编排
+│       ├── analyzer.py         # 下载 → 内容闸门 → 摘要 → 仓库检索 → LLM → 报告 流程编排
 │       ├── archive_profile.py  # 日志包 UI 类型 / 软件版本 / MaaFramework 版本识别
 │       ├── log_digest.py       # 日志摘要提取（核心算法，按 UI 布局选择日志）
 │       ├── repo.py             # 项目代码检索（仓库/版本/tag 管理）

@@ -59,6 +59,7 @@ _FIELD_LABELS: dict[str, str] = {
     "history_max_records": "历史记录条数上限",
     "history_max_total_mb": "历史占用上限 MB",
     "max_zip_size_mb": "zip 大小上限 MB",
+    "max_total_uncompressed_mb": "解压后总大小上限 MB（超限直接跳过分析）",
     "max_log_files": "最多处理日志文件数",
     "max_prompt_chars": "摘要字符上限（token 预算的兜底）",
     "ai_stage_timeout_seconds": "整个 AI 阶段超时（秒）",

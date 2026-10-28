@@ -29,7 +29,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Optional
 
 from core.tokens import clamp_tool_result_tokens, trim_to_tokens
-from features.maa.archive_extract import ExtractedArchive
+from features.maa.archive_extract import (
+    DEFAULT_TOTAL_LIMIT_MB,
+    ExtractedArchive,
+)
 from features.maa.log_digest import IMAGE_SUFFIXES
 from features.maa.safety import (
     describe_rejection,
@@ -45,8 +48,6 @@ _CHUNK_BYTES = 64 * 1024
 # 单行缓冲上限（字节）。超过即视为超长行：丢弃多余字节并在输出时标注，
 # 避免“整条日志没有换行”把内存吃满。
 _MAX_LINE_BYTES = MAX_LINE_CHARS * 4
-# 解压默认总上限（MB），与 settings.max_total_uncompressed_mb 默认值一致
-_DEFAULT_TOTAL_MB = 120
 
 # 明显是二进制、不适合按文本读取的扩展名
 _BINARY_SUFFIXES = {
@@ -71,13 +72,12 @@ class LogArchiveTools:
         self.max_result_chars = max(2000, int(max_result_chars or 30000))
         self.max_search_files = max(50, int(max_search_files or 2000))
         self.max_result_tokens = clamp_tool_result_tokens(max_result_tokens)
-        total_mb = int(max_total_mb or 0) or _DEFAULT_TOTAL_MB
-        # 单文件解压上限取读取窗口的 4 倍：一次 read 最多消费一个窗口，
-        # 留出 start_line 深入阅读的余量，同时避免单个成员吃掉全部磁盘配额。
+        total_mb = int(max_total_mb or 0) or DEFAULT_TOTAL_LIMIT_MB
+        # 解压后总大小由 `probe_archive` 统一把关（下载后、AI 之前），
+        # 这里只负责把同一上限交给解压器复核，不再单独设单文件上限。
         self._extract = ExtractedArchive(
             self.zip_path,
-            max_total_bytes=total_mb * 1024 * 1024,
-            max_file_bytes=max(1024 * 1024, self.max_read_bytes * 4),
+            max_total_mb=total_mb,
             max_members=3000,
         )
 
@@ -110,6 +110,8 @@ class LogArchiveTools:
     def _unavailable(self) -> str:
         notes = [note for note in self._extract.notes if note]
         detail = f"（{'；'.join(notes[:3])}）" if notes else ""
+        if self._extract.overflow:
+            return (f"日志包内容过多，工具不可用{detail}")
         return f"日志包不可用（可能已被清理或无法解压）{detail}"
 
     # ════════════════════════════════════════════════════════════

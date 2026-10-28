@@ -47,6 +47,7 @@ from features.maa.archive_profile import (
     ArchiveProfile,
     parse_archive_part,
 )
+from features.maa.archive_extract import probe_archive
 from features.maa.log_digest import (
     IMAGE_SUFFIXES,
     DigestOptions,
@@ -185,7 +186,7 @@ def build_digest_options(settings: AnalysisSettings,
     return DigestOptions(
         max_prompt_chars=prompt_chars,
         max_zip_members=max(20, int(settings.max_zip_members or 300)),
-        max_total_uncompressed_bytes=max(10, int(settings.max_total_uncompressed_mb or 120)) * 1024 * 1024,
+        max_total_uncompressed_bytes=max(1, int(settings.max_total_uncompressed_mb or 1024)) * 1024 * 1024,
         max_file_read_bytes=max(64, int(settings.max_log_file_read_kb or 512)) * 1024,
         small_log_full_read_bytes=max(1, int(settings.small_log_full_read_mb or 5)) * 1024 * 1024,
         stream_medium_logs=bool(settings.stream_medium_logs),
@@ -738,6 +739,22 @@ class MaaAnalyzer:
                         "仅分析当前分卷。"
                     )
             logger.info(f"[分析] 已下载 {file_name}，大小 {format_bytes(downloaded)}")
+
+            # 内容闸门：只读 zip 中央目录，解压后总大小超限的直接跳过，
+            # 不提取摘要、不准备仓库、不调用 AI。通过之后下游无需再比对总量。
+            overflow = self.archive_limit_error(settings, str(zip_path))
+            if overflow:
+                self._finish_job(config_name, job, "已跳过", overflow)
+                logger.info(f"[分析] {overflow}（{file_name}）")
+                return AnalysisOutcome(
+                    ok=False,
+                    skipped=True,
+                    file_name=file_name,
+                    downloaded=downloaded,
+                    error=overflow,
+                )
+            logger.info(f"[分析] 内容检查通过：{file_name}")
+
             if progress:
                 await progress("日志包已下载，正在提取错误摘要。")
 
@@ -1021,6 +1038,21 @@ class MaaAnalyzer:
             self.s, group_id, file_name, file_size=file_size
         )
         return found.file_id if found else None
+
+    @staticmethod
+    def archive_limit_error(settings: AnalysisSettings, zip_path: str) -> str:
+        """
+        内容闸门：解压后总大小超限时返回给用户看的提示，否则空串。
+
+        下载完成后、摘要与 AI 之前调用一次即可——通过之后，摘要与日志工具
+        都不再比对总量；解压时只按实际写出字节复核，防止 zip 头造假。
+        """
+        probe = probe_archive(
+            zip_path, int(settings.max_total_uncompressed_mb or 0)
+        )
+        if probe.ok:
+            return ""
+        return probe.reason or "日志包内容无法分析。"
 
     @staticmethod
     def _skip_reason(digest: DigestResult, project: ProjectConfig) -> str:

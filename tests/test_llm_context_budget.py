@@ -10,8 +10,9 @@ import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
-from core.models import RepoConfig
+from core.models import AnalysisSettings, RepoConfig
 from core.tokens import (
     IMAGE_PART_TOKENS,
     MIN_TOOL_RESULT_TOKENS,
@@ -22,6 +23,7 @@ from core.tokens import (
     trim_to_tokens,
 )
 from features.maa.analyzer import MaaAnalyzer
+from features.maa.archive_extract import ArchiveProbe, probe_archive
 from features.maa.attachments import build_report_segments, text_segments
 from features.maa.log_digest import DigestResult
 from features.maa.log_tools import LogArchiveTools
@@ -379,19 +381,40 @@ class ArchiveExtractionTests(unittest.TestCase):
         tools.close()
         self.assertFalse(Path(root).exists())
 
-    def test_total_cap_stops_extraction(self):
+    def test_total_cap_aborts_extraction(self):
+        """解压后总大小超限：一个字节都不落盘，工具直接拒绝服务。"""
         big = self.tmp / "big.zip"
         with zipfile.ZipFile(big, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("a.log", "x" * (2 * 1024 * 1024))
             archive.writestr("b.log", "y" * (2 * 1024 * 1024))
         tools = LogArchiveTools(str(big), max_total_mb=1)
         try:
-            asyncio.run(tools.list_files())
-            notes = "；".join(tools._extract.notes)
-            self.assertIn("总解压上限", notes)
-            self.assertEqual(len(tools._extract.members), 1)
+            out = asyncio.run(tools.list_files())
+            self.assertIn("内容过多", out)
+            self.assertTrue(tools._extract.overflow)
+            self.assertIsNone(tools._extract.root)      # 未创建临时目录
+            self.assertEqual(tools._extract.members, [])
         finally:
             tools.close()
+
+    def test_runtime_guard_catches_lying_headers(self):
+        """zip 头谎报大小时，解压途中按实际字节复核并整次中止。"""
+        liar = self.tmp / "liar.zip"
+        with zipfile.ZipFile(liar, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("a.log", "x" * (3 * 1024 * 1024))
+        # 假装 probe 通过（模拟头声明 1 字节、实际 3 MB）
+        with mock.patch(
+            "features.maa.archive_extract.probe_archive",
+            return_value=ArchiveProbe(ok=True, total_bytes=1, member_count=1),
+        ):
+            tools = LogArchiveTools(str(liar), max_total_mb=1)
+            try:
+                out = asyncio.run(tools.list_files())
+                self.assertIn("内容过多", out)
+                self.assertTrue(tools._extract.overflow)
+                self.assertIsNone(tools._extract.root)   # 已清理，不留半成品
+            finally:
+                tools.close()
 
     def test_missing_zip_reports_unavailable(self):
         tools = LogArchiveTools(str(self.tmp / "nope.zip"))
@@ -400,6 +423,57 @@ class ArchiveExtractionTests(unittest.TestCase):
             self.assertIn("不可用", asyncio.run(tools.read_file("a.log")))
         finally:
             tools.close()
+
+
+class ArchiveLimitGateTests(unittest.TestCase):
+    """解压后总大小闸门：下载后立即判定，超限不做任何后续分析。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="maa_gate_"))
+        self.small = self.tmp / "small.zip"
+        with zipfile.ZipFile(self.small, "w") as archive:
+            archive.writestr("logs/a.log", "x" * 1024)
+        self.big = self.tmp / "big.zip"
+        with zipfile.ZipFile(self.big, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("logs/huge.log", "x" * (12 * 1024 * 1024))
+
+    def test_probe_accepts_within_limit(self):
+        probe = probe_archive(str(self.small), 1)
+        self.assertTrue(probe.ok)
+        self.assertEqual(probe.member_count, 1)
+        self.assertGreater(probe.total_bytes, 0)
+        self.assertEqual(probe.reason, "")
+
+    def test_probe_rejects_over_limit(self):
+        probe = probe_archive(str(self.big), 1)
+        self.assertFalse(probe.ok)
+        self.assertIn("内容过多", probe.reason)
+        self.assertIn("max_total_uncompressed_mb", probe.reason)
+        self.assertGreaterEqual(probe.total_bytes, 12 * 1024 * 1024)
+
+    def test_probe_handles_missing_and_broken_files(self):
+        self.assertIn("不存在", probe_archive(str(self.tmp / "nope.zip"), 1).reason)
+        broken = self.tmp / "broken.zip"
+        broken.write_bytes(b"not a zip")
+        self.assertIn("无法读取", probe_archive(str(broken), 1).reason)
+
+    def test_analyzer_gate_returns_user_message(self):
+        settings = AnalysisSettings(max_total_uncompressed_mb=1)
+        self.assertEqual(
+            MaaAnalyzer.archive_limit_error(settings, str(self.small)), ""
+        )
+        reason = MaaAnalyzer.archive_limit_error(settings, str(self.big))
+        self.assertIn("内容过多", reason)
+        self.assertIn("已跳过分析", reason)
+
+    def test_gate_respects_configured_limit(self):
+        settings = AnalysisSettings(max_total_uncompressed_mb=64)
+        self.assertEqual(
+            MaaAnalyzer.archive_limit_error(settings, str(self.big)), ""
+        )
+
+    def test_default_limit_is_one_gigabyte(self):
+        self.assertEqual(AnalysisSettings().max_total_uncompressed_mb, 1024)
 
 
 if __name__ == "__main__":   # pragma: no cover
