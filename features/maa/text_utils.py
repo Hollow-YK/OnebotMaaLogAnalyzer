@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+# 单行输出上限（字符）。超过时截断并标注——否则一行超长 JSON 会吃掉整段结果预算。
+MAX_LINE_CHARS = 2000
+
+
+def truncate_line(text: str, max_chars: int = MAX_LINE_CHARS) -> str:
+    """把单行裁剪到 `max_chars`，并标注这是行内截断（不是文件截断）。"""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}... (行已截断到 {max_chars} 字符)"
+
 
 def decode_bytes(data: bytes) -> str:
     """按常见日志编码解码字节串。"""

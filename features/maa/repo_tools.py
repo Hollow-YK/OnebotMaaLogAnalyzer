@@ -35,6 +35,7 @@ from features.maa.repo import (
 from features.maa.safety import (
     resolve_repo_path,
 )
+from features.maa.text_utils import truncate_line
 
 logger = logging.getLogger("Maa.RepoTools")
 
@@ -536,10 +537,12 @@ class RepoTools:
                 raw = raw[:cut]
 
         text = raw.decode("utf-8", "ignore")
-        lines = text.splitlines()
+        # 单行上限：一行超长 JSON 不应吃掉整段结果预算
+        lines = [truncate_line(line) for line in text.splitlines()]
         total = len(lines)
+        rel = self._display(self.provider.root, target)
         if total == 0:
-            return f"{self._display(self.provider.root, target)} 没有可读取的文本内容（{size} 字节）"
+            return f"{rel} 没有可读取的文本内容（{size} 字节）"
 
         def _as_int(value: Any) -> Optional[int]:
             try:
@@ -547,9 +550,12 @@ class RepoTools:
             except (TypeError, ValueError):
                 return None
 
-        start = _as_int(args.get("start_line")) or 1
+        start = max(1, _as_int(args.get("start_line")) or 1)
+        if start > total:
+            return (f"start_line={start} 超出范围：{rel} "
+                    + (f"已读取 {total} 行（仅前 {limit // 1024} KB）" if capped
+                       else f"共 {total} 行"))
         end = _as_int(args.get("end_line")) or total
-        start = max(1, min(start, total))
         end = max(start, min(end, total))
 
         # 单次返回字符预算
@@ -565,7 +571,6 @@ class RepoTools:
             used += len(line) + 1
             last = lineno
 
-        rel = self._display(self.provider.root, target)
         limit_kb = limit // 1024
         detail = (
             f"已读取 {total} 行（仅前 {limit_kb} KB）" if capped
@@ -575,10 +580,13 @@ class RepoTools:
                   f" 显示 行 {start}-{last}：\n")
         body = "\n".join(chunk)
         if last < end:
-            body += f"\n...[受 max_tool_result_chars 限制，行 {last + 1}-{end} 未显示，可用 start_line 继续读]"
+            body += (f"\n...[受 max_tool_result_chars 限制，可用 "
+                     f"start_line={last + 1} 继续读]")
         elif capped:
-            body += (f"\n...[文件超过 max_file_kb（{limit_kb} KB），"
-                     f"其后的内容未读取；可让仓库维护者调大该设置]")
+            body += (f"\n...[仅读取前 {limit_kb} KB，其后内容未读取；"
+                     f"可让仓库维护者调大 max_file_kb]")
+        elif end < total:
+            body += f"\n...[已到 end_line，可用 start_line={last + 1} 继续读]"
         return header + body
 
     async def _list_tags(self, args: dict) -> str:

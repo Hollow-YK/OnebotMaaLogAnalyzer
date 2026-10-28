@@ -224,7 +224,8 @@ class ToolReadCapTests(unittest.TestCase):
         self.zip_path = self.tmp / "logs.zip"
         line = "2026-10-28 05:00:00 ERROR node not found 节点未识别\n"
         with zipfile.ZipFile(self.zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("logs/huge.log", line * 40000)   # ~2 MB
+            archive.writestr("logs/huge.log", line * 40000)          # ~2 MB
+            archive.writestr("logs/oneline.log", "E" * 2_000_000)    # 没有换行
             archive.writestr("logs/small.log", "first\nsecond ERROR line\n")
             archive.writestr("logs/empty.log", "")
         self.repo_root = self.tmp / "repo"
@@ -232,24 +233,55 @@ class ToolReadCapTests(unittest.TestCase):
         (self.repo_root / "big.txt").write_text(
             "line ERROR 节点未识别\n" * 40000, encoding="utf-8"
         )
+        (self.repo_root / "oneline.txt").write_text("E" * 200_000, encoding="utf-8")
+
+    def _log_tools(self):
+        return LogArchiveTools(str(self.zip_path), max_file_kb=64)
 
     def test_log_read_is_byte_capped(self):
-        tools = LogArchiveTools(str(self.zip_path), max_file_kb=64)
+        # 结果字符预算放大到 200k，让 64 KB 的单文件读取上限先触发
+        tools = LogArchiveTools(str(self.zip_path), max_file_kb=64,
+                                max_result_chars=200000)
         try:
             out = asyncio.run(tools.read_file("logs/huge.log"))
             self.assertIn("仅前 64 KB", out)
-            self.assertLess(len(out), 30100)   # 结果长度上限
-            self.assertLess(len(tools._read_member_lines(
-                tools._open(), next(
-                    info for info in tools._members(tools._open())
-                    if info.filename == "logs/huge.log"
-                )
-            )[0]), 100000)
+            self.assertIn("仅读取前 64 KB", out)
+            self.assertLess(len(out), 120000)
+        finally:
+            tools.close()
+
+    def test_log_read_bounds_newline_free_line(self):
+        """没有换行的巨型成员不能整行读进内存/结果。"""
+        tools = self._log_tools()
+        try:
+            out = asyncio.run(tools.read_file("logs/oneline.log"))
+            self.assertIn("行已截断到", out)
+            self.assertLess(len(out), 4000)     # 单行上限 + 头尾说明
+        finally:
+            tools.close()
+
+    def test_log_read_start_line_out_of_range(self):
+        tools = self._log_tools()
+        try:
+            out = asyncio.run(tools.read_file("logs/small.log",
+                                             start_line=99))
+            self.assertIn("超出范围", out)
+            self.assertIn("2 行", out)
+        finally:
+            tools.close()
+
+    def test_log_read_end_line_offers_continuation(self):
+        tools = self._log_tools()
+        try:
+            out = asyncio.run(tools.read_file("logs/huge.log",
+                                             start_line=1, end_line=2))
+            self.assertIn("已到 end_line", out)
+            self.assertIn("start_line=3", out)
         finally:
             tools.close()
 
     def test_log_read_handles_empty_member(self):
-        tools = LogArchiveTools(str(self.zip_path), max_file_kb=64)
+        tools = self._log_tools()
         try:
             out = asyncio.run(tools.read_file("logs/empty.log"))
             self.assertIn("没有可读取的文本内容", out)
@@ -264,6 +296,25 @@ class ToolReadCapTests(unittest.TestCase):
         out = asyncio.run(tools.execute("read_file", {"path": "big.txt"}))
         self.assertIn("仅前 64 KB", out)
         self.assertLess(len(out), 300000)
+
+    def test_repo_read_truncates_single_line(self):
+        cfg = RepoConfig(max_file_kb=256, max_tool_result_chars=300000,
+                         max_tool_result_tokens=100000)
+        provider = SimpleNamespace(root=self.repo_root, current_ref="（默认分支）", cfg=cfg)
+        tools = RepoTools(provider, cfg)
+        out = asyncio.run(tools.execute("read_file", {"path": "oneline.txt"}))
+        self.assertIn("行已截断到", out)
+        self.assertLess(len(out), 4000)
+
+    def test_repo_read_start_line_out_of_range(self):
+        cfg = RepoConfig(max_file_kb=256)
+        provider = SimpleNamespace(root=self.repo_root, current_ref="（默认分支）", cfg=cfg)
+        tools = RepoTools(provider, cfg)
+        out = asyncio.run(tools.execute(
+            "read_file", {"path": "oneline.txt", "start_line": 5}
+        ))
+        self.assertIn("超出范围", out)
+        self.assertIn("1 行", out)
 
 
 if __name__ == "__main__":   # pragma: no cover

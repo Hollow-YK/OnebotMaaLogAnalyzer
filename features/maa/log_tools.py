@@ -22,7 +22,7 @@ import logging
 import re
 import zipfile
 from pathlib import PurePosixPath
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from core.tokens import clamp_tool_result_tokens, trim_to_tokens
 from features.maa.log_digest import IMAGE_SUFFIXES
@@ -31,8 +31,15 @@ from features.maa.safety import (
     is_sensitive_path,
     normalize_tool_path,
 )
+from features.maa.text_utils import MAX_LINE_CHARS, truncate_line
 
 logger = logging.getLogger("Maa.LogTools")
+
+# 逐块读取的块大小：内存占用与成员大小无关
+_CHUNK_BYTES = 64 * 1024
+# 单行缓冲上限（字节）。超过即视为超长行：丢弃多余字节并在输出时标注，
+# 避免“整条日志没有换行”把内存吃满。
+_MAX_LINE_BYTES = MAX_LINE_CHARS * 4
 
 # 明显是二进制、不适合按文本读取的扩展名
 _BINARY_SUFFIXES = {
@@ -129,32 +136,85 @@ class LogArchiveTools:
             return text
         return trim_to_tokens(text, self.max_result_tokens)
 
-    def _read_member_lines(self, archive: zipfile.ZipFile,
-                           info: zipfile.ZipInfo
-                           ) -> tuple[list[str], bool]:
-        """
-        按行读取成员，最多 `max_read_bytes` 字节。
+    @staticmethod
+    def _append_line_bytes(buffer: bytearray, piece: bytes) -> None:
+        """把片段追加到行缓冲；超过单行上限时丢弃多余部分。"""
+        if not piece:
+            return
+        room = _MAX_LINE_BYTES - len(buffer)
+        if room <= 0:
+            return
+        buffer += piece[:room]
 
-        不走 `ZipFile.read()`：那会把整个成员解压进内存，构造的压缩包
-        （压缩比极高的大日志）可以直接把进程打爆。这里逐行累计字节，
-        超过上限立即停止并标记截断。
+    def _iter_member_lines(self, archive: zipfile.ZipFile,
+                           info: zipfile.ZipInfo,
+                           state: dict[str, Any]) -> Iterator[tuple[int, str]]:
+        """
+        逐块扫描成员，产出 `(行号, 文本)`。
+
+        内存占用与成员大小无关——压缩包成员可以「几十 KB 压缩率换几百 MB 原文」，
+        所以不能 `ZipFile.read()` 也不能按行迭代（无换行的巨型行会先被整体分配）：
+
+          - 每次只读 `_CHUNK_BYTES`，自己按 `\\n` 切行；
+          - 单行缓冲上限 `_MAX_LINE_BYTES`，超长行截断并标注；
+          - 累计读取字节上限 `max_read_bytes`，到达即停。
+
+        `state` 回填两个标志：`truncated`（因字节上限/损坏提前停止）、
+        `complete`（是否读到成员末尾）。
         """
         limit = int(self.max_read_bytes or 0)
-        lines: list[str] = []
+        state["truncated"] = False
+        state["complete"] = False
         used = 0
-        truncated = False
+        line_no = 0
+        buffer = bytearray()
+
+        def take_line() -> tuple[int, str]:
+            nonlocal line_no
+            text = truncate_line(
+                bytes(buffer).decode("utf-8", "ignore").rstrip("\r")
+            )
+            buffer.clear()
+            line_no += 1
+            return line_no, text
+
         try:
             with archive.open(info) as handle:
-                for raw in handle:
-                    if limit > 0 and used + len(raw) > limit:
-                        truncated = True
+                while True:
+                    chunk = handle.read(_CHUNK_BYTES)
+                    if not chunk:
+                        state["complete"] = True
                         break
-                    used += len(raw)
-                    lines.append(raw.decode("utf-8", "ignore").rstrip("\r\n"))
+                    hit_limit = False
+                    if limit > 0:
+                        room = limit - used
+                        if room <= 0:
+                            # 已到单文件读取上限：这一块整块丢弃，不再解码
+                            state["truncated"] = True
+                            break
+                        if len(chunk) > room:
+                            chunk = chunk[:room]
+                            hit_limit = True
+                    used += len(chunk)
+                    start = 0
+                    while True:
+                        newline = chunk.find(b"\n", start)
+                        if newline < 0:
+                            self._append_line_bytes(buffer, chunk[start:])
+                            break
+                        self._append_line_bytes(buffer, chunk[start:newline])
+                        yield take_line()
+                        start = newline + 1
+                    if hit_limit:
+                        state["truncated"] = True
+                        break
+                if buffer:
+                    yield take_line()
         except (OSError, RuntimeError, zipfile.BadZipFile, EOFError):
-            # 损坏的成员：返回已读到的部分，让调用方标注不完整
-            return lines, True
-        return lines, truncated
+            # 损坏的成员：交出已读到的部分，并标记不完整
+            state["truncated"] = True
+            if buffer:
+                yield take_line()
 
     # ════════════════════════════════════════════════════════════
     # 工具实现
@@ -236,16 +296,20 @@ class LogArchiveTools:
                 break
 
             scanned += 1
-            lines, file_capped = self._read_member_lines(archive, info)
-            if file_capped:
+            state: dict[str, Any] = {}
+            iterator = self._iter_member_lines(archive, info, state)
+            try:
+                for lineno, line in iterator:
+                    if not regex.search(line):
+                        continue
+                    hits.append(f"{name}:{lineno}: {line.strip()[:300]}")
+                    if len(hits) >= limit:
+                        truncated = True
+                        break
+            finally:
+                iterator.close()
+            if state.get("truncated"):
                 capped.append(name)
-            for lineno, line in enumerate(lines, 1):
-                if not regex.search(line):
-                    continue
-                hits.append(f"{name}:{lineno}: {line.strip()[:300]}")
-                if len(hits) >= limit:
-                    truncated = True
-                    break
             if truncated:
                 break
 
@@ -290,50 +354,68 @@ class LogArchiveTools:
         if not self._is_text_member(rel):
             return f"这是二进制文件，无法按文本读取：{rel}"
 
-        lines, capped = self._read_member_lines(archive, target)
-        total = len(lines)
-        size = int(target.file_size or 0)
-        limit_kb = self.max_read_bytes // 1024
-        if total == 0:
-            return (f"日志包 {rel} 没有可读取的文本内容"
-                    f"（{size} 字节）")
-
         def _as_int(value: Any) -> Optional[int]:
             try:
                 return int(value)
             except (TypeError, ValueError):
                 return None
 
-        start = _as_int(start_line) or 1
-        end = _as_int(end_line) or total
-        start = max(1, min(start, total))
-        end = max(start, min(end, total))
+        start = max(1, _as_int(start_line) or 1)
+        requested_end = _as_int(end_line)
+        if requested_end is not None:
+            requested_end = max(start, requested_end)
 
+        size = int(target.file_size or 0)
+        limit_kb = self.max_read_bytes // 1024
         budget = self.max_result_chars
-        chunk: list[str] = []
+        state: dict[str, Any] = {}
+        rendered: list[str] = []
         used = 0
+        seen = 0
         last = start - 1
-        for lineno in range(start, end + 1):
-            line = f"[行 {lineno}] {lines[lineno - 1]}"
-            if used + len(line) + 1 > budget:
-                break
-            chunk.append(line)
-            used += len(line) + 1
-            last = lineno
+        cut_by_budget = False
+        iterator = self._iter_member_lines(archive, target, state)
+        try:
+            for lineno, text in iterator:
+                seen = lineno
+                if lineno < start:
+                    continue
+                if requested_end is not None and lineno > requested_end:
+                    break
+                line = f"[行 {lineno}] {text}"
+                if used + len(line) + 1 > budget:
+                    cut_by_budget = True
+                    break
+                rendered.append(line)
+                used += len(line) + 1
+                last = lineno
+        finally:
+            iterator.close()
 
-        detail = (
-            f"已读取 {total} 行（仅前 {limit_kb} KB）" if capped
-            else f"共 {total} 行"
-        )
-        header = (f"日志包 {rel}（{detail}，{size} 字节）"
+        if seen == 0:
+            return f"日志包 {rel} 没有可读取的文本内容（{size} 字节）"
+        if last < start:
+            if state.get("complete"):
+                return (f"start_line={start} 超出范围：日志包 {rel} "
+                        f"共 {seen} 行")
+            return (f"start_line={start} 超出已读取范围：日志包 {rel} 已读取 "
+                    f"{seen} 行（仅前 {limit_kb} KB）")
+
+        if state.get("complete"):
+            total_detail = f"共 {seen} 行"
+        elif state.get("truncated"):
+            total_detail = f"已读取 {seen} 行（仅前 {limit_kb} KB）"
+        else:
+            total_detail = f"至少 {seen} 行"
+        header = (f"日志包 {rel}（{total_detail}，{size} 字节）"
                   f" 显示 行 {start}-{last}：\n")
-        body = "\n".join(chunk)
-        if last < end:
-            body += (f"\n...[受结果长度限制，行 {last + 1}-{end} 未显示，"
-                     f"可用 start_line 继续读]")
-        elif capped:
-            body += (f"\n...[文件超过单文件读取上限 {limit_kb} KB，"
-                     f"其后的内容未读取]")
+        body = "\n".join(rendered)
+        if cut_by_budget:
+            body += f"\n...[受结果长度限制，可用 start_line={last + 1} 继续读]"
+        elif state.get("truncated"):
+            body += f"\n...[仅读取前 {limit_kb} KB，其后内容未读取]"
+        elif requested_end is not None and last >= requested_end:
+            body += f"\n...[已到 end_line，可用 start_line={last + 1} 继续读]"
         return self._finish(header + body)
 
     async def list_images(self) -> str:
