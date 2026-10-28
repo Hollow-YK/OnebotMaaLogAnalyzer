@@ -93,6 +93,8 @@ class DigestResult:
     all_members: list[str] = field(default_factory=list)
     # 压缩包路径（供后续按名提取图片字节）
     zip_path: str = ""
+    # 已解压目录（存在时日志工具直接复用，避免反复解压）
+    extract_dir: str = ""
     # 摘要提示词的估算 token 数（用于上下文预算与日志）
     prompt_tokens: int = 0
 

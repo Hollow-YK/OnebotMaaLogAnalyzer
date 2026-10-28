@@ -3,9 +3,11 @@
 Run with: python -m unittest discover -s tests -v.
 """
 import asyncio
+import os
 import stat
 import tempfile
 import threading
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -23,8 +25,13 @@ from core.tokens import (
     trim_to_tokens,
 )
 from features.maa.analyzer import MaaAnalyzer
-from features.maa.archive_extract import ArchiveProbe, probe_archive
+from features.maa.archive_extract import (
+    ArchiveProbe,
+    cleanup_stale_dirs,
+    probe_archive,
+)
 from features.maa.attachments import build_report_segments, text_segments
+from features.maa.history import HistoryStore
 from features.maa.log_digest import DigestResult
 from features.maa.log_tools import LogArchiveTools
 from features.maa.repo_tools import RepoTools
@@ -379,7 +386,61 @@ class ArchiveExtractionTests(unittest.TestCase):
         asyncio.run(tools.list_files())            # 复用同一目录
         self.assertEqual(tools._extract.root, root)
         tools.close()
+        # close 只释放内存状态：临时目录由 discard 负责删除
+        self.assertTrue(Path(root).is_dir())
+        tools.discard()
         self.assertFalse(Path(root).exists())
+
+    def test_extract_dir_is_reused_without_unzipping(self):
+        """指定解压目录后：第二次调用直接复用，不再解压。"""
+        target = self.tmp / "persist"
+        first = LogArchiveTools(str(self.zip_path), extract_dir=str(target))
+        asyncio.run(first.list_files())
+        self.assertFalse(first._extract.reused)
+        marker = target / ".maa-extracted.json"
+        self.assertTrue(marker.is_file())
+        mtime = marker.stat().st_mtime_ns
+        first.close()                                   # 只释放，不删除
+
+        second = LogArchiveTools(str(self.zip_path), extract_dir=str(target))
+        try:
+            listing = asyncio.run(second.list_files("logs"))
+            self.assertTrue(second._extract.reused)
+            self.assertIn("ok.log", listing)
+            self.assertEqual(marker.stat().st_mtime_ns, mtime)   # 未重新解压
+        finally:
+            second.close()
+        self.assertTrue(target.is_dir())
+
+    def test_stale_marker_triggers_reextract(self):
+        target = self.tmp / "changed"
+        first = LogArchiveTools(str(self.zip_path), extract_dir=str(target))
+        asyncio.run(first.list_files())
+        first.close()
+        # 改动压缩包 → 指纹不匹配 → 重新解压并覆盖
+        with zipfile.ZipFile(self.zip_path, "a") as archive:
+            archive.writestr("logs/extra.log", "extra\n")
+        second = LogArchiveTools(str(self.zip_path), extract_dir=str(target))
+        try:
+            asyncio.run(second.list_files())
+            self.assertFalse(second._extract.reused)
+            self.assertIn("logs/extra.log", second._extract.members)
+        finally:
+            second.close()
+
+    def test_stale_staging_cleanup(self):
+        staging = self.tmp / "history" / ".staging"
+        old = staging / "old"
+        fresh = staging / "fresh"
+        for path in (old, fresh):
+            path.mkdir(parents=True)
+            (path / "a.log").write_text("x", encoding="utf-8")
+        past = time.time() - 7 * 3600
+        os.utime(old, (past, past))
+        removed = cleanup_stale_dirs(staging, max_age_hours=6)
+        self.assertEqual(removed, 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists())
 
     def test_total_cap_aborts_extraction(self):
         """解压后总大小超限：一个字节都不落盘，工具直接拒绝服务。"""
@@ -474,6 +535,101 @@ class ArchiveLimitGateTests(unittest.TestCase):
 
     def test_default_limit_is_one_gigabyte(self):
         self.assertEqual(AnalysisSettings().max_total_uncompressed_mb, 1024)
+
+
+class ArchivePersistenceTests(unittest.TestCase):
+    """解压结果跟着历史记录走：归档后可直接复用，记录清理时一并删除。"""
+
+    def setUp(self):
+        self.data = Path(tempfile.mkdtemp(prefix="maa_hist_"))
+        self.zip_path = self.data / "logs.zip"
+        with zipfile.ZipFile(self.zip_path, "w") as archive:
+            archive.writestr("logs/a.log", "line1\nline2\n")
+        self.store = HistoryStore(self.data)
+
+    def test_add_moves_extraction_into_record(self):
+        staging = self.store.staging_dir("cfg", "sess-1")
+        tools = LogArchiveTools(str(self.zip_path), extract_dir=str(staging))
+        asyncio.run(tools.list_files())
+        tools.close()
+
+        record = self.store.add(
+            config_name="cfg", group_id="1", file_name="logs.zip",
+            source_zip=self.zip_path, context="ctx", report="report",
+            extract_dir=staging,
+        )
+        self.assertIsNotNone(record)
+        extracted = self.store.extracted_dir("cfg", record.id)
+        self.assertTrue((extracted / "logs" / "a.log").is_file())
+        self.assertFalse(staging.exists())            # 暂存区已整体移走
+        self.assertGreaterEqual(record.size_bytes, (extracted / "logs" / "a.log").stat().st_size)
+
+        # 追问时按记录 ID 推导出同一目录，直接复用
+        archived_zip = self.store.read_zip("cfg", record)
+        self.assertIsNotNone(archived_zip)
+        tools2 = LogArchiveTools(
+            str(archived_zip), extract_dir=str(extracted)
+        )
+        try:
+            out = asyncio.run(tools2.read_file("logs/a.log"))
+            self.assertIn("[行 2] line2", out)
+            self.assertTrue(tools2._extract.reused)
+        finally:
+            tools2.close()
+
+    def test_record_cleanup_removes_extraction(self):
+        staging = self.store.staging_dir("cfg", "sess-2")
+        tools = LogArchiveTools(str(self.zip_path), extract_dir=str(staging))
+        asyncio.run(tools.list_files())
+        tools.close()
+        record = self.store.add(
+            config_name="cfg", group_id="1", file_name="logs.zip",
+            source_zip=self.zip_path, context="", report="",
+            extract_dir=staging,
+        )
+        extracted = self.store.extracted_dir("cfg", record.id)
+        self.assertTrue(extracted.is_dir())
+        result = self.store.cleanup("cfg", period_hours=1, keep_periods=0)
+        self.assertEqual(result.removed, 1)
+        self.assertFalse(extracted.exists())
+
+    def test_missing_extract_dir_is_ignored(self):
+        record = self.store.add(
+            config_name="cfg", group_id="1", file_name="logs.zip",
+            source_zip=self.zip_path, context="", report="",
+            extract_dir=self.data / "not-there",
+        )
+        self.assertIsNotNone(record)
+        self.assertFalse(
+            self.store.extracted_dir("cfg", record.id).exists()
+        )
+
+    def test_release_drops_temp_dir_but_keeps_persistent_one(self):
+        temp_tools = LogArchiveTools(str(self.zip_path))
+        asyncio.run(temp_tools.list_files())
+        temp_root = Path(temp_tools._extract.root)
+        self.assertTrue(temp_root.is_dir())
+        temp_tools.release()
+        self.assertFalse(temp_root.exists())          # 临时目录用完即删
+
+        target = self.store.staging_dir("cfg", "sess-3")
+        kept = LogArchiveTools(str(self.zip_path), extract_dir=str(target))
+        asyncio.run(kept.list_files())
+        kept.release()
+        self.assertTrue((target / "logs" / "a.log").is_file())   # 指定目录保留
+
+    def test_cleanup_staging_scans_configs(self):
+        stale = self.store.staging_dir("cfg", "dead-session")
+        stale.mkdir(parents=True)
+        (stale / "a.log").write_text("x", encoding="utf-8")
+        past = time.time() - 7 * 3600
+        os.utime(stale, (past, past))
+        fresh = self.store.staging_dir("cfg", "live-session")
+        fresh.mkdir(parents=True)
+
+        self.assertEqual(self.store.cleanup_staging(max_age_hours=6), 1)
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())               # 未超龄的不动
 
 
 if __name__ == "__main__":   # pragma: no cover

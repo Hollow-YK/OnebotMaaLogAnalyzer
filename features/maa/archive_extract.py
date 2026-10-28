@@ -6,6 +6,9 @@
 
   - 读取逻辑与仓库工具一致（行号窗口、单行宽度、续读提示）；
   - 多次工具调用不必反复打开压缩包、重建成员索引；
+  - 解压结果可以**跨追问复用**：目录放在 `data/<配置>/history/` 下，
+    与历史记录同生命周期（`history/<记录>/extracted/`），文件工具直接命中，
+    不再重复解压；记录被清理时整目录一起删除。
   - 内存占用与成员大小无关（解压是流式落盘，不是整体读入）。
 
 **解压后总大小是唯一闸门**：`probe_archive()` 在下载完成后、摘要与 AI 之前
@@ -25,10 +28,12 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import stat
 import tempfile
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +51,8 @@ logger = logging.getLogger("Maa.ArchiveExtract")
 _CHUNK_BYTES = 64 * 1024
 # 解压后总大小默认上限（MB），与 settings.max_total_uncompressed_mb 一致
 DEFAULT_TOTAL_LIMIT_MB = 1024
+# 复用标记：记录压缩包指纹与成员列表，命中即可跳过解压
+_MARKER = ".maa-extracted.json"
 
 
 @dataclass
@@ -100,12 +107,51 @@ def _is_symlink_entry(info: zipfile.ZipInfo) -> bool:
     return stat.S_ISLNK(mode)
 
 
-class ExtractedArchive:
-    """一个已安全解压到临时目录的压缩包（按需解压、可重复读取）。"""
+def cleanup_stale_dirs(base_dir: Path, max_age_hours: float = 6.0) -> int:
+    """
+    清理 `base_dir` 下超过时限的子目录（崩溃遗留的解压/暂存目录）。
 
-    def __init__(self, zip_path: str, *, max_total_mb: int = 0,
-                 max_members: int = 3000):
+    只按 mtime 判断年龄，因此只能传“专用于解压产物”的容器目录
+    （如 `history/.staging`、`extract/`），不要传历史记录目录本身。
+    返回删除的目录数。
+    """
+    root = Path(base_dir)
+    if not root.is_dir():
+        return 0
+    cutoff = time.time() - max(0.0, float(max_age_hours)) * 3600
+    removed = 0
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            if entry.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(entry, ignore_errors=True)
+            removed += 1
+            logger.info(f"[解压] 清理遗留目录：{entry}")
+        except OSError:
+            continue
+    return removed
+
+
+class ExtractedArchive:
+    """
+    一个已安全解压的日志压缩包（按需解压、可跨多次调用/追问复用）。
+
+    `target_dir` 指定解压位置（通常是 `data/<配置>/history/<记录>/extracted`），
+    存在且标记与压缩包一致时**直接复用**，不再重复解压；`close()` 只释放内存状态，
+    删除目录由调用方用 `discard()` 决定，从而让解压结果的生命周期与历史记录
+    （也就是追问能力）对齐。
+    """
+
+    def __init__(self, zip_path: str, *, target_dir: str = "",
+                 max_total_mb: int = 0, max_members: int = 3000):
         self.zip_path = str(zip_path or "")
+        self.target_dir = Path(target_dir) if target_dir else None
         self.max_total_mb = max(1, int(max_total_mb or DEFAULT_TOTAL_LIMIT_MB))
         self.max_total_bytes = self.max_total_mb * 1024 * 1024
         self.max_members = max(1, int(max_members or 3000))
@@ -115,8 +161,12 @@ class ExtractedArchive:
         self.notes: list[str] = []
         # 内容超过上限：整次解压作废，工具全部拒绝服务
         self.overflow = False
+        # 本次是否复用了已有目录（用于日志与统计）
+        self.reused = False
         self._done = False
         self._written = 0
+        # 实际使用的目录：即使 close() 清了 root，discard() 仍能找到它
+        self._created_root: Optional[Path] = None
 
     # ── 生命周期 ──
 
@@ -137,8 +187,26 @@ class ExtractedArchive:
             logger.info(f"[解压] 跳过：{probe.reason}")
             return None
 
+        # 已有可用目录：直接复用（追问 / 重启后不必再解压一遍）
+        reused = self._load_marker()
+        if reused is not None:
+            self.root = self.target_dir
+            self._created_root = self.target_dir
+            self.members = reused
+            self.reused = True
+            logger.info(
+                f"[解压] 复用已解压目录（{len(self.members)} 个文件）："
+                f"{self.target_dir}"
+            )
+            return self.root
+
         try:
-            self.root = Path(tempfile.mkdtemp(prefix="maa_logs_"))
+            self.root = self.target_dir or Path(tempfile.mkdtemp(prefix="maa_logs_"))
+            self._created_root = self.root
+            if self.root.exists():
+                # 标记对不上（压缩包换过 / 目录被改过）：整目录重来，避免残留混合
+                shutil.rmtree(self.root, ignore_errors=True)
+            self.root.mkdir(parents=True, exist_ok=True)
             self._extract()
             if self.overflow:
                 # zip 头声明与实际不符：解压中途发现超限，整次作废
@@ -146,22 +214,87 @@ class ExtractedArchive:
                     f"实际解压超出上限 {format_bytes(self.max_total_bytes)}，"
                     f"已中止并清理"
                 )
-                self.close()
+                self.discard()
                 return None
             if not self.members:
                 self.notes.append("压缩包内没有可读取的文件")
+            else:
+                self._write_marker()
         except Exception as exc:   # 解压失败一律降级为“工具不可用”
             logger.warning(f"[解压] 失败，工具不可用：{exc}")
             self.notes.append(f"解压失败：{type(exc).__name__}")
-            self.close()
+            self.discard()
         return self.root
 
     def close(self) -> None:
-        """删除临时目录（分析/追问结束时调用，可重复调用）。"""
-        root, self.root = self.root, None
+        """
+        释放内存状态，**不删除目录**。
+
+        解压结果的生命周期由调用方决定：写进历史记录的保留到追问失效，
+        没有历史记录的在分析结束时 `discard()`。
+        """
+        self.root = None
         self.members = []
+
+    def discard(self) -> None:
+        """删除解压目录（没有历史记录、或解压失败时调用）。"""
+        root = self._created_root or self.root or self.target_dir
+        self.root = None
+        self.members = []
+        self._created_root = None
         if root is not None:
             shutil.rmtree(root, ignore_errors=True)
+
+    # ── 复用标记 ──
+
+    def _marker_path(self) -> Optional[Path]:
+        return (self.target_dir / _MARKER) if self.target_dir else None
+
+    def _zip_signature(self) -> dict:
+        try:
+            stat_result = Path(self.zip_path).stat()
+        except OSError:
+            return {}
+        return {"zip_size": stat_result.st_size, "zip_mtime": int(stat_result.st_mtime)}
+
+    def _load_marker(self) -> Optional[list[str]]:
+        """标记与当前压缩包一致时返回成员列表，否则 None（需要重新解压）。"""
+        marker = self._marker_path()
+        if marker is None or not marker.is_file():
+            return None
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get("signature") != self._zip_signature():
+            return None
+        members = data.get("members")
+        if not isinstance(members, list):
+            return None
+        # 目录被外部删掉了一部分：宁可重新解压，也不要返回残缺结果
+        root = self.target_dir
+        assert root is not None
+        for rel in members:
+            if not isinstance(rel, str) or not (root / rel).is_file():
+                return None
+        return [str(rel) for rel in members]
+
+    def _write_marker(self) -> None:
+        marker = self._marker_path()
+        if marker is None:
+            return
+        try:
+            marker.write_text(
+                json.dumps({
+                    "signature": self._zip_signature(),
+                    "members": self.members,
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.info(f"[解压] 写入复用标记失败（不影响读取）：{exc}")
 
     # ── 解压 ──
 

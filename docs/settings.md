@@ -127,7 +127,7 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 | `history_period_hours` | `24` | 历史保留周期（小时） |
 | `history_keep_periods` | `2` | 保留周期数，超出即删除 |
 | `history_max_records` | `200` | 历史记录条数上限 |
-| `history_max_total_mb` | `4096` | 历史目录占用上限 MB |
+| `history_max_total_mb` | `4096` | 历史目录占用上限 MB（含解压后的 `extracted/` 体积） |
 
 ## 摘要提取
 

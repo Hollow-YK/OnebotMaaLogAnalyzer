@@ -11,14 +11,19 @@
 存储布局:
   data/<配置名>/history/
     ├── records.json          # 全部记录的元数据
+    ├── .staging/<会话>/      # 分析进行中的解压暂存（崩溃遗留按周期清理）
     └── <记录ID>/
         ├── source.zip        # 日志压缩包原文
-        └── context.txt       # 追问上下文（日志摘要 + 代码参考）
+        ├── context.txt       # 追问上下文（日志摘要 + 代码参考）
+        └── extracted/        # 已解压的日志文件（与记录同生命周期）
+
+  解压结果跟着记录走：记录还在就能追问，日志工具直接复用 extracted/
+  不再重复解压；记录被清理时整目录删除，无需额外回收逻辑。
 
 注意:
   - git 仓库缓存（data/repo）**不属于**历史记录，本模块不会触碰
   - 除周期清理外，另有 max_records / max_total_mb 两个安全上限，
-    防止磁盘被意外写满
+    防止磁盘被意外写满；extracted/ 的体积也计入 size_bytes
 """
 from __future__ import annotations
 
@@ -36,11 +41,30 @@ logger = logging.getLogger("Maa.History")
 _RECORDS_FILE = "records.json"
 _CONTEXT_FILE = "context.txt"
 _ZIP_FILE = "source.zip"
+# 解压后的日志文件（生命周期与历史记录一致，即“还能追问”的时间）
+_EXTRACT_DIR = "extracted"
+# 尚未归档（分析进行中）的解压暂存区
+_STAGING_DIR = ".staging"
 # 追问会话状态（按「群 + 记录」保存，使重启后仍能继续追问）
 _FOLLOWUP_FILE = "followups.json"
 
 # 历史目录名（位于各配置目录下）
 HISTORY_DIR_NAME = "history"
+
+
+def _dir_size(path: Path) -> int:
+    """目录内所有文件的总字节数（用于历史容量统计）。"""
+    total = 0
+    try:
+        for item in Path(path).rglob("*"):
+            try:
+                if item.is_file():
+                    total += item.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return total
+    return total
 
 
 @dataclass
@@ -105,6 +129,46 @@ class HistoryStore:
 
     def record_dir(self, config_name: str, record_id: str) -> Path:
         return self._config_dir(config_name) / str(record_id)
+
+    def extracted_dir(self, config_name: str, record_id: str) -> Path:
+        """某条历史记录的解压目录（与记录同生命周期）。"""
+        return self.record_dir(config_name, record_id) / _EXTRACT_DIR
+
+    def staging_dir(self, config_name: str, token: str) -> Path:
+        """
+        分析进行中的解压暂存目录。
+
+        归档成功后会整体重命名为 `history/<记录 ID>/extracted`，避免再来回复制；
+        归档失败/跳过时由调用方 `discard()` 删除。
+        """
+        safe = "".join(
+            ch if ch.isalnum() or ch in "-_" else "_" for ch in str(token)
+        )[:80] or "session"
+        return self._config_dir(config_name) / _STAGING_DIR / safe
+
+    def cleanup_staging(self, max_age_hours: float = 6.0) -> int:
+        """清理崩溃遗留的暂存解压目录（已归档的都在记录目录里）。"""
+        from features.maa.archive_extract import cleanup_stale_dirs
+
+        removed = 0
+        for name in self._known_config_names():
+            removed += cleanup_stale_dirs(
+                self._config_dir(name) / _STAGING_DIR, max_age_hours
+            )
+        return removed
+
+    def _known_config_names(self) -> list[str]:
+        """扫描数据目录，列出已有历史目录的配置名。"""
+        names: list[str] = []
+        try:
+            for entry in self._data_dir.iterdir():
+                if not entry.is_dir():
+                    continue
+                if (entry / HISTORY_DIR_NAME).is_dir():
+                    names.append(entry.name)
+        except OSError:
+            return []
+        return names
 
     # ════════════════════════════════════════════════════════════
     # 读写
@@ -217,9 +281,14 @@ class HistoryStore:
             source_zip: Optional[Path] = None, context: str = "",
             report: str = "", message_ids: Optional[list] = None,
             file_id: str = "", uploader: str = "",
-            log_count: int = 0, image_count: int = 0) -> Optional[HistoryRecord]:
+            log_count: int = 0, image_count: int = 0,
+            extract_dir: Optional[Path] = None) -> Optional[HistoryRecord]:
         """
-        新增一条历史记录：把日志包与上下文归档到历史目录。
+        新增一条历史记录：把日志包、解压结果与上下文归档到历史目录。
+
+        `extract_dir` 是分析阶段已经解压好的目录，会整体移动到
+        `history/<记录 ID>/extracted`（同一文件系统下是重命名），
+        其生命周期由此与记录、追问能力对齐。
 
         任何失败都只记日志并返回 None，不影响分析结果。
         """
@@ -240,6 +309,16 @@ class HistoryStore:
                     Path(source_zip).unlink(missing_ok=True)
                 size_bytes = dest.stat().st_size
                 has_zip = True
+
+            if extract_dir is not None and Path(extract_dir).is_dir():
+                dest_extract = target / _EXTRACT_DIR
+                try:
+                    Path(extract_dir).replace(dest_extract)
+                except OSError as exc:
+                    logger.info(f"[历史] 解压目录移动失败，已跳过保留：{exc}")
+                else:
+                    size_bytes += _dir_size(dest_extract)
+                    logger.info(f"[历史] 已保留解压结果：{dest_extract}")
 
             has_context = False
             if context:

@@ -683,6 +683,9 @@ class MaaAnalyzer:
         work_dir = self._build_work_dir(config_name, group_id, file_name, file_id)
         zip_path = work_dir / "source.zip"
         job = None
+        # 日志包工具实例：解压目录在分析期间是暂存区，归档后并入历史记录
+        log_tools: Optional[LogArchiveTools] = None
+        extract_persisted = False
 
         try:
             job = self.s.add_job(
@@ -837,21 +840,19 @@ class MaaAnalyzer:
                         logger.warning(f"[分析] {tool_note}")
                     stage_timeout = max(30, int(settings.ai_stage_timeout_seconds or 300))
                     if use_tools and (repo_prep.provider is not None or zip_path.exists()):
+                        if settings.log_tools_enabled:
+                            log_tools = self._make_log_tools(
+                                config_name, settings, project,
+                                current_session_id() or new_session_id(config_name),
+                                str(zip_path),
+                            )
                         response_text = await asyncio.wait_for(
                             self._run_repo_agent(
                                 config_name, settings, prompt, repo_prep.provider,
                                 project=project,
                                 user_content=user_content,
                                 vision_state=vision_state,
-                                log_tools=LogArchiveTools(
-                                    str(zip_path),
-                                    max_file_kb=max(64, int(settings.max_log_file_read_kb or 512)),
-                                    max_result_chars=max(
-                                        2000, int(project.repo.max_tool_result_chars or 30000)
-                                    ),
-                                    max_result_tokens=int(project.repo.max_tool_result_tokens or 0),
-                                    max_total_mb=int(settings.max_total_uncompressed_mb or 0),
-                                ) if settings.log_tools_enabled else None,
+                                log_tools=log_tools,
                             ),
                             timeout=stage_timeout,
                         )
@@ -943,7 +944,8 @@ class MaaAnalyzer:
                     ) * 0.7),
                 ),
             )
-            # 归档日志包与上下文（使追问可跨天）。必须在 finally 清理前完成。
+            # 归档日志包、解压结果与上下文（使追问可跨天）。
+            # 解压目录会整体并入历史记录，因此追问期间不必重复解压。
             history_id, archived_zip = self._archive_history(
                 config_name=config_name,
                 settings=settings,
@@ -956,11 +958,17 @@ class MaaAnalyzer:
                 report=response_text,
                 log_count=len(digest.log_files),
                 image_count=len(digest.error_images),
+                extract_dir=log_tools.extract_dir if log_tools is not None else None,
             )
             # 归档后 zip 已移出工作目录（工作目录稍后会被清理），
             # 把 digest 的路径指向归档副本，使追问仍能从日志包取附件。
             if archived_zip:
                 digest.zip_path = archived_zip
+            if history_id:
+                extract_persisted = True
+                digest.extract_dir = str(
+                    self.history.extracted_dir(config_name, history_id)
+                ) if self.history is not None else ""
 
             return AnalysisOutcome(
                 ok=True,
@@ -998,6 +1006,13 @@ class MaaAnalyzer:
                 self._finish_job(config_name, job, "执行失败", str(exc)[:300])
             return AnalysisOutcome(ok=False, file_name=file_name, error=str(exc))
         finally:
+            # 解压结果：已并入历史记录的保留（追问期间直接复用），
+            # 其余（历史关闭 / 归档失败 / 提前跳过）立即删除，避免残留。
+            if log_tools is not None:
+                if extract_persisted:
+                    log_tools.close()
+                else:
+                    log_tools.discard()
             # 无论成功失败，都还原仓库位置，避免影响下一次分析
             await self._restore_repo_latest(config_name, settings)
             self._active_repos.pop(config_name, None)
@@ -1038,6 +1053,31 @@ class MaaAnalyzer:
             self.s, group_id, file_name, file_size=file_size
         )
         return found.file_id if found else None
+
+    def _make_log_tools(self, config_name: str, settings: AnalysisSettings,
+                        project: ProjectConfig, session_id: str,
+                        zip_path: str) -> LogArchiveTools:
+        """
+        构造日志包工具。
+
+        解压目录：历史归档开启时放在 `data/<配置>/history/.staging/<会话>`，
+        分析成功后整体并入记录目录（`history/<记录>/extracted`），
+        于是“解压结果保留到不能再追问”由历史清理统一负责；历史关闭时
+        退化为系统临时目录，分析结束即删除。
+        """
+        extract_dir = ""
+        if self.history is not None and settings.history_enabled:
+            extract_dir = str(self.history.staging_dir(config_name, session_id))
+        return LogArchiveTools(
+            zip_path,
+            max_file_kb=max(64, int(settings.max_log_file_read_kb or 512)),
+            max_result_chars=max(
+                2000, int(project.repo.max_tool_result_chars or 30000)
+            ),
+            max_result_tokens=int(project.repo.max_tool_result_tokens or 0),
+            max_total_mb=int(settings.max_total_uncompressed_mb or 0),
+            extract_dir=extract_dir,
+        )
 
     @staticmethod
     def archive_limit_error(settings: AnalysisSettings, zip_path: str) -> str:
@@ -1691,12 +1731,14 @@ class MaaAnalyzer:
                          group_id: int, file_name: str, file_id: str,
                          uploader: str, zip_path: Path, context: str,
                          report: str, log_count: int,
-                         image_count: int) -> tuple[str, str]:
+                         image_count: int,
+                         extract_dir: Optional[Path] = None) -> tuple[str, str]:
         """
-        归档日志包与追问上下文到历史目录。
+        归档日志包、解压结果与追问上下文到历史目录。
 
         返回 (history_id, 归档后的 zip 路径)；未启用或失败时返回 ("", "")。
-        归档成功后工作目录中的 source.zip 会被移走，因此 cleanup 不会误删。
+        归档成功后工作目录中的 source.zip 会被移走，因此 cleanup 不会误删；
+        `extract_dir` 会整体移入记录目录，其生命周期与追问能力一致。
         """
         if self.history is None or not settings.history_enabled:
             return "", ""
@@ -1713,6 +1755,7 @@ class MaaAnalyzer:
                 uploader=uploader,
                 log_count=log_count,
                 image_count=image_count,
+                extract_dir=extract_dir,
             )
             if record is None:
                 return "", ""
@@ -1977,6 +2020,8 @@ class MaaAnalyzer:
                     ),
                     max_result_tokens=int(repo_cfg.max_tool_result_tokens or 0),
                     max_total_mb=int(settings.max_total_uncompressed_mb or 0),
+                    # 归档目录里的解压结果：存在就直接复用，不重复解压
+                    extract_dir=str(getattr(digest, "extract_dir", "") or ""),
                 )
                 if candidate.available():
                     log_tools = candidate
@@ -2092,7 +2137,7 @@ class MaaAnalyzer:
             return None
         finally:
             if log_tools is not None:
-                log_tools.close()
+                log_tools.release()
 
         if not raw:
             return None
@@ -2660,7 +2705,7 @@ class MaaAnalyzer:
             )
         finally:
             if log_tools is not None:
-                log_tools.close()
+                log_tools.release()
 
     @staticmethod
     async def _dispatch_agent_tool(name: str, arguments: dict,

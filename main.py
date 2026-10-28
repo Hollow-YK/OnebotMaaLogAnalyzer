@@ -371,6 +371,13 @@ async def _history_cleanup_loop(history, service, interval_seconds: int = 3600):
                         f"[历史] 配置「{name}」清理 {res.removed} 条记录，"
                         f"释放 {res.freed_bytes} 字节（{res.reason}）"
                     )
+            # 崩溃遗留的解压暂存目录：同样按周期顺手清掉
+            try:
+                stale = history.cleanup_staging()
+                if stale:
+                    logger.info(f"[历史] 清理 {stale} 个遗留的解压暂存目录")
+            except Exception as exc:
+                logger.warning(f"[历史] 清理解压暂存目录失败：{exc}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:

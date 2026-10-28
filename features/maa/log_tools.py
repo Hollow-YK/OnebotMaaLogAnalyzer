@@ -66,7 +66,8 @@ class LogArchiveTools:
                  max_result_chars: int = 30000,
                  max_search_files: int = 2000,
                  max_result_tokens: int = 0,
-                 max_total_mb: int = 0):
+                 max_total_mb: int = 0,
+                 extract_dir: str = ""):
         self.zip_path = str(zip_path or "")
         self.max_read_bytes = max(64, int(max_file_kb or 512)) * 1024
         self.max_result_chars = max(2000, int(max_result_chars or 30000))
@@ -75,8 +76,10 @@ class LogArchiveTools:
         total_mb = int(max_total_mb or 0) or DEFAULT_TOTAL_LIMIT_MB
         # 解压后总大小由 `probe_archive` 统一把关（下载后、AI 之前），
         # 这里只负责把同一上限交给解压器复核，不再单独设单文件上限。
+        # extract_dir 为空时退化为系统临时目录（用完即删）。
         self._extract = ExtractedArchive(
             self.zip_path,
+            target_dir=extract_dir,
             max_total_mb=total_mb,
             max_members=3000,
         )
@@ -95,8 +98,29 @@ class LogArchiveTools:
             return False
 
     def close(self) -> None:
-        """删除解压出来的临时目录（分析/追问结束时调用）。"""
+        """释放内存状态，不删除已解压目录（下次追问可直接复用）。"""
         self._extract.close()
+
+    def discard(self) -> None:
+        """删除解压目录（没有历史记录、或本次分析未能归档时调用）。"""
+        self._extract.discard()
+
+    def release(self) -> None:
+        """结束使用：目录可复用时只释放内存，临时目录直接删掉。"""
+        if self.persistent:
+            self.close()
+        else:
+            self.discard()
+
+    @property
+    def persistent(self) -> bool:
+        """解压结果是否由调用方指定位置持久保存。"""
+        return bool(self._extract.target_dir)
+
+    @property
+    def extract_dir(self) -> Optional[Path]:
+        """解压目录（尚未解压时返回计划位置）。"""
+        return self._extract.root or self._extract.target_dir
 
     def _root(self) -> Optional[Path]:
         root = self._extract.ensure()
