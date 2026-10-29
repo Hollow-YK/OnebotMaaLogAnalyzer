@@ -238,6 +238,12 @@ class ToolReadCapTests(unittest.TestCase):
             archive.writestr("logs/oneline.log", "E" * 2_000_000)    # 没有换行
             archive.writestr("logs/small.log", "first\nsecond ERROR line\n")
             archive.writestr("logs/empty.log", "")
+            # 命中点在前 64 KB 之后：用于验证 search 不再按读取窗口截断
+            archive.writestr(
+                "logs/tail.log", ("x" * 60 + "\n") * 3000 + "TAIL_NEEDLE\n"
+            )
+            # 命中点在单行 2000 字符展示上限之后：匹配必须用完整行
+            archive.writestr("logs/longline.log", "E" * 2500 + " LONG_NEEDLE\n")
         self.repo_root = self.tmp / "repo"
         self.repo_root.mkdir()
         (self.repo_root / "big.txt").write_text(
@@ -248,14 +254,48 @@ class ToolReadCapTests(unittest.TestCase):
     def _log_tools(self, **kwargs):
         return LogArchiveTools(str(self.zip_path), max_file_kb=64, **kwargs)
 
-    def test_log_read_is_byte_capped(self):
-        # 结果字符预算放大到 200k，让 64 KB 的单文件读取上限先触发
+    def test_log_read_window_is_byte_capped(self):
+        # 结果字符预算放大到 200k，让 64 KB 的“本次返回窗口”上限先触发
         tools = self._log_tools(max_result_chars=200000)
         try:
             out = asyncio.run(tools.read_file("logs/huge.log"))
-            self.assertIn("仅前 64 KB", out)
-            self.assertIn("仅读取前 64 KB", out)
+            self.assertIn("本次窗口 64 KB", out)
+            self.assertIn("本次已读取满 64 KB", out)
+            self.assertIn("start_line=", out)
             self.assertLess(len(out), 120000)
+        finally:
+            tools.close()
+
+    def test_log_read_start_line_can_jump_beyond_window(self):
+        """start_line 先跳过前缀，再对返回窗口计数：深处的行也能读到。"""
+        tools = self._log_tools(max_result_chars=200000)
+        try:
+            out = asyncio.run(tools.read_file(
+                "logs/huge.log", start_line=30000, end_line=30000
+            ))
+            self.assertIn("[行 30000]", out)
+            self.assertNotIn("超出", out)
+            self.assertIn("已到 end_line", out)
+        finally:
+            tools.close()
+
+    def test_log_search_scans_whole_file(self):
+        """命中点在前 64 KB 之后也必须能找到，且不能谎报“未匹配”。"""
+        tools = self._log_tools()
+        try:
+            out = asyncio.run(tools.search("TAIL_NEEDLE"))
+            self.assertIn("logs/tail.log", out)
+            self.assertIn("TAIL_NEEDLE", out)
+            self.assertNotIn("未在日志包中匹配到", out)
+        finally:
+            tools.close()
+
+    def test_log_search_matches_beyond_display_width(self):
+        """搜索匹配完整行，只有回显才截到 2000 字符。"""
+        tools = self._log_tools()
+        try:
+            out = asyncio.run(tools.search("LONG_NEEDLE"))
+            self.assertIn("logs/longline.log", out)
         finally:
             tools.close()
 
@@ -592,6 +632,82 @@ class ArchivePersistenceTests(unittest.TestCase):
         result = self.store.cleanup("cfg", period_hours=1, keep_periods=0)
         self.assertEqual(result.removed, 1)
         self.assertFalse(extracted.exists())
+
+    def test_cleanup_accounts_for_followup_extraction(self):
+        """分析时没解压、追问时才生成的 extracted/ 也要计入清理体积。"""
+        record = self.store.add(
+            config_name="cfg", group_id="1", file_name="logs.zip",
+            source_zip=self.zip_path, context="ctx", report="report",
+        )
+        self.assertIsNotNone(record)
+        old_size = record.size_bytes
+
+        # 模拟追问：归档 zip 已存在，extracted/ 第一次调用工具时才生成
+        extracted = self.store.extracted_dir("cfg", record.id)
+        tools = LogArchiveTools(
+            str(self.store.read_zip("cfg", record)),
+            extract_dir=str(extracted),
+        )
+        try:
+            asyncio.run(tools.read_file("logs/a.log"))
+        finally:
+            tools.release()
+        self.assertEqual(record.size_bytes, old_size)   # 尚未刷新
+
+        result = self.store.cleanup(
+            "cfg", period_hours=1, keep_periods=2,
+            max_total_mb=4096, force=True,
+        )
+        self.assertEqual(result.removed, 0)
+
+        expected = sum(
+            item.stat().st_size
+            for item in self.store.record_dir("cfg", record.id).rglob("*")
+            if item.is_file()
+        )
+        self.assertEqual(record.size_bytes, expected)
+        self.assertGreater(record.size_bytes, old_size)
+        self.assertEqual(self.store.stats("cfg")["bytes"], expected)
+
+        # 刷新后的体积落盘，重启后仍是实际值
+        reloaded = HistoryStore(self.data).find_by_id("cfg", record.id)
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.size_bytes, expected)
+
+    def test_cleanup_evicts_by_actual_extracted_size(self):
+        """账本偏小时仍按磁盘实际体积触发 history_max_total_mb。"""
+        big = self.data / "big.zip"
+        with zipfile.ZipFile(big, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("logs/big.log", "x" * (2 * 1024 * 1024))
+        record = self.store.add(
+            config_name="cfg", group_id="1", file_name="big.zip",
+            source_zip=big, context="", report="",
+        )
+        self.assertIsNotNone(record)
+        self.assertLess(record.size_bytes, 1024 * 1024)   # 压缩后很小
+
+        extracted = self.store.extracted_dir("cfg", record.id)
+        tools = LogArchiveTools(
+            str(self.store.read_zip("cfg", record)),
+            extract_dir=str(extracted),
+        )
+        try:
+            asyncio.run(tools.list_files())
+        finally:
+            tools.release()
+        extracted_bytes = sum(
+            item.stat().st_size for item in extracted.rglob("*")
+            if item.is_file()
+        )
+        self.assertGreater(extracted_bytes, 1024 * 1024)
+
+        result = self.store.cleanup(
+            "cfg", period_hours=1, keep_periods=2,
+            max_total_mb=1, force=True,
+        )
+        self.assertEqual(result.removed, 1)
+        self.assertIn("大小上限", result.reason)
+        self.assertFalse(self.store.record_dir("cfg", record.id).exists())
 
     def test_missing_extract_dir_is_ignored(self):
         record = self.store.add(

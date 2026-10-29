@@ -127,7 +127,7 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 | `history_period_hours` | `24` | 历史保留周期（小时） |
 | `history_keep_periods` | `2` | 保留周期数，超出即删除 |
 | `history_max_records` | `200` | 历史记录条数上限 |
-| `history_max_total_mb` | `4096` | 历史目录占用上限 MB（含解压后的 `extracted/` 体积） |
+| `history_max_total_mb` | `4096` | 历史目录占用上限 MB（按目录实际占用现算，含追问阶段补解压的 `extracted/`） |
 
 ## 摘要提取
 
@@ -175,7 +175,7 @@ MaaFramework 的日志按大小轮转：写满当前 `maafw.log` 后把它改名
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `small_log_full_read_mb` | `5` | 小于该值完整读取 MB |
-| `max_log_file_read_kb` | `512` | 普通模式单文件读取上限 KB |
+| `max_log_file_read_kb` | `512` | 日志包单文件读取/工具返回窗口上限 KB（`log_search` 流式全量扫描，不受此限） |
 | `stream_medium_logs` | `true` | 流式扫描中等日志 |
 | `large_log_threshold_mb` | `50` | 巨型日志判定阈值 MB |
 | `max_large_log_read_kb` | `256` | 仅前缀模式读取上限 KB |

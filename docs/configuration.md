@@ -586,7 +586,7 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `history_period_hours` | `int` / `24` | 历史保留周期（小时） | `"history_period_hours": 12` |
 | `history_keep_periods` | `int` / `2` | 保留周期数，超出即删除 | `"history_keep_periods": 3` |
 | `history_max_records` | `int` / `200` | 每配置历史记录条数上限；`0` = 不限 | `"history_max_records": 100` |
-| `history_max_total_mb` | `int` / `4096` | 历史目录总大小上限 MB；`0` = 不限 | `"history_max_total_mb": 2048` |
+| `history_max_total_mb` | `int` / `4096` | 历史目录总大小上限 MB；按记录目录实际占用现算（含追问阶段补解压的 `extracted/`）；`0` = 不限 | `"history_max_total_mb": 2048` |
 | `analysis_concurrency` | `int` / `2` | 同时进行的 AI 分析数（仓库状态相关的配置仍串行） | `"analysis_concurrency": 3` |
 | `download_concurrency` | `int` / `2` | 同时进行的下载数 | `"download_concurrency": 4` |
 | `download_timeout_seconds` | `int` / `120` | 下载超时秒数 | `"download_timeout_seconds": 300` |
@@ -613,7 +613,7 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `max_maafw_bak_mb` | `int` / `64` | 单个 `maafw.bak` 大小上限 MB；`0` = 不限制 | `"max_maafw_bak_mb": 32` |
 | `merge_archive_parts` | `bool` / `true` | 自动合并 `*-partNN.zip` 分卷日志包 | `"merge_archive_parts": false` |
 | `archive_part_settle_seconds` | `float` / `30` | 分卷静默期：连续该秒数无新分卷才开始分析；`0` = 首个分卷立即分析 | `"archive_part_settle_seconds": 60` |
-| `max_log_file_read_kb` | `int` / `512` | 普通模式单文件读取上限 KB | `"max_log_file_read_kb": 1024` |
+| `max_log_file_read_kb` | `int` / `512` | 日志包单文件读取/工具返回窗口上限 KB（`log_search` 流式全量扫描，不受此限） | `"max_log_file_read_kb": 1024` |
 | `small_log_full_read_mb` | `int` / `5` | 小于该值完整读取（MB） | `"small_log_full_read_mb": 3` |
 | `stream_medium_logs` | `bool` / `true` | 流式扫描中等日志 | `"stream_medium_logs": false` |
 | `large_log_threshold_mb` | `int` / `50` | 巨型日志判定阈值 MB | `"large_log_threshold_mb": 100` |

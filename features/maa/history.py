@@ -23,7 +23,8 @@
 注意:
   - git 仓库缓存（data/repo）**不属于**历史记录，本模块不会触碰
   - 除周期清理外，另有 max_records / max_total_mb 两个安全上限，
-    防止磁盘被意外写满；extracted/ 的体积也计入 size_bytes
+    防止磁盘被意外写满；清理时按记录目录的实际占用刷新 size_bytes，
+    因此追问阶段才补解压的 extracted/ 也会计入
 """
 from __future__ import annotations
 
@@ -455,6 +456,9 @@ class HistoryStore:
         周期语义：删除创建时间超过 period_hours × keep_periods 的记录。
         keep_periods <= 0 表示全部记录都过期（清空）。
         force=False 时，距上次清理不足一个周期则跳过。
+
+        清理前会按记录目录的**实际磁盘占用**刷新 `size_bytes`：追问阶段
+        才补生成的 `extracted/` 也算进容量上限，避免账本小于真实占用。
         """
         result = CleanupResult()
         period = max(1, int(period_hours or 24))
@@ -472,6 +476,10 @@ class HistoryStore:
             self.last_cleanup = now
             result.reason = "无记录"
             return result
+
+        # 体积以磁盘实际占用为准：分析结束后追问时才解压的 extracted/
+        # 不会经过 `add()`，只更新 records.json 里的旧值会漏算。
+        size_changed = self._refresh_sizes(config_name, records)
 
         # keep_periods <= 0 → 全部视为过期
         cutoff = (now + 1.0) if keep <= 0 else (now - keep * period * 3600)
@@ -499,6 +507,8 @@ class HistoryStore:
                 result.reason = "超出历史目录大小上限"
 
         if not expired:
+            if size_changed:
+                self.save(config_name)
             self.last_cleanup = now
             result.kept = len(survivors)
             return result
@@ -521,8 +531,19 @@ class HistoryStore:
         )
         return result
 
+    def _refresh_sizes(self, config_name: str,
+                       records: list[HistoryRecord]) -> bool:
+        """按记录目录的实际体积刷新 `size_bytes`（含追问补解压的目录）。"""
+        changed = False
+        for record in records:
+            actual = _dir_size(self.record_dir(config_name, record.id))
+            if actual != record.size_bytes:
+                record.size_bytes = actual
+                changed = True
+        return changed
+
     def _remove_record(self, config_name: str, record: HistoryRecord) -> int:
-        """删除单条记录的目录，返回释放的字节数。"""
+        """删除单条记录的目录，返回实际释放的字节数。"""
         target = self.record_dir(config_name, record.id)
         # 安全校验：只删历史目录内、且以记录 ID 命名的子目录
         try:
@@ -534,7 +555,8 @@ class HistoryStore:
         except OSError:
             return 0
 
-        freed = record.size_bytes
+        # 以删除前的实际占用为准：records.json 里的 size_bytes 可能偏小
+        freed = _dir_size(target)
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
         return freed
@@ -560,11 +582,14 @@ class HistoryStore:
         return summary
 
     def stats(self, config_name: str) -> dict:
-        """历史使用情况，供指令展示。"""
+        """历史使用情况，供指令展示（按目录实际体积统计）。"""
         records = self.load(config_name)
         return {
             "count": len(records),
-            "bytes": sum(r.size_bytes for r in records),
+            "bytes": sum(
+                _dir_size(self.record_dir(config_name, record.id))
+                for record in records
+            ),
             "oldest": min((r.created_at for r in records), default=0),
             "newest": max((r.created_at for r in records), default=0),
         }

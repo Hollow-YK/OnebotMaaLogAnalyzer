@@ -5,20 +5,21 @@
 摘要之外的原始内容（例如某条完整堆栈、某个配置项的原文、某个截图是否
 存在）时，可以用这里的工具直接读取日志包。
 
-实现方式与 dsh 对齐：先把压缩包**安全解压到临时目录**，工具本身只面向
-解压后的普通文件（行号窗口、单行宽度、字节上限与仓库工具同一套规则）。
-解压按需触发（模型第一次调用工具时才做），`close()` 时删除临时目录。
+实现方式与 dsh 对齐：先把压缩包**安全解压到目录**，工具本身只面向
+解压后的普通文件（行号窗口、单行宽度、读取窗口预算）。解压按需触发
+（模型第一次调用工具时才做）；目录是否保留由调用方决定，`close()`
+只释放内存，`discard()` / `release()` 负责删除。
 
 暴露的操作:
   - list_files  列出某个目录下的文件
-  - search      在文本文件中按正则搜索
-  - read_file   读取某个文本文件（支持行范围）
+  - search      在文本文件中按正则搜索（流式扫描完整文件）
+  - read_file   读取某个文本文件（支持行范围，`start_line` 可越过前缀）
   - list_images 列出图片
 
 安全边界:
   - 路径必须是相对路径，拒绝绝对路径与任何 `..` 上跳组件
-  - 解压阶段拒绝符号链接、凭据类文件，并限制单文件/总字节/成员数
-  - 单次读取受字节、行数与字符上限约束
+  - 解压阶段拒绝符号链接、凭据类文件，并限制总字节与成员数
+  - 单次读取受行窗口、单行宽度、字节与字符上限约束
 """
 from __future__ import annotations
 
@@ -60,7 +61,7 @@ _BINARY_SUFFIXES = {
 
 
 class LogArchiveTools:
-    """把日志压缩包解压到临时目录后执行 AI 请求的工具调用。"""
+    """把日志压缩包解压到目录后执行 AI 请求的工具调用。"""
 
     def __init__(self, zip_path: str, *, max_file_kb: int = 512,
                  max_result_chars: int = 30000,
@@ -169,30 +170,30 @@ class LogArchiveTools:
         buffer += piece[:room]
 
     def _iter_file_lines(self, path: Path,
-                         state: dict[str, Any]) -> Iterator[tuple[int, str]]:
+                         state: dict[str, Any],
+                         *, truncate: bool = True,
+                         ) -> Iterator[tuple[int, str]]:
         """
         逐块读取解压后的文件，产出 `(行号, 文本)`。
 
-        内存占用与文件大小无关：每次只读 `_CHUNK_BYTES`、单行缓冲封顶、
-        累计读取字节受 `max_read_bytes` 限制。
+        内存占用与文件大小无关：每次只读 `_CHUNK_BYTES`，单行缓冲封顶
+        `_MAX_LINE_BYTES`。`truncate` 控制超长行是否压到展示宽度：
+        读取工具需要截断（结果可读），搜索工具不截断（否则行尾命中会漏）。
 
-        `state` 回填：`truncated`（因字节上限提前停止）、
-        `complete`（是否读到文件末尾）。
+        `state` 回填 `complete`（是否读到文件末尾）；调用方提前停止读取时
+        该值为 False。
         """
-        limit = int(self.max_read_bytes or 0)
-        state["truncated"] = False
         state["complete"] = False
-        used = 0
         line_no = 0
         buffer = bytearray()
 
         def take_line() -> tuple[int, str]:
             nonlocal line_no
-            text = truncate_line(
-                bytes(buffer).decode("utf-8", "ignore").rstrip("\r")
-            )
+            text = bytes(buffer).decode("utf-8", "ignore").rstrip("\r")
             buffer.clear()
             line_no += 1
+            if truncate:
+                text = truncate_line(text)
             return line_no, text
 
         try:
@@ -202,16 +203,6 @@ class LogArchiveTools:
                     if not chunk:
                         state["complete"] = True
                         break
-                    hit_limit = False
-                    if limit > 0:
-                        room = limit - used
-                        if room <= 0:
-                            state["truncated"] = True
-                            break
-                        if len(chunk) > room:
-                            chunk = chunk[:room]
-                            hit_limit = True
-                    used += len(chunk)
                     start = 0
                     while True:
                         newline = chunk.find(b"\n", start)
@@ -221,14 +212,10 @@ class LogArchiveTools:
                         self._append_line_bytes(buffer, chunk[start:newline])
                         yield take_line()
                         start = newline + 1
-                    if hit_limit:
-                        state["truncated"] = True
-                        break
                 if buffer:
                     yield take_line()
         except OSError:
-            # 读失败：交出已读到的部分并标记不完整
-            state["truncated"] = True
+            # 读失败：交出已读到的部分，`complete` 保持 False
             if buffer:
                 yield take_line()
 
@@ -300,7 +287,6 @@ class LogArchiveTools:
         hits: list[str] = []
         scanned = 0
         truncated = False
-        capped: list[str] = []
         prefix = f"{rel}/" if rel else ""
         for member in self._extract.members:
             if prefix and not member.startswith(prefix):
@@ -313,7 +299,9 @@ class LogArchiveTools:
 
             scanned += 1
             state: dict[str, Any] = {}
-            iterator = self._iter_file_lines(root / member, state)
+            # 完整流式扫描：不按读取窗口截断，匹配也用未截断的行，
+            # 否则文件后半段/超长行尾部的命中会被静默漏掉。
+            iterator = self._iter_file_lines(root / member, state, truncate=False)
             try:
                 for lineno, line in iterator:
                     if not regex.search(line):
@@ -324,24 +312,17 @@ class LogArchiveTools:
                         break
             finally:
                 iterator.close()
-            if state.get("truncated"):
-                capped.append(member)
             if truncated:
                 break
 
         if not hits:
             return (f"未在日志包中匹配到 {pattern_text!r}"
-                    f"（已扫描 {scanned} 个文件）")
+                    f"（已扫描 {scanned} 个文件"
+                    + ("，已达文件数上限" if truncated else "") + "）")
         text = (f"日志包中匹配 {pattern_text!r} 的结果（{len(hits)} 条"
                 + ("，已达上限" if truncated else "")
                 + f"，扫描 {scanned} 个文件）：\n")
         text += "\n".join(hits)
-        if capped:
-            text += (f"\n...[{len(capped)} 个文件超过单文件读取上限 "
-                     f"{self.max_read_bytes // 1024} KB，只扫描了前 "
-                     f"{self.max_read_bytes // 1024} KB："
-                     + "、".join(capped[:3])
-                     + ("…" if len(capped) > 3 else "") + "]")
         if truncated:
             text += "\n...[结果已截断，可用更精确的 pattern 或限定 path]"
         return self._finish(text)
@@ -381,28 +362,38 @@ class LogArchiveTools:
             size = target.stat().st_size
         except OSError:
             size = 0
-        limit_kb = self.max_read_bytes // 1024
+        limit = int(self.max_read_bytes or 0)
+        limit_kb = limit // 1024
         budget = self.max_result_chars
         state: dict[str, Any] = {}
         rendered: list[str] = []
-        used = 0
+        used_chars = 0
+        window_bytes = 0
         seen = 0
         last = start - 1
         cut_by_budget = False
+        cut_by_bytes = False
         iterator = self._iter_file_lines(target, state)
         try:
             for lineno, text in iterator:
                 seen = lineno
                 if lineno < start:
+                    # 跳到 start_line 之前读到的行不计入返回窗口预算
                     continue
                 if requested_end is not None and lineno > requested_end:
                     break
                 line = f"[行 {lineno}] {text}"
-                if used + len(line) + 1 > budget:
+                line_bytes = len(line.encode("utf-8")) + 1
+                # 字符预算与字节预算都只作用于 start_line 之后的返回窗口
+                if used_chars + len(line) + 1 > budget:
                     cut_by_budget = True
                     break
+                if limit > 0 and window_bytes + line_bytes > limit:
+                    cut_by_bytes = True
+                    break
                 rendered.append(line)
-                used += len(line) + 1
+                used_chars += len(line) + 1
+                window_bytes += line_bytes
                 last = lineno
         finally:
             iterator.close()
@@ -410,16 +401,21 @@ class LogArchiveTools:
         if seen == 0:
             return f"日志包 {rel} 没有可读取的文本内容（{size} 字节）"
         if last < start:
+            if cut_by_budget or cut_by_bytes:
+                return (f"start_line={start} 处单行超过单次返回上限"
+                        f"（{budget} 字符 / {limit_kb} KB），无法显示")
             if state.get("complete"):
                 return (f"start_line={start} 超出范围：日志包 {rel} "
                         f"共 {seen} 行")
-            return (f"start_line={start} 超出已读取范围：日志包 {rel} 已读取 "
-                    f"{seen} 行（仅前 {limit_kb} KB）")
+            return (f"start_line={start} 之前读取失败：日志包 {rel} "
+                    f"只读到第 {seen} 行")
 
-        if state.get("complete"):
+        if state.get("complete") and not (cut_by_budget or cut_by_bytes):
             total_detail = f"共 {seen} 行"
-        elif state.get("truncated"):
-            total_detail = f"已读取 {seen} 行（仅前 {limit_kb} KB）"
+        elif cut_by_bytes:
+            total_detail = f"已读取到第 {last} 行（本次窗口 {limit_kb} KB）"
+        elif cut_by_budget:
+            total_detail = f"已读取到第 {last} 行"
         else:
             total_detail = f"至少 {seen} 行"
         header = (f"日志包 {rel}（{total_detail}，{size} 字节）"
@@ -427,9 +423,11 @@ class LogArchiveTools:
         body = "\n".join(rendered)
         if cut_by_budget:
             body += f"\n...[受结果长度限制，可用 start_line={last + 1} 继续读]"
-        elif state.get("truncated"):
-            body += f"\n...[仅读取前 {limit_kb} KB，其后内容未读取]"
-        elif requested_end is not None and last >= requested_end:
+        elif cut_by_bytes:
+            body += (f"\n...[本次已读取满 {limit_kb} KB，可用 "
+                     f"start_line={last + 1} 继续读]")
+        elif (requested_end is not None and last >= requested_end
+              and not state.get("complete")):
             body += f"\n...[已到 end_line，可用 start_line={last + 1} 继续读]"
         return self._finish(header + body)
 

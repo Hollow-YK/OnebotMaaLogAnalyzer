@@ -55,7 +55,10 @@ graph LR
 | `history_period_hours` | `24` | 保留周期（小时） |
 | `history_keep_periods` | `2` | 保留多少个周期，超出即删除 |
 | `history_max_records` | `200` | 记录条数安全上限（防磁盘写满） |
-| `history_max_total_mb` | `4096` | 历史目录总大小安全上限 MB（**含解压后的 `extracted/` 体积**） |
+| `history_max_total_mb` | `4096` | 历史目录总大小安全上限 MB（**按记录目录实际占用现算，含追问阶段补解压的 `extracted/`**） |
+
+> 清理与 `/maa history` 统计都按记录目录的**实际磁盘体积**现算；分析时没解压、
+> 追问时才生成的 `extracted/` 也会计入，不再依赖归档时写入的旧 `size_bytes`。
 
 > ⚠️ **git 仓库缓存（`data/repo/`）不属于历史记录，永远不会被清理。**
 > 清理只删除 `data/<配置名>/history/` 内部以记录 ID 命名的子目录（有路径越界校验），
