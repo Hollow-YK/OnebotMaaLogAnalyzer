@@ -264,7 +264,6 @@ def default_config() -> dict:
                         "ai_stage_timeout_seconds": 300,
                         # 0 = 用 llm.defaults.max_context_tokens
                         "max_context_tokens": 0,
-                        "analysis_concurrency": 2,
                     },
                     # QQ 指令（默认前缀 /maa，发 `/maa help` 查看全部）
                     "commands": {
@@ -362,7 +361,7 @@ async def _history_cleanup_loop(history, service, interval_seconds: int = 3600):
     while True:
         try:
             await asyncio.sleep(max(300, int(interval_seconds or 3600)))
-            results = history.cleanup_all(
+            results = await history.cleanup_all_async(
                 {name: state.settings for name, state in service.configs.items()}
             )
             for name, res in results.items():
@@ -373,7 +372,7 @@ async def _history_cleanup_loop(history, service, interval_seconds: int = 3600):
                     )
             # 崩溃遗留的解压暂存目录：同样按周期顺手清掉
             try:
-                stale = history.cleanup_staging()
+                stale = await history.cleanup_staging_async()
                 if stale:
                     logger.info(f"[历史] 清理 {stale} 个遗留的解压暂存目录")
             except Exception as exc:

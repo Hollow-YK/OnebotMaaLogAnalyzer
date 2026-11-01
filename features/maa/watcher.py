@@ -405,10 +405,10 @@ class LogWatcher:
         await self._notify_render_fallback(cfg, group_int, outcome)
 
         # 把消息 ID 补写到历史归档（使引用可跨天定位）
-        self._link_history(cfg, outcome, sent_ids)
+        await self._link_history(cfg, outcome, sent_ids)
 
         # 开启追问答疑会话（以本次分析发出的消息为引用锚点）
-        self._start_followup(cfg, group_id, outcome, sent_ids)
+        await self._start_followup(cfg, group_id, outcome, sent_ids)
 
         # 报告发给通知群（若与监听群不同）
         notify = cfg.info.notify_group
@@ -516,7 +516,7 @@ class LogWatcher:
         await flush()
         return sent
 
-    def _link_history(self, cfg: ConfigState, outcome, message_ids: list) -> None:
+    async def _link_history(self, cfg: ConfigState, outcome, message_ids: list) -> None:
         """把本次发出的消息 ID 补写到历史记录，供后续引用反查。"""
         if self.history is None:
             return
@@ -529,7 +529,7 @@ class LogWatcher:
                 if record.id != history_id:
                     continue
                 record.message_ids = [str(m) for m in message_ids if m]
-                self.history.save(cfg.name)
+                await self.history.save_async(cfg.name)
                 logger.info(
                     f"[历史] #{history_id} 已关联 {len(record.message_ids)} 条消息"
                 )
@@ -537,7 +537,7 @@ class LogWatcher:
         except Exception as exc:
             logger.warning(f"[历史] 关联消息 ID 失败：{exc}")
 
-    def _start_followup(self, cfg: ConfigState, group_id: str, outcome,
+    async def _start_followup(self, cfg: ConfigState, group_id: str, outcome,
                         message_ids: Optional[list] = None) -> None:
         """分析成功后开启追问答疑会话（需引用这些消息才能追问）。"""
         if self.followup is None:
@@ -548,6 +548,11 @@ class LogWatcher:
         context = getattr(outcome, "followup_context", "")
         if not context or not outcome.response_text:
             return
+        # 策略属于当前配置：会话刚建立就按它自己的窗口 / 轮数 / 会话数计算
+        try:
+            self.followup.apply_policy(cfg.name, settings)
+        except Exception as exc:
+            logger.warning(f"[监听] 下发追问策略失败：{exc}")
         try:
             self.followup.start(
                 group_id=group_id,
@@ -584,7 +589,7 @@ class LogWatcher:
         )
         logger.info(f"[监听] 跳过 {file_name}（{reason}），记录 #{job.id}")
         self.s.trim_jobs(cfg.name)
-        self.s.save_config(cfg.name)
+        self.s.schedule_save_config(cfg.name)
 
     # ════════════════════════════════════════════════════════════
     # 工具

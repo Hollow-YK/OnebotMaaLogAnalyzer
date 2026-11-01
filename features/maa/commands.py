@@ -69,7 +69,6 @@ _FIELD_LABELS: dict[str, str] = {
     "context_retain_ratio": "压缩后保留最近对话的比例（默认 0.25）",
     "context_prune_tool_result_tokens": "历史工具结果裁剪的 token 上限（0=不裁剪）",
     "context_summary_tokens": "压缩摘要的 token 上限",
-    "analysis_concurrency": "同时分析的任务数",
     "analysis_cache_hours": "分析结果缓存小时数（0=关闭）",
     "circuit_breaker_enabled": "连续失败时熔断端点",
 }
@@ -318,7 +317,10 @@ class CommandHandler:
             f"任务记录：{len(cfg.jobs)} 条",
         ]
         if self.followup is not None:
-            lines.append(f"追问会话总数：{self.followup.count}")
+            lines.append(
+                f"追问会话：本配置 {self.followup.count_for(cfg.name)} 个"
+                f" / 全部 {self.followup.count} 个"
+            )
         return CommandResult(text="\n".join(lines))
 
     async def _cmd_get(self, cfg: ConfigState, args: list[str]) -> CommandResult:
@@ -480,7 +482,7 @@ class CommandHandler:
             if error:
                 return CommandResult(text=f"值无效：{error}", ok=False)
             self.s.set_project_override(cfg.name, field_name, value, nested=f"ui.{ui_key}")
-            self.s.save_config(cfg.name)
+            await self.s.save_config_async(cfg.name)
             return CommandResult(
                 text=f"已设置 project.ui.{ui_key}.{field_name} = {value}"
                      f"（{_UI_LABELS.get(field_name, field_name)}）"
@@ -496,7 +498,7 @@ class CommandHandler:
             if error:
                 return CommandResult(text=f"值无效：{error}", ok=False)
             self.s.set_project_override(cfg.name, field_name, value, nested="repo")
-            self.s.save_config(cfg.name)
+            await self.s.save_config_async(cfg.name)
             shown_value = redact_remote_url(value) if field_name == "url" else value
             return CommandResult(
                 text=f"已设置 project.repo.{field_name} = {shown_value}"
@@ -510,7 +512,7 @@ class CommandHandler:
         if error:
             return CommandResult(text=f"值无效：{error}", ok=False)
         self.s.set_project_override(cfg.name, name, value)
-        self.s.save_config(cfg.name)
+        await self.s.save_config_async(cfg.name)
         return CommandResult(
             text=f"已设置 project.{name} = {value}"
                  f"（{_PROJECT_LABELS.get(name, name)}）"
@@ -571,7 +573,7 @@ class CommandHandler:
         sub = args[0].lower() if args else "status"
 
         if sub in ("clean", "clear", "清理"):
-            result = self.history.cleanup(
+            result = await self.history.cleanup_async(
                 cfg.name,
                 period_hours=settings.history_period_hours,
                 keep_periods=settings.history_keep_periods,
@@ -587,7 +589,7 @@ class CommandHandler:
             )
 
         if sub in ("purge", "清空"):
-            result = self.history.cleanup(
+            result = await self.history.cleanup_async(
                 cfg.name, period_hours=1, keep_periods=0,
                 max_records=0, max_total_mb=0, force=True,
             )
@@ -626,6 +628,11 @@ class CommandHandler:
     async def _cmd_followup(self, cfg: ConfigState, args: list[str]) -> CommandResult:
         if self.followup is None:
             return CommandResult(text="追问答疑功能未启用。", ok=False)
+        # 策略按配置下发：状态与结束都按当前配置自己的窗口 / 轮数口径计算
+        try:
+            self.followup.apply_policy(cfg.name, cfg.settings)
+        except Exception as exc:
+            logger.warning(f"[指令] 下发追问策略失败：{exc}")
         sub = args[0].lower() if args else "status"
         if sub in ("close", "end", "结束"):
             closed = self.followup.close(self._current_group)
@@ -660,7 +667,7 @@ class CommandHandler:
             return CommandResult(text=f"值无效：{error}", ok=False)
 
         self.s.set_setting_override(cfg.name, name, value)
-        self.s.save_config(cfg.name)
+        await self.s.save_config_async(cfg.name)
         label = _FIELD_LABELS.get(name, name)
         logger.info(f"[指令] {cfg.name}: {name} = {value!r}")
         return CommandResult(text=f"已设置 {label}（{name}）= {value}")
@@ -674,12 +681,12 @@ class CommandHandler:
 
     async def _cmd_enable(self, cfg: ConfigState, args: list[str]) -> CommandResult:
         self.s.set_setting_override(cfg.name, "enabled", True)
-        self.s.save_config(cfg.name)
+        await self.s.save_config_async(cfg.name)
         return CommandResult(text=f"已启用配置「{cfg.name}」。")
 
     async def _cmd_disable(self, cfg: ConfigState, args: list[str]) -> CommandResult:
         self.s.set_setting_override(cfg.name, "enabled", False)
-        self.s.save_config(cfg.name)
+        await self.s.save_config_async(cfg.name)
         return CommandResult(text=f"已停用配置「{cfg.name}」。停用后不再自动分析日志包。")
 
     async def _cmd_reload(self, cfg: ConfigState, args: list[str]) -> CommandResult:
@@ -751,7 +758,7 @@ class CommandHandler:
             )
 
         self.s.set_project_override(cfg.name, "mirrors", mirrors, nested="repo")
-        self.s.save_config(cfg.name)
+        await self.s.save_config_async(cfg.name)
         return CommandResult(text="已更新 repo.mirrors（下次准备/更新仓库时生效）。")
 
     async def _set_repo_field(self, cfg: ConfigState, name: str,
@@ -772,7 +779,7 @@ class CommandHandler:
             value = mode
 
         self.s.set_project_override(cfg.name, name, value, nested="repo")
-        self.s.save_config(cfg.name)
+        await self.s.save_config_async(cfg.name)
         label = _REPO_LABELS.get(name, name)
         shown_value = redact_remote_url(value) if name == "url" else value
         logger.info(f"[指令] {cfg.name}: repo.{name} = {shown_value!r}")

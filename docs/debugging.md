@@ -98,9 +98,12 @@ curl http://127.0.0.1:8765/debug/configs
 ### 运行全部套件
 
 ```bash
-python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;cfg={'bot':{'data_dir':'data/test','configs':{}}};[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config(cfg)))) for n in ('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach','followup_tool_loop','followup_converge_fallback','render_image')]"
+python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;names=('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach','followup_tool_loop','followup_converge_fallback','render_image');[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config({'bot':{'data_dir':'data/test','configs':{}}})))) for n in names]"
 ```
 
+> 每个套件都要**新建** `DebugManager`（如上）。复用同一个实例会把上一个套件的
+> 会话 / 历史 / 内存状态带到下一个，表现为大量“重启后…”场景失败。
+>
 > 每次运行前先删除 `data/test`，否则残留配置会导致群多归属 → `resolve_config` 返回 `None` 而误判失败。
 >
 > 调试夹具里的 `report` 段未声明时默认 `render=text`，这样多数场景不依赖本机浏览器；

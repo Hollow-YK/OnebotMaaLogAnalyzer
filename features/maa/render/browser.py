@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import base64
+import functools
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -184,6 +186,20 @@ class _CDP:
             pass
 
 
+def _locked(method):
+    """给浏览器生命周期方法加同一把可重入锁。
+
+    render → 失败重启 → close + start 是同一条调用链，必须可重入；
+    外部并发渲染则在锁外排队（见 features/maa/render/__init__.py 的渲染队列）。
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class BrowserRenderer:
     """常驻的无头浏览器实例（渲染串行化）。"""
 
@@ -199,6 +215,8 @@ class BrowserRenderer:
         self._session_id = ""
         self._frame_id = ""
         self._profile = self.data_dir / "_browser_profile"
+        # render / start / close 共用的一把可重入锁
+        self._lock = threading.RLock()
 
     # ── 生命周期 ──
 
@@ -206,6 +224,7 @@ class BrowserRenderer:
     def available(self) -> bool:
         return self.exe is not None or find_browser(self.browser_path) is not None
 
+    @_locked
     def start(self) -> None:
         if self._cdp is not None:
             return
@@ -330,6 +349,7 @@ class BrowserRenderer:
             raise BrowserUnavailable("无法获取页面 frameId")
         logger.info(f"[渲染] 浏览器已启动：{exe}")
 
+    @_locked
     def close(self) -> None:
         if self._cdp is not None:
             try:
@@ -421,6 +441,7 @@ class BrowserRenderer:
 
     # ── 渲染 ──
 
+    @_locked
     def render(
         self,
         markdown: str,

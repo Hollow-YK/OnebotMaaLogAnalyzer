@@ -181,7 +181,8 @@ AI 输出 Markdown（含 section / page-break / 附件指令）
 
 - `browser_path` 指向存在的文件时**直接使用**，不做探测；无效则记 warning 并回退探测。
 - 配置目录被占用时自动改用 `_browser_profile_<pid>_<时间戳>`，启动前清理历史遗留目录。
-- 渲染串行化；`reuse_browser=false` 时每次渲染后关闭进程。
+- 渲染按 `data_dir` 排队串行（渲染 / 失败重启 / 关闭共用一把锁）：同一 data_dir 下所有配置共用一个浏览器进程，它们的渲染排队，不同 data_dir 互不影响。
+- `reuse_browser=false` 时每次渲染后关闭进程。
 - Bot 停止 / 重载时调用 `close_all()` 关闭全部常驻浏览器。
 - 实测延迟：冷启动约 0.5–1 s，热态每页约 100 ms。
 

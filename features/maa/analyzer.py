@@ -33,6 +33,7 @@ from core.compaction import (
     ConversationCompactor,
     render_messages,
 )
+from core.concurrency import KeyedLocks
 from core.llm_pool import current_session_id, new_session_id, session_context
 from core.log_context import config_log_context
 from core.tokens import (
@@ -325,23 +326,25 @@ class MaaAnalyzer:
     日志包分析器 — 串起下载 → 摘要 → LLM 三段流程。
 
     并发控制:
-      - download_semaphore: 限制同时下载数
-      - analysis_semaphore: 限制同时调用 LLM 数
+      - 同一配置内**排队串行**：分析 / 追问 / 仓库操作共用每个配置一把的工作锁。
+      - 不同配置**互不影响**：信号量、仓库、缓存都按配置名隔离，不共享可变状态。
+      - download_semaphore: 限制同一次分析内的并行下载数。
     """
     def __init__(self, service: "MaaService", llm: LLMPool, history=None):
         self.s = service
         self.llm = llm
         # 历史存储：归档日志包与追问上下文（None 表示不启用）
         self.history = history
-        # config_name → (download_n, analysis_n, download_sem, analysis_sem)
-        self._semaphores: dict[str, tuple[int, int, asyncio.Semaphore, asyncio.Semaphore]] = {}
+        # config_name → (download_n, download_sem)
+        self._semaphores: dict[str, tuple[int, asyncio.Semaphore]] = {}
         # config_name → RepoProvider（复用克隆结果与索引）
         self._repos: dict[str, RepoProvider] = {}
         self._fallback_repos: dict[str, RepoProvider] = {}
         self._active_repos: dict[str, RepoProvider] = {}
         self._repo_preload_tasks: dict[str, asyncio.Task] = {}
         self._repo_preload_status: dict[str, dict] = {}
-        self._analysis_locks: dict[str, asyncio.Lock] = {}
+        # 按配置的工作锁：同一配置的分析 / 追问 / 仓库操作排队串行
+        self._analysis_locks = KeyedLocks()
         self.active_jobs: set[str] = set()
         # 分析结果缓存（仅缓存 AI 文本，不缓存下载与摘要）
         self._ai_cache: dict[str, tuple[float, str]] = {}
@@ -382,17 +385,32 @@ class MaaAnalyzer:
     # 并发控制
     # ════════════════════════════════════════════════════════════
 
-    def _semaphore_pair(self, config_name: str, settings: AnalysisSettings):
-        """按配置维护下载/分析信号量，设置变更时自动重建。"""
+    def _config_lock(self, config_name: str) -> asyncio.Lock:
+        """按配置取工作锁：同一配置的分析 / 追问 / 仓库操作串行。"""
+        return self._analysis_locks.get(config_name)
+
+    def config_work_lock(self, config_name: str) -> asyncio.Lock:
+        """给追问、指令等外部路径复用同一把按配置工作锁。"""
+        return self._config_lock(config_name)
+
+    def config_queue_depth(self, config_name: str) -> int:
+        """该配置上「排队 + 执行中」的任务数（仅用于状态展示）。"""
+        return self._analysis_locks.busy_depth(config_name)
+
+    def _download_semaphore(self, config_name: str,
+                            settings: AnalysisSettings) -> asyncio.Semaphore:
+        """按配置维护下载信号量。
+
+        分析本身已按配置串行，设置不会在一次分析中途变化——旧实现
+        「热换信号量时旧任务还在跑」的竞态不会发生。
+        """
         download_n = max(1, int(settings.download_concurrency or 1))
-        analysis_n = max(1, int(settings.analysis_concurrency or 1))
         cached = self._semaphores.get(config_name)
-        if cached and cached[0] == download_n and cached[1] == analysis_n:
-            return cached[2], cached[3]
-        download_sem = asyncio.Semaphore(download_n)
-        analysis_sem = asyncio.Semaphore(analysis_n)
-        self._semaphores[config_name] = (download_n, analysis_n, download_sem, analysis_sem)
-        return download_sem, analysis_sem
+        if cached and cached[0] == download_n:
+            return cached[1]
+        sem = asyncio.Semaphore(download_n)
+        self._semaphores[config_name] = (download_n, sem)
+        return sem
 
     # ── 配置访问 ──
 
@@ -579,7 +597,7 @@ class MaaAnalyzer:
             status["state"] = "已取消"
             raise
         finally:
-            lock = self._analysis_locks.setdefault(config_name, asyncio.Lock())
+            lock = self._config_lock(config_name)
             async with lock:
                 fallback = self._fallback_repos.get(config_name)
                 if fallback is not None:
@@ -619,30 +637,23 @@ class MaaAnalyzer:
         if job_key in self.active_jobs:
             return AnalysisOutcome(ok=False, file_name=file_name, error="这个日志包正在分析中，请稍等。")
         self.active_jobs.add(job_key)
-        # 只有需要仓库状态的配置才按配置串行（切换 tag / 还原位置会互相干扰）；
-        # 纯日志包分析不再被这把锁串行化，analysis_concurrency 才能真正生效。
-        needs_repo_lock = bool(project.repo.enabled)
-        lock = self._analysis_locks.setdefault(config_name, asyncio.Lock())
+        # 同一配置内的分析一律排队串行：仓库工作区、渲染浏览器、历史目录都归
+        # 该配置独占，并行只会互相切版本、串图、抢历史。不同配置互不影响。
+        # 追问与仓库指令共用同一把锁（见 config_work_lock）。
+        lock = self._config_lock(config_name)
         # 一次分析 + 其后续追问共用一个会话 ID，用量与报告页脚统计都按它聚合
         session_id = new_session_id(config_name)
+        depth = self.config_queue_depth(config_name)
+        if depth >= 1:
+            logger.info(
+                f"[分析] 配置「{config_name}」已有 {depth} 个任务在跑/排队，"
+                f"本次排队等待：{file_name}"
+            )
         try:
             with config_log_context(config_name), session_context(
                 session_id, config_name, file_name
             ):
-                if needs_repo_lock:
-                    async with lock:
-                        outcome = await self._analyze_serialized(
-                            config_name=config_name,
-                            settings=settings,
-                            project=project,
-                            group_id=group_id,
-                            file_name=file_name,
-                            file_id=file_id,
-                            file_size=file_size,
-                            uploader=uploader,
-                            progress=progress,
-                        )
-                else:
+                async with lock:
                     outcome = await self._analyze_serialized(
                         config_name=config_name,
                         settings=settings,
@@ -711,7 +722,7 @@ class MaaAnalyzer:
                         error="无法获取该群文件的 file_id，暂时不能下载分析。",
                     )
 
-            download_sem, analysis_sem = self._semaphore_pair(config_name, settings)
+            download_sem = self._download_semaphore(config_name, settings)
 
             extra_notes: list[str] = []
             if part is not None and settings.merge_archive_parts:
@@ -829,46 +840,45 @@ class MaaAnalyzer:
                 response_text = cached_text
                 logger.info("[分析] 命中分析缓存，跳过 AI 调用")
             else:
-                async with analysis_sem:
-                    # 需要工具时（agent 模式，或 inject 模式下日志包仍可用）
-                    use_tools = project.repo.use_agent() or bool(settings.log_tools_enabled)
-                    if use_tools and not self.llm.has_capability(
-                        self._llm_cfg(config_name), "tools"
-                    ):
-                        use_tools = False
-                        tool_note = "当前配置没有支持工具调用的模型，已降级为普通对话。"
-                        logger.warning(f"[分析] {tool_note}")
-                    stage_timeout = max(30, int(settings.ai_stage_timeout_seconds or 300))
-                    if use_tools and (repo_prep.provider is not None or zip_path.exists()):
-                        if settings.log_tools_enabled:
-                            log_tools = self._make_log_tools(
-                                config_name, settings, project,
-                                current_session_id() or new_session_id(config_name),
-                                str(zip_path),
-                            )
-                        response_text = await asyncio.wait_for(
-                            self._run_repo_agent(
-                                config_name, settings, prompt, repo_prep.provider,
-                                project=project,
-                                user_content=user_content,
-                                vision_state=vision_state,
-                                log_tools=log_tools,
-                            ),
-                            timeout=stage_timeout,
+                # 需要工具时（agent 模式，或 inject 模式下日志包仍可用）
+                use_tools = project.repo.use_agent() or bool(settings.log_tools_enabled)
+                if use_tools and not self.llm.has_capability(
+                    self._llm_cfg(config_name), "tools"
+                ):
+                    use_tools = False
+                    tool_note = "当前配置没有支持工具调用的模型，已降级为普通对话。"
+                    logger.warning(f"[分析] {tool_note}")
+                stage_timeout = max(30, int(settings.ai_stage_timeout_seconds or 300))
+                if use_tools and (repo_prep.provider is not None or zip_path.exists()):
+                    if settings.log_tools_enabled:
+                        log_tools = self._make_log_tools(
+                            config_name, settings, project,
+                            current_session_id() or new_session_id(config_name),
+                            str(zip_path),
                         )
-                    else:
-                        response_text = await asyncio.wait_for(
-                            self._call_ai(
-                                settings, prompt, project,
-                                config_name=config_name, content=user_content,
-                            ),
-                            timeout=stage_timeout,
-                        )
-                        # AI 可请求切换到其他 tag 复核（受 max_tag_switch_rounds 限制）
-                        response_text = await self._maybe_recheck_with_other_tag(
-                            config_name, settings, prompt, response_text,
-                            repo_prep.context, project,
-                        )
+                    response_text = await asyncio.wait_for(
+                        self._run_repo_agent(
+                            config_name, settings, prompt, repo_prep.provider,
+                            project=project,
+                            user_content=user_content,
+                            vision_state=vision_state,
+                            log_tools=log_tools,
+                        ),
+                        timeout=stage_timeout,
+                    )
+                else:
+                    response_text = await asyncio.wait_for(
+                        self._call_ai(
+                            settings, prompt, project,
+                            config_name=config_name, content=user_content,
+                        ),
+                        timeout=stage_timeout,
+                    )
+                    # AI 可请求切换到其他 tag 复核（受 max_tag_switch_rounds 限制）
+                    response_text = await self._maybe_recheck_with_other_tag(
+                        config_name, settings, prompt, response_text,
+                        repo_prep.context, project,
+                    )
                 if response_text:
                     self._cache_put(
                         config_name, file_id or "", file_size or 0, response_text
@@ -946,7 +956,7 @@ class MaaAnalyzer:
             )
             # 归档日志包、解压结果与上下文（使追问可跨天）。
             # 解压目录会整体并入历史记录，因此追问期间不必重复解压。
-            history_id, archived_zip = self._archive_history(
+            history_id, archived_zip = await self._archive_history(
                 config_name=config_name,
                 settings=settings,
                 group_id=group_id,
@@ -1038,7 +1048,7 @@ class MaaAnalyzer:
         job.detail = detail
         job.finished_at = int(time.time())
         self.s.trim_jobs(config_name)
-        self.s.save_config(config_name)
+        self.s.schedule_save_config(config_name)
 
     # ════════════════════════════════════════════════════════════
     # 子步骤
@@ -1727,7 +1737,7 @@ class MaaAnalyzer:
     # 分析历史
     # ════════════════════════════════════════════════════════════
 
-    def _archive_history(self, *, config_name: str, settings: AnalysisSettings,
+    async def _archive_history(self, *, config_name: str, settings: AnalysisSettings,
                          group_id: int, file_name: str, file_id: str,
                          uploader: str, zip_path: Path, context: str,
                          report: str, log_count: int,
@@ -1743,7 +1753,7 @@ class MaaAnalyzer:
         if self.history is None or not settings.history_enabled:
             return "", ""
         try:
-            record = self.history.add(
+            record = await self.history.add_async(
                 config_name=config_name,
                 group_id=str(group_id),
                 file_name=file_name,

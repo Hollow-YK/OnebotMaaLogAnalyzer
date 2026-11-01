@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from core.concurrency import run_blocking
 from core.models import RepoConfig
 from features.maa.repo import (
     CHECKOUT_BUDGET_TIMEOUT,
@@ -289,6 +290,10 @@ LOG_TOOL_DEFINITIONS: list[dict] = [
 ]
 
 
+# 同时进行的仓库遍历 / 读文件线程数上限
+REPO_TOOL_THREADS = 4
+
+
 class RepoTools:
     """在仓库沙箱内执行 AI 请求的工具调用。"""
 
@@ -298,6 +303,10 @@ class RepoTools:
         self.ref_switches = 0
         self.update_calls = 0
         self._max_read_bytes = max(16, int(config.max_file_kb or 256)) * 1024
+
+    async def _run_io(self, func, *args):
+        """在线程里执行阻塞的目录遍历 / 读文件，避免卡住事件循环。"""
+        return await run_blocking(func, *args, limit=REPO_TOOL_THREADS)
 
     # ════════════════════════════════════════════════════════════
     # 入口
@@ -370,6 +379,10 @@ class RepoTools:
     # ════════════════════════════════════════════════════════════
 
     async def _list_dir(self, args: dict) -> str:
+        """异步入口：目录遍历在线程里跑。"""
+        return await self._run_io(self._list_dir_sync, args)
+
+    def _list_dir_sync(self, args: dict) -> str:
         target, err = self._resolve(args.get("path", ""))
         if target is None:
             return err
@@ -414,6 +427,10 @@ class RepoTools:
         return text
 
     async def _search_repo(self, args: dict) -> str:
+        """异步入口：目录遍历与读文件在线程里跑。"""
+        return await self._run_io(self._search_repo_sync, args)
+
+    def _search_repo_sync(self, args: dict) -> str:
         pattern_text = str(args.get("pattern") or "").strip()
         if not pattern_text:
             return "缺少 pattern 参数"
@@ -502,6 +519,10 @@ class RepoTools:
         return text
 
     async def _read_file(self, args: dict) -> str:
+        """异步入口：读文件在线程里跑。"""
+        return await self._run_io(self._read_file_sync, args)
+
+    def _read_file_sync(self, args: dict) -> str:
         path_arg = str(args.get("path") or "").strip()
         if not path_arg:
             return "缺少 path 参数"

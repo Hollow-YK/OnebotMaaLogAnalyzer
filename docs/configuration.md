@@ -100,8 +100,7 @@
           "history_period_hours": 24,
           "history_keep_periods": 2,
           "ai_stage_timeout_seconds": 300,
-          "max_context_tokens": 0,
-          "analysis_concurrency": 2
+          "max_context_tokens": 0
         },
         "commands": {
           "enabled": true,
@@ -557,11 +556,11 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
   "followup_enabled": true,
   "history_period_hours": 12,
   "context_compact_ratio": 0.75,
-  "analysis_concurrency": 3
+  "download_concurrency": 4
 }
 ```
 
-`settings` 接受下列全部 63 个分析设置项（顺序与代码一致），逐项行为与调优建议见 [分析设置](settings.md)：
+`settings` 接受下列全部 62 个分析设置项（顺序与代码一致），逐项行为与调优建议见 [分析设置](settings.md)：
 
 | 设置项 | 类型 / 默认 | 说明 | 示例 |
 | --- | --- | --- | --- |
@@ -587,8 +586,7 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `history_keep_periods` | `int` / `2` | 保留周期数，超出即删除 | `"history_keep_periods": 3` |
 | `history_max_records` | `int` / `200` | 每配置历史记录条数上限；`0` = 不限 | `"history_max_records": 100` |
 | `history_max_total_mb` | `int` / `4096` | 历史目录总大小上限 MB；按记录目录实际占用现算（含追问阶段补解压的 `extracted/`）；`0` = 不限 | `"history_max_total_mb": 2048` |
-| `analysis_concurrency` | `int` / `2` | 同时进行的 AI 分析数（仓库状态相关的配置仍串行） | `"analysis_concurrency": 3` |
-| `download_concurrency` | `int` / `2` | 同时进行的下载数 | `"download_concurrency": 4` |
+| `download_concurrency` | `int` / `2` | 同一配置内同时进行的下载数（分卷并行下载） | `"download_concurrency": 4` |
 | `download_timeout_seconds` | `int` / `120` | 下载超时秒数 | `"download_timeout_seconds": 300` |
 | `digest_timeout_seconds` | `int` / `0` | 摘要提取超时；`0` = 不限制 | `"digest_timeout_seconds": 120` |
 | `ai_stage_timeout_seconds` | `int` / `300` | 整个 AI 阶段（含工具循环与收敛）总时长上限 | `"ai_stage_timeout_seconds": 600` |
@@ -816,7 +814,7 @@ max_tokens：         llm.defaults → providers[].models[] → bot.configs.<名
 
 - 过滤在**原列表顺序**上进行，完全相同的 `{name, model}` 会被去重
 - 过滤后为空则该能力降级（不提供工具 / 不注入图片），并在报告中注明，而不是整体失败
-- 每个端点一把并发信号量（`max_concurrency`），跨配置共享；`settings.analysis_concurrency` 控制任务级并发，两者互不替代
+- 每个端点一把并发信号量（`max_concurrency`），跨配置共享；同一配置内的分析恒为串行（见[并发模型](architecture.md#并发模型)），因此端点并发只在该配置内部生效
 
 ### 失败转移与重试
 

@@ -12,10 +12,12 @@ import asyncio
 import base64
 import html
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from core.concurrency import KeyedLocks, KeyedThreadLocks
 from core.models import ReportConfig
 from features.maa.render.browser import BrowserRenderer, BrowserUnavailable, find_browser
 from features.maa.render.markdown import clean_markdown
@@ -23,8 +25,15 @@ from features.maa.render.template import TemplateSet, load_template
 
 logger = logging.getLogger("Maa.Render")
 
-# (data_dir, template_root) → 常驻浏览器
+# (data_dir, template_root, browser_path) → 常驻浏览器
 _RENDERERS: dict[tuple[str, str, str], BrowserRenderer] = {}
+# 渲染器字典本身的取用互斥（线程之间）
+_RENDERERS_GUARD = threading.Lock()
+# 同一渲染器的浏览器进程与 CDP 会话是独占资源：渲染 / 重启 / 关闭必须串行。
+# 用渲染器键（data_dir 等）而不是配置名——不同 data_dir 的渲染器互不影响。
+_RENDER_SYNC_LOCKS = KeyedThreadLocks()
+# 进线程之前的异步队列：让等待发生在事件循环里，而不是占满线程池
+_RENDER_ASYNC_QUEUE = KeyedLocks()
 
 
 @dataclass
@@ -94,18 +103,36 @@ def _attachment_html(attachment, attachments: dict[str, RenderAttachment],
     )
 
 
-def _renderer(data_dir: str | Path, template_root: str | Path,
-              browser_path: str = "") -> BrowserRenderer:
-    key = (
+def _render_queue_key(data_dir: str | Path) -> str:
+    """渲染队列键 = 数据目录。
+
+    浏览器进程与它使用的 `user-data-dir`（`<data_dir>/_browser_profile`）都按
+    data_dir 共享，所以**排队按 data_dir**，而不是按渲染器或配置：
+    同一 data_dir 下即使 `browser_path` / `template` 不同，也共用同一个
+    浏览器配置文件，必须排队。
+    """
+    return str(Path(data_dir).resolve())
+
+
+def _renderer_key(data_dir: str | Path, template_root: str | Path,
+                  browser_path: str = "") -> tuple[str, str, str]:
+    """渲染器身份：数据目录 + 模板目录 + 浏览器路径。"""
+    return (
         str(Path(data_dir).resolve()),
         str(Path(template_root).resolve()),
         browser_path,
     )
-    renderer = _RENDERERS.get(key)
-    if renderer is None:
-        renderer = BrowserRenderer(data_dir, template_root, browser_path)
-        _RENDERERS[key] = renderer
-    return renderer
+
+
+def _renderer(data_dir: str | Path, template_root: str | Path,
+              browser_path: str = "") -> BrowserRenderer:
+    key = _renderer_key(data_dir, template_root, browser_path)
+    with _RENDERERS_GUARD:
+        renderer = _RENDERERS.get(key)
+        if renderer is None:
+            renderer = BrowserRenderer(data_dir, template_root, browser_path)
+            _RENDERERS[key] = renderer
+        return renderer
 
 
 def render_sync(
@@ -138,28 +165,32 @@ def render_sync(
         logger.warning(f"[渲染] {outcome.reason}")
         return outcome
 
-    renderer = _renderer(data_dir, template_root, report.browser_path)
+    queue_key = _render_queue_key(data_dir)
     embed = bool(report.embed_attachments)
     attachments = attachments or {}
-    try:
-        images = renderer.render(
-            markdown,
-            report,
-            template,
-            meta,
-            attachment_html=lambda item: _attachment_html(item, attachments, embed),
-        )
-    except BrowserUnavailable as exc:
-        outcome.reason = str(exc)
-        logger.warning(f"[渲染] 图片渲染失败：{exc}")
-        return outcome
-    except Exception as exc:
-        outcome.reason = f"渲染异常：{exc}"
-        logger.warning(f"[渲染] 图片渲染异常：{exc}", exc_info=True)
-        return outcome
-    finally:
-        if not report.reuse_browser:
-            renderer.close()
+    # 同一 data_dir 下所有配置共用一个浏览器配置文件：渲染、失败重启、
+    # 关闭都在同一把队列锁内完成，避免并发分析互相切页面 / 串图 / 关掉对方的连接。
+    with _RENDER_SYNC_LOCKS.get(queue_key):
+        renderer = _renderer(data_dir, template_root, report.browser_path)
+        try:
+            images = renderer.render(
+                markdown,
+                report,
+                template,
+                meta,
+                attachment_html=lambda item: _attachment_html(item, attachments, embed),
+            )
+        except BrowserUnavailable as exc:
+            outcome.reason = str(exc)
+            logger.warning(f"[渲染] 图片渲染失败：{exc}")
+            return outcome
+        except Exception as exc:
+            outcome.reason = f"渲染异常：{exc}"
+            logger.warning(f"[渲染] 图片渲染异常：{exc}", exc_info=True)
+            return outcome
+        finally:
+            if not report.reuse_browser:
+                renderer.close()
 
     outcome.images = images
     outcome.used_browser = bool(images)
@@ -179,23 +210,32 @@ async def render_report(
     data_dir: str | Path = "data",
     template_root: str | Path = "templates",
 ) -> RenderOutcome:
-    """异步包装：渲染在线程中执行。"""
+    """异步包装：渲染在线程中执行。
+
+    先在渲染器队列里排队再进线程——否则并发配置会各自占一个线程一起
+    抢同一个浏览器进程。
+    """
     if report.render_mode() == "text":
         return RenderOutcome(reason="render=text",
                              clean_markdown=clean_markdown(markdown))
-    return await asyncio.to_thread(
-        render_sync, markdown, report,
-        meta=meta, attachments=attachments, data_dir=data_dir,
-        template_root=template_root,
-    )
+    async with _RENDER_ASYNC_QUEUE.get(_render_queue_key(data_dir)):
+        return await asyncio.to_thread(
+            render_sync, markdown, report,
+            meta=meta, attachments=attachments, data_dir=data_dir,
+            template_root=template_root,
+        )
 
 
 def close_all() -> None:
     """关闭全部常驻浏览器（运行时停止 / 重载）。"""
-    renderers = list(_RENDERERS.values())
-    _RENDERERS.clear()
-    for renderer in renderers:
+    with _RENDERERS_GUARD:
+        items = list(_RENDERERS.items())
+        _RENDERERS.clear()
+    for _key, renderer in items:
+        # 与正在跑的渲染互斥（按 data_dir 的同一把队列锁）：等它跑完再关，
+        # 避免关掉别人正在用的连接
         try:
-            renderer.close()
+            with _RENDER_SYNC_LOCKS.get(_render_queue_key(renderer.data_dir)):
+                renderer.close()
         except Exception as exc:
             logger.debug(f"[渲染] 关闭浏览器失败：{exc}")

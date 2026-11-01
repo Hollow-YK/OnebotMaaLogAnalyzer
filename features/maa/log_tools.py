@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator, Optional
 
+from core.concurrency import run_blocking
 from core.tokens import clamp_tool_result_tokens, trim_to_tokens
 from features.maa.archive_extract import (
     DEFAULT_TOTAL_LIMIT_MB,
@@ -60,6 +62,10 @@ _BINARY_SUFFIXES = {
 }
 
 
+# 同时进行的日志包扫描/解压线程数上限（同一实例内部还会串行）
+LOG_TOOL_THREADS = 4
+
+
 class LogArchiveTools:
     """把日志压缩包解压到目录后执行 AI 请求的工具调用。"""
 
@@ -78,6 +84,9 @@ class LogArchiveTools:
         # 解压后总大小由 `probe_archive` 统一把关（下载后、AI 之前），
         # 这里只负责把同一上限交给解压器复核，不再单独设单文件上限。
         # extract_dir 为空时退化为系统临时目录（用完即删）。
+        # 同一实例的解压 / 读取串行：zipfile 句柄与解压目录是可变状态，
+        # 而工具调用、关闭、归档可能在同一分析内交错发生。
+        self._io_lock = threading.RLock()
         self._extract = ExtractedArchive(
             self.zip_path,
             target_dir=extract_dir,
@@ -98,13 +107,27 @@ class LogArchiveTools:
         except OSError:
             return False
 
+    async def _run_io(self, func, **kwargs):
+        """在线程里执行阻塞的压缩包操作，同一实例内串行。
+
+        解压、逐行扫描、stat 都是同步 I/O；放在事件循环里会让**所有配置**
+        一起卡住，所以统一下沉到线程。
+        """
+        def _call():
+            with self._io_lock:
+                return func(**kwargs)
+
+        return await run_blocking(_call, limit=LOG_TOOL_THREADS)
+
     def close(self) -> None:
         """释放内存状态，不删除已解压目录（下次追问可直接复用）。"""
-        self._extract.close()
+        with self._io_lock:
+            self._extract.close()
 
     def discard(self) -> None:
         """删除解压目录（没有历史记录、或本次分析未能归档时调用）。"""
-        self._extract.discard()
+        with self._io_lock:
+            self._extract.discard()
 
     def release(self) -> None:
         """结束使用：目录可复用时只释放内存，临时目录直接删掉。"""
@@ -224,6 +247,10 @@ class LogArchiveTools:
     # ════════════════════════════════════════════════════════════
 
     async def list_files(self, path: str = "") -> str:
+        """列出某个目录下的文件（阻塞扫描在线程里跑）。"""
+        return await self._run_io(self._list_files_sync, path=path)
+
+    def _list_files_sync(self, path: str = "") -> str:
         """列出某个目录下的文件。"""
         rel = self._normalize(path)
         if rel is None:
@@ -260,6 +287,14 @@ class LogArchiveTools:
         return self._finish("\n".join(lines[:300]))
 
     async def search(self, pattern: str, path: str = "",
+                     max_results: int = 60) -> str:
+        """在日志包的文本文件中按正则搜索（阻塞扫描在线程里跑）。"""
+        return await self._run_io(
+            self._search_sync, pattern=pattern, path=path,
+            max_results=max_results,
+        )
+
+    def _search_sync(self, pattern: str, path: str = "",
                      max_results: int = 60) -> str:
         """在日志包的文本文件中按正则搜索。"""
         pattern_text = str(pattern or "").strip()
@@ -328,6 +363,14 @@ class LogArchiveTools:
         return self._finish(text)
 
     async def read_file(self, path: str, start_line: Optional[int] = None,
+                        end_line: Optional[int] = None) -> str:
+        """读取日志包内某个文本文件（支持行范围；阻塞读取在线程里跑）。"""
+        return await self._run_io(
+            self._read_file_sync, path=path,
+            start_line=start_line, end_line=end_line,
+        )
+
+    def _read_file_sync(self, path: str, start_line: Optional[int] = None,
                         end_line: Optional[int] = None) -> str:
         """读取日志包内某个文本文件（支持行范围）。"""
         rel = self._normalize(path)
@@ -432,6 +475,10 @@ class LogArchiveTools:
         return self._finish(header + body)
 
     async def list_images(self) -> str:
+        """列出日志包内的全部图片（阻塞扫描在线程里跑）。"""
+        return await self._run_io(self._list_images_sync)
+
+    def _list_images_sync(self) -> str:
         """列出日志包内的全部图片（便于模型判断能附哪些图）。"""
         root = self._root()
         if root is None:

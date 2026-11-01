@@ -97,6 +97,26 @@ OnebotMaaLogAnalyzer/
 | `message.file` | `LogWatcher.on_message_file` | 消息中的文件段（部分实现以此上报） |
 | `message.text` | `MessageHandler.on_message_text` | 文本消息 → `/maa` 指令 / 引用式追问 |
 
+## 并发模型
+
+一句话：**配置之间隔离，配置之内排队。**
+
+| 维度 | 规则 | 实现 |
+| --- | --- | --- |
+| 同一配置 | 分析、追问、仓库操作**排队串行**，不并行 | 每个配置一把工作锁（`MaaAnalyzer.config_work_lock`），分析入口与 `message_handler` 的追问路径共用 |
+| 不同配置 | **互不影响**，可同时跑 | 信号量、仓库 provider、分析缓存、追问策略都按配置名隔离；没有跨配置共享的可变运行时状态 |
+| 渲染 | 按 `data_dir` 排队串行 | `features/maa/render`：进线程前先在渲染器队列排队，同步侧用 `data_dir` 键的线程锁包住渲染 / 重启 / 关闭 |
+| 下载 | 同一次分析内按 `download_concurrency` 并行 | 按配置维护的下载信号量（分卷并行下载） |
+| 阻塞 I/O | 下沉到线程，不占事件循环 | `core.concurrency.run_blocking`：日志包解压/扫描、仓库遍历/读文件、历史归档与清理、配置写盘 |
+
+因此「同一配置下并发分析多份日志」不是受支持的行为，也不需要
+`analysis_concurrency` 这类设置：需要更高吞吐就拆成多个配置，每个配置
+各自排队。反过来，一个配置里解压大日志包或遍历大仓库时，也不会卡住
+其它配置——这些操作在线程里跑。
+
+进度与日志按配置分组（`config_log_context`），任务记录（`/maa jobs`）
+也按配置隔离，便于区分哪个配置在排队、哪个在跑。
+
 ## 数据兼容
 
 采用 `.tmp` 原子写入防止数据损坏，加载失败时自动尝试 `.tmp` 恢复。

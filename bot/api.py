@@ -35,15 +35,18 @@ class OneBotAPI:
         self._ws_responses: dict[str, asyncio.Future] = {}
         self._echo_counter = 0
         self._session: Optional[aiohttp.ClientSession] = None
+        # 会话创建 / 关闭互斥：并发首个请求会各自建一个 session，先建的泄漏
+        self._session_lock = asyncio.Lock()
 
     def set_ws_send(self, send: WSSend):
         """注入 WS 发送通道。设置后，无 HTTP 时 API 走 WS。"""
         self._ws_send = send
 
     async def close(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
-        self._session = None
+        async with self._session_lock:
+            if self._session and not self._session.closed:
+                await self._session.close()
+            self._session = None
 
     # ==================== 传输层 ====================
 
@@ -57,11 +60,12 @@ class OneBotAPI:
         return None
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)
-            )
-        return self._session
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)
+                )
+            return self._session
 
     async def _call_http(self, action: str, params: dict) -> Optional[Any]:
         url = f"{self.http_url}/{action}"

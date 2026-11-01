@@ -211,9 +211,11 @@ MaaFramework 的日志按大小轮转：写满当前 `maafw.log` 后把它改名
 
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `analysis_concurrency` | `2` | 同时进行的 AI 分析数（仓库状态相关的配置仍按配置串行） |
-| `download_concurrency` | `2` | 同时进行的下载数 |
+| `download_concurrency` | `2` | 同一配置内同时进行的下载数（分卷并行下载） |
 | `download_timeout_seconds` | `120` | 下载超时秒数 |
+
+同一配置内的分析**恒为串行**：一份日志的分析、追问与仓库操作排队执行，不并行；
+并发只发生在配置之间，不同配置互不影响。详见[并发模型](architecture.md#并发模型)。
 
 ## 日志包工具
 

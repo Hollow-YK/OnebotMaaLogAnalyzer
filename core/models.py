@@ -467,7 +467,9 @@ class AnalysisSettings(BaseModel):
     history_max_total_mb: int = 4096    # 历史目录总大小上限 MB（安全上限，0=不限）
 
     # ── 并发与超时 ──
-    analysis_concurrency: int = 2
+    # 同一配置内的分析恒为串行：仓库工作区 / 渲染浏览器 / 历史目录都归该配置独占，
+    # 并发只会互相切版本、串图。并发只发生在「配置之间」——不同配置互不影响。
+    # 因此不再提供「同配置并发分析数」；单次分析内的分卷下载仍可按下面的下载并发并行。
     download_concurrency: int = 2
     download_timeout_seconds: int = 120
     digest_timeout_seconds: int = 0

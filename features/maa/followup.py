@@ -32,6 +32,31 @@ _SEED_MESSAGES = 2
 
 
 @dataclass
+class FollowupPolicy:
+    """一个配置的追问策略（窗口 / 轮数 / 会话数上限）。
+
+    策略按配置保存，不写全局字段——否则一个配置改设置会改到另一个配置
+    正在进行的会话（窗口、轮数、会话数会互相覆盖）。
+    """
+
+    window_seconds: float = 1800.0
+    max_turns: int = 10
+    max_sessions: int = 50
+
+
+def resolve_window_minutes(settings: Any) -> int:
+    """追问会话有效期（分钟）；0 表示跟随历史保留期。"""
+    raw = int(getattr(settings, "followup_window_minutes", 0) or 0)
+    if raw > 0:
+        return raw
+    if not getattr(settings, "history_enabled", False):
+        return 30
+    hours = int(getattr(settings, "history_period_hours", 24) or 24)
+    keep = int(getattr(settings, "history_keep_periods", 2) or 2)
+    return max(30, hours * keep * 60)
+
+
+@dataclass
 class FollowupSession:
     """一次分析的追问上下文。"""
 
@@ -91,30 +116,74 @@ class FollowupStore:
         self._index: dict[str, str] = {}
         # 历史存储：内存会话被清理后，仍可从归档恢复上下文
         self.history = history
-        self.window_seconds = max(60, int(window_minutes or 30) * 60)
-        self.max_turns = max(1, int(max_turns or 10))
-        self.max_sessions = max(1, int(max_sessions or 50))
+        # 配置名 → 追问策略。群与配置是 1:1（resolve_config 只认唯一配置），
+        # 所以会话仍按群索引，但窗口 / 轮数 / 会话数一律按会话所属配置取，
+        # 不再全局共享。
+        self._policies: dict[str, FollowupPolicy] = {}
+        self._default_policy = FollowupPolicy(
+            window_seconds=max(60.0, int(window_minutes or 30) * 60),
+            max_turns=max(1, int(max_turns or 10)),
+            max_sessions=max(1, int(max_sessions or 50)),
+        )
+
+    # ── 策略（按配置） ──
+
+    def set_policy(self, config_name: str, *, window_minutes: int,
+                   max_turns: int, max_sessions: int) -> None:
+        """按配置下发追问策略（窗口 / 轮数 / 会话数上限）。"""
+        self._policies[str(config_name or "")] = FollowupPolicy(
+            window_seconds=max(60.0, int(window_minutes or 30) * 60),
+            max_turns=max(1, int(max_turns or 10)),
+            max_sessions=max(1, int(max_sessions or 50)),
+        )
+
+    def apply_policy(self, config_name: str, settings: Any) -> FollowupPolicy:
+        """按该配置的 settings 下发一次策略（窗口 / 轮数 / 会话数）。"""
+        policy = FollowupPolicy(
+            window_seconds=max(60.0, resolve_window_minutes(settings) * 60),
+            max_turns=max(
+                1, int(getattr(settings, "followup_max_turns", 10) or 10)
+            ),
+            max_sessions=max(
+                1, int(getattr(settings, "followup_max_sessions", 50) or 50)
+            ),
+        )
+        self._policies[str(config_name or "")] = policy
+        return policy
+
+    def policy(self, config_name: str = "") -> FollowupPolicy:
+        """取该配置的策略；未下发过时用构造时的默认值。"""
+        return self._policies.get(str(config_name or ""), self._default_policy)
 
     def set_window(self, minutes: int) -> None:
-        """动态调整会话有效期（跟随历史保留期）。"""
-        self.window_seconds = max(60, int(minutes or 30) * 60)
+        """调整**默认**会话有效期（兼容旧调用；已按配置下发的策略不受影响）。"""
+        self._default_policy.window_seconds = max(60.0, int(minutes or 30) * 60)
 
     def set_max_turns(self, turns: int) -> None:
-        """动态调整单会话最大追问轮数。"""
-        self.max_turns = max(1, int(turns or 10))
+        """调整**默认**单会话最大追问轮数（兼容旧调用）。"""
+        self._default_policy.max_turns = max(1, int(turns or 10))
 
     # ── 容量与过期 ──
 
     def _prune(self) -> None:
-        """清理过期会话及其索引；超出容量时丢弃最旧的。"""
+        """按「会话所属配置」的策略清理过期会话，并按配置限制会话数。"""
         now = time.time()
         for key, session in list(self._sessions.items()):
-            if now - session.last_active > self.window_seconds:
+            limit = self.policy(session.config_name).window_seconds
+            if now - session.last_active > limit:
                 self._drop(key)
 
-        if len(self._sessions) > self.max_sessions:
-            ordered = sorted(self._sessions.items(), key=lambda kv: kv[1].last_active)
-            for key, _ in ordered[: len(self._sessions) - self.max_sessions]:
+        # max_sessions 逐配置计算：一个配置的会话不该被另一个配置挤掉
+        per_config: dict[str, list[tuple[str, float]]] = {}
+        for key, session in self._sessions.items():
+            name = str(session.config_name or "")
+            per_config.setdefault(name, []).append((key, session.last_active))
+        for name, items in per_config.items():
+            cap = self.policy(name).max_sessions
+            if len(items) <= cap:
+                continue
+            items.sort(key=lambda kv: kv[1])
+            for key, _ in items[: len(items) - cap]:
                 self._drop(key)
 
     def _drop(self, group_id: str) -> None:
@@ -245,7 +314,10 @@ class FollowupStore:
         group_id = self._index.get(mid)
         if group_id is not None:
             session = self._sessions.get(group_id)
-            if session is not None and session.age_seconds() <= self.window_seconds:
+            if session is not None and (
+                session.age_seconds()
+                <= self.policy(session.config_name).window_seconds
+            ):
                 return None if session.closed else session
             if session is not None:
                 self._drop(group_id)
@@ -406,7 +478,7 @@ class FollowupStore:
         session = self._sessions.get(str(group_id))
         if session is None:
             return None
-        if session.age_seconds() > self.window_seconds:
+        if session.age_seconds() > self.policy(session.config_name).window_seconds:
             self._drop(str(group_id))
             return None
         return session
@@ -420,26 +492,17 @@ class FollowupStore:
         session.messages.append({"role": "assistant", "content": answer})
         session.turns += 1
         session.touch()
-        if session.turns >= self.max_turns:
-            logger.info(f"[追问] 群 {group_id} 达到轮数上限，会话结束")
+        limit = self.policy(session.config_name).max_turns
+        if session.turns >= limit:
+            logger.info(
+                f"[追问] 群 {group_id}（配置「{session.config_name}」）"
+                f"达到轮数上限 {limit}，会话结束"
+            )
             session.closed = True
             self._persist(session)
             self._drop(str(group_id))
             return
         self._persist(session)
-
-    def close(self, group_id: str) -> bool:
-        """主动结束会话（同时清除已落盘状态，重启后不再恢复）。"""
-        key = str(group_id)
-        session = self._sessions.get(key)
-        existed = session is not None
-        if session is not None:
-            self._forget(session)
-        else:
-            # 内存里没有：可能是重启后由历史归档恢复的会话
-            existed = self._forget_persisted(key)
-        self._drop(key)
-        return existed
 
     def close(self, group_id: str) -> bool:
         """主动结束会话（落盘标记，重启后也不再恢复）。"""
@@ -484,11 +547,12 @@ class FollowupStore:
             session = self._restore_latest_for_group(group_id)
         if session is None:
             return "当前群没有进行中的追问答疑会话。"
-        remain_min = max(0, int((self.window_seconds - session.age_seconds()) / 60))
+        policy = self.policy(session.config_name)
+        remain_min = max(0, int((policy.window_seconds - session.age_seconds()) / 60))
         return (
             f"追问答疑会话进行中\n"
             f"日志包：{session.file_name}\n"
-            f"已追问：{session.turns}/{self.max_turns} 轮\n"
+            f"已追问：{session.turns}/{policy.max_turns} 轮\n"
             f"剩余有效时间：约 {remain_min} 分钟\n"
             f"提示：引用 Bot 的分析结果消息即可提问。"
         )
@@ -516,3 +580,12 @@ class FollowupStore:
     def count(self) -> int:
         self._prune()
         return len(self._sessions)
+
+    def count_for(self, config_name: str) -> int:
+        """该配置当前进行中的会话数（状态展示用）。"""
+        self._prune()
+        name = str(config_name or "")
+        return sum(
+            1 for session in self._sessions.values()
+            if str(session.config_name or "") == name
+        )

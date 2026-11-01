@@ -32,6 +32,7 @@ import json
 import logging
 import shutil
 import time
+from core.concurrency import run_blocking
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -218,6 +219,31 @@ class HistoryStore:
     # ════════════════════════════════════════════════════════════
     # 追问会话持久化
     # ════════════════════════════════════════════════════════════
+
+    # ── 异步写盘入口 ──
+    # 归档 zip 复制、records.json 重写、目录遍历都是阻塞 I/O。调用方在事件
+    # 循环里时必须走这些包装，否则一个配置归档大日志会卡住所有配置。
+
+    async def save_async(self, config_name: str) -> None:
+        """把 records.json 的写盘下沉到线程。"""
+        await run_blocking(self.save, config_name)
+
+    async def add_async(self, **kwargs) -> HistoryRecord:
+        """归档记录（复制 zip + 写盘）在线程里执行。"""
+        return await run_blocking(self.add, **kwargs)
+
+    async def cleanup_async(self, config_name: str, **kwargs) -> CleanupResult:
+        """历史清理（遍历目录、删除文件）在线程里执行。"""
+        return await run_blocking(self.cleanup, config_name, **kwargs)
+
+    async def cleanup_all_async(self, settings_of: dict,
+                                *, force: bool = False) -> dict:
+        """全量周期清理在线程里执行。"""
+        return await run_blocking(self.cleanup_all, settings_of, force=force)
+
+    async def cleanup_staging_async(self, max_age_hours: float = 6.0) -> int:
+        """清理遗留的解压暂存目录（目录扫描）在线程里执行。"""
+        return await run_blocking(self.cleanup_staging, max_age_hours)
 
     def load_followups(self, config_name: str) -> dict:
         """读取某配置的追问会话状态（带缓存）。"""
