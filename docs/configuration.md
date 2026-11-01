@@ -358,7 +358,7 @@ data/
 | `mirrors` | `string[]` / `[]` | 备用地址，按顺序依次尝试，直到一个来源成功 | `"mirrors": ["https://gitee.com/xx/MaaXXX.git"]` |
 | `branch` | `string` / `""` | 克隆时使用的分支 / tag；空 = 仓库默认分支 | `"branch": "dev"` |
 | `default_branch` | `string` / `""` | 分析结束还原时的兜底目标；空 = 自动探测 | `"default_branch": "main"` |
-| `preload_enabled` | `bool` / `true` | 启动后后台完整克隆（含全部历史 / tag）并初始化子模块；关闭则首次分析时浅克隆、按需拉 tag | `"preload_enabled": false` |
+| `preload_enabled` | `bool` / `true` | 启动后后台完整克隆（含全部历史 / tag）并初始化子模块；**分析现场始终浅克隆**，关闭则不做完整克隆、tag 按需拉取 | `"preload_enabled": false` |
 | `preload_retries` | `int` / `3` | 启动预下载失败的重试次数（最大 5，间隔递增） | `"preload_retries": 5` |
 | `update_on_analyze` | `bool` / `false` | 每份日志分析前先更新默认分支，再对齐日志版本 tag | `"update_on_analyze": true` |
 | `allow_ai_update` | `bool` / `true` | 允许 AI 用 `pull_latest` 更新当前仓库的默认分支（不接受 URL 或 Git 命令） | `"allow_ai_update": false` |
@@ -373,6 +373,9 @@ data/
 | `max_tool_result_tokens` | `int` / `0` | **agent** 单次工具结果 token 上限；`0` = 由 `max_tool_result_chars` 估算，非 0 时最小 64 | `"max_tool_result_tokens": 4000` |
 | `max_tool_context_tokens` | `int` / `0` | 工具结果累计 token 预算；`0` = 不超过本次上下文预算的 50% | `"max_tool_context_tokens": 16000` |
 | `agent_deadline_seconds` | `int` / `600` | **agent** 循环总时长上限 | `"agent_deadline_seconds": 900` |
+| `shallow_clone_timeout_seconds` | `int` / `600` | 分析/追问现场**浅克隆**的单次上限（秒）；`0` = 内置 600 | `"shallow_clone_timeout_seconds": 300` |
+| `preload_timeout_seconds` | `int` / `1800` | 后台预下载一次**完整克隆**（含子模块）的总上限（秒）；`0` = 内置 1800 | `"preload_timeout_seconds": 900` |
+| `update_timeout_seconds` | `int` / `600` | 分析/追问里「更新默认分支」的总预算（探测 + fetch，秒）；`0` = 内置 | `"update_timeout_seconds": 120` |
 | `extensions` | `string[]` / `json/jsonc/yaml/yml/toml/md/txt` | 参与扫描的文件扩展名 | `"extensions": [".json", ".yaml"]` |
 | `max_file_kb` | `int` / `256` | 跳过大于该值的文件（KB） | `"max_file_kb": 512` |
 | `max_scan_files` | `int` / `20000` | 单次扫描文件数上限 | `"max_scan_files": 5000` |

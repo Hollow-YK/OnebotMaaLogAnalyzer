@@ -330,6 +330,8 @@ class MaaAnalyzer:
       - 不同配置**互不影响**：信号量、仓库、缓存都按配置名隔离，不共享可变状态。
       - download_semaphore: 限制同一次分析内的并行下载数。
     """
+    PRELOAD_RETRY_COOLDOWN = 300.0   # canonical 未就绪时，后台完整克隆的最小重试间隔（秒）
+
     def __init__(self, service: "MaaService", llm: LLMPool, history=None):
         self.s = service
         self.llm = llm
@@ -337,12 +339,15 @@ class MaaAnalyzer:
         self.history = history
         # config_name → (download_n, download_sem)
         self._semaphores: dict[str, tuple[int, asyncio.Semaphore]] = {}
-        # config_name → RepoProvider（复用克隆结果与索引）
+        # config_name → canonical RepoProvider（由后台预下载维护：完整克隆）
         self._repos: dict[str, RepoProvider] = {}
-        self._fallback_repos: dict[str, RepoProvider] = {}
+        # config_name → 分析/追问现场用的临时浅克隆（每配置一份，跨分析复用）
+        self._analysis_repos: dict[str, RepoProvider] = {}
         self._active_repos: dict[str, RepoProvider] = {}
         self._repo_preload_tasks: dict[str, asyncio.Task] = {}
         self._repo_preload_status: dict[str, dict] = {}
+        # 后台完整克隆的冷却时间戳（失败后不要每次分析都重来一轮）
+        self._preload_retry_at: dict[str, float] = {}
         # 按配置的工作锁：同一配置的分析 / 追问 / 仓库操作排队串行
         self._analysis_locks = KeyedLocks()
         self.active_jobs: set[str] = set()
@@ -540,16 +545,17 @@ class MaaAnalyzer:
                 "attempt": 0,
                 "detail": "",
             }
-            task = asyncio.create_task(self._preload_repo_task(name, state.project))
+            self._preload_retry_at[name] = time.time()
+            task = asyncio.create_task(self._preload_repo_task(name, repo_cfg))
             self._repo_preload_tasks[name] = task
             tasks.append(task)
         return tasks
 
     async def _preload_repo_task(self, config_name: str,
-                                 project: ProjectConfig) -> None:
+                                 repo_cfg: RepoConfig) -> None:
         """预下载任务入口：先绑定配置名，让其日志可区分配置。"""
         with config_log_context(config_name):
-            await self._preload_repo(config_name, project)
+            await self._preload_repo(config_name, repo_cfg)
 
     def repo_preload_status(self, config_name: str) -> str:
         status = self._repo_preload_status.get(config_name)
@@ -562,8 +568,7 @@ class MaaAnalyzer:
         return f"{state}{suffix}" + (f"；{detail}" if detail else "")
 
     async def _preload_repo(self, config_name: str,
-                           project: ProjectConfig) -> None:
-        repo_cfg = project.repo
+                            repo_cfg: RepoConfig) -> None:
         provider = self._repo_provider(config_name, repo_cfg)
         if provider is None:
             return
@@ -573,9 +578,12 @@ class MaaAnalyzer:
             for attempt in range(1, attempts + 1):
                 status.update(state="预下载中", attempt=attempt, detail="")
                 try:
-                    if not await provider.ensure_ready():
+                    budget = float(repo_cfg.preload_timeout_seconds or 0)
+                    if not await provider.ensure_ready(budget=budget):
                         raise RuntimeError(provider.last_error or "仓库不可用")
-                    updated, detail = await provider.update_latest()
+                    updated, detail = await provider.update_latest(
+                        budget=int(repo_cfg.preload_timeout_seconds or 0)
+                    )
                     if not updated:
                         raise RuntimeError(detail)
                     status.update(state="已就绪", detail="")
@@ -597,22 +605,9 @@ class MaaAnalyzer:
             status["state"] = "已取消"
             raise
         finally:
-            lock = self._config_lock(config_name)
-            async with lock:
-                fallback = self._fallback_repos.get(config_name)
-                if fallback is not None:
-                    if status["state"] == "预下载失败" and fallback.promote_to_cache():
-                        self._fallback_repos.pop(config_name, None)
-                        self._repos[config_name] = fallback
-                        logger.info(f"[仓库] 配置「{config_name}」复用分析期间的临时仓库")
-                    elif fallback.root and fallback.is_temporary:
-                        try:
-                            remove_repo_tree(fallback.root)
-                            self._fallback_repos.pop(config_name, None)
-                        except OSError as exc:
-                            logger.warning(
-                                f"[仓库] 删除配置「{config_name}」临时仓库失败：{exc}"
-                            )
+            # canonical 就绪后顺手清掉分析用的临时浅克隆（持配置锁，确保
+            # 没有分析正在使用它）
+            await self._settle_analysis_repo(config_name)
 
     async def analyze(
         self,
@@ -1026,7 +1021,8 @@ class MaaAnalyzer:
             # 无论成功失败，都还原仓库位置，避免影响下一次分析
             await self._restore_repo_latest(config_name, settings)
             self._active_repos.pop(config_name, None)
-            await self._cleanup_finished_fallback(config_name)
+            # 此刻仍持配置工作锁：canonical 已就绪就顺手清掉临时浅克隆
+            self._settle_analysis_repo_now(config_name)
             if bool(settings.cleanup_after_done):
                 self._cleanup_work_dir(work_dir)
 
@@ -1984,18 +1980,37 @@ class MaaAnalyzer:
         同一次分析及其后续追问共用一个 `session_id`，用量因此可以按会话聚合。
         """
         sid = session_id or new_session_id(config_name)
+        # 与主分析同一层预算：追问的模型调用段（普通调用 / 工具循环 / 收敛 /
+        # 上下文压缩 / 截断重试）统一受 ai_stage_timeout_seconds 约束，到点即
+        # 放弃本次回答，并给出可操作的提示（此前这一段完全没有超时判定）。
+        stage_timeout = max(30, int(settings.ai_stage_timeout_seconds or 300))
         with config_log_context(config_name), session_context(
             sid, config_name, file_name
         ):
-            return await self._answer_followup_inner(
-                settings=settings,
-                messages=messages,
-                question=question,
-                digest=digest,
-                provider=provider,
-                project=project,
-                config_name=config_name,
-            )
+            try:
+                return await asyncio.wait_for(
+                    self._answer_followup_inner(
+                        settings=settings,
+                        messages=messages,
+                        question=question,
+                        digest=digest,
+                        provider=provider,
+                        project=project,
+                        config_name=config_name,
+                    ),
+                    timeout=stage_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[追问] AI 阶段超时（{stage_timeout}s），放弃本次回答"
+                )
+                return FollowupAnswer(
+                    text=(
+                        f"这次追问超时了（AI 阶段超过 {stage_timeout} 秒）。\n"
+                        "可以稍后重试；把问题拆小一点，或调大 "
+                        "`ai_stage_timeout_seconds` 会更容易拿到结果。"
+                    ),
+                )
 
     async def _answer_followup_inner(self, *, settings: AnalysisSettings,
                                      messages: list[dict], question: str,
@@ -2528,13 +2543,17 @@ class MaaAnalyzer:
     # 项目代码参考
     # ════════════════════════════════════════════════════════════
 
+    @staticmethod
+    def _repo_cache_key(config_name: str, repo_cfg: RepoConfig) -> str:
+        """整个 repo 配置参与缓存键：字段变更时重建 provider。"""
+        return f"{config_name}|{repo_cfg.model_dump_json()}"
+
     def _repo_provider(self, config_name: str,
                        repo_cfg: RepoConfig) -> Optional[RepoProvider]:
-        """按配置缓存 RepoProvider，来源变化时自动重建。"""
+        """canonical provider：由后台预下载维护（完整克隆）。"""
         if not repo_cfg or not repo_cfg.enabled or not repo_cfg.usable():
             return None
-        # 整个 repo 配置参与缓存键：字段变更时重建 provider
-        cache_key = f"{config_name}|{repo_cfg.model_dump_json()}"
+        cache_key = self._repo_cache_key(config_name, repo_cfg)
         cached = self._repos.get(config_name)
         if cached and getattr(cached, "_cache_key", "") == cache_key:
             return cached
@@ -2546,24 +2565,58 @@ class MaaAnalyzer:
     def _repo_data_dir(self) -> Path:
         return Path(self.s.dm._dir)
 
+    @staticmethod
+    def _canonical_ready(provider: RepoProvider) -> bool:
+        """canonical 能否直接用于分析。
+
+        - 本地 path → 可以；
+        - 预下载模式（preload_enabled）→ 必须是完整克隆（浅克隆会被后台升级）；
+        - 非预下载模式 → 浅克隆就是最终形态，可以直接用。
+        """
+        if provider.cfg.path:
+            return True
+        root = provider.root
+        if root is None or not (root / ".git").exists():
+            return False
+        if not provider.cfg.preload_enabled:
+            return True
+        # git 对浅克隆会写 .git/shallow；完整克隆没有这个文件
+        return not (root / ".git" / "shallow").exists()
+
+    def _analysis_repo(self, config_name: str, repo_cfg: RepoConfig,
+                       canonical: RepoProvider) -> RepoProvider:
+        """每配置一份的临时浅克隆 provider（跨分析复用，canonical 就绪后清掉）。"""
+        cache_key = self._repo_cache_key(config_name, repo_cfg)
+        existing = self._analysis_repos.get(config_name)
+        if existing is not None and getattr(existing, "_cache_key", "") == cache_key:
+            return existing
+        provider = RepoProvider(
+            repo_cfg, self._repo_data_dir(), config_name=config_name,
+            repo_root=canonical.temporary_root(),
+        )
+        provider._cache_key = cache_key  # type: ignore[attr-defined]
+        self._analysis_repos[config_name] = provider
+        logger.info(f"[仓库] 配置「{config_name}」canonical 未就绪，分析使用临时浅克隆")
+        return provider
+
     async def ensure_repo_provider(self, config_name: str,
                                    project: ProjectConfig,
                                    ) -> Optional[RepoProvider]:
         """
         取（必要时重建）**就绪**的 RepoProvider，供追问使用。
 
-        进程内分析后 `_repos` 里已有就绪的 provider，直接复用；
-        但**重启后内存缓存为空**，这里按当前配置重建并确保仓库可用 ——
-        否则仓库工具与 `@项目` 附件都会静默失效，AI 只能回答
-        「项目仓库不可用」。
-
-        任何失败只记日志并返回 None（追问退化为仅用摘要与日志包）。
+        只做浅克隆（`shallow_only=True`）：完整克隆属于后台预下载，追问不该
+        在这里等几十分钟。任何失败只记日志并返回 None（追问退化为仅用摘要与
+        日志包），不影响本次回答。
         """
         provider = self._provider_for_analysis(config_name, project.repo)
         if provider is None:
             return None
         try:
-            if not await provider.ensure_ready():
+            if not await provider.ensure_ready(
+                shallow_only=True,
+                budget=float(project.repo.shallow_clone_timeout_seconds or 0),
+            ):
                 logger.warning(f"[追问] 项目代码不可用：{provider.last_error}")
                 return None
         except Exception as exc:
@@ -2573,43 +2626,70 @@ class MaaAnalyzer:
 
     def _provider_for_analysis(self, config_name: str,
                                repo_cfg: RepoConfig) -> Optional[RepoProvider]:
+        """分析/追问用哪个仓库（规则见 docs/repo.md 的并发/获取路径一节）。
+
+        - canonical 已是完整克隆 → 直接用它；
+        - 否则用「每配置一份」的临时浅克隆，并确保后台在跑完整克隆。
+        分析现场**绝不**做完整克隆。
+        """
+        canonical = self._repo_provider(config_name, repo_cfg)
+        if canonical is None:
+            return None
+        if self._canonical_ready(canonical):
+            return canonical
+        self._ensure_preload_task(config_name, canonical)
+        return self._analysis_repo(config_name, repo_cfg, canonical)
+
+    def _ensure_preload_task(self, config_name: str,
+                             canonical: RepoProvider) -> None:
+        """canonical 未就绪时，确保后台有一个完整克隆任务在跑。
+
+        - 已有任务在跑 → 不动（单克隆互斥）；
+        - 冷却期内 → 不重复起（失败后不要每次分析都重来一轮完整克隆）。
+        """
+        repo_cfg = canonical.cfg
+        if not (repo_cfg.preload_enabled and not repo_cfg.path):
+            return
         task = self._repo_preload_tasks.get(config_name)
         if task is not None and not task.done():
-            fallback = self._fallback_repos.get(config_name)
-            if fallback is None:
-                canonical = self._repo_provider(config_name, repo_cfg)
-                if canonical is None:
-                    return None
-                fallback = RepoProvider(
-                    repo_cfg, self._repo_data_dir(), config_name=config_name,
-                    repo_root=canonical.temporary_root(),
-                )
-                self._fallback_repos[config_name] = fallback
-            return fallback
-        if self._repo_preload_status.get(config_name, {}).get("state") == "预下载失败":
-            fallback = self._fallback_repos.get(config_name)
-            if fallback is not None:
-                return fallback
-        return self._repo_provider(config_name, repo_cfg)
+            return
+        now = time.time()
+        if now - float(self._preload_retry_at.get(config_name, 0.0)) < self.PRELOAD_RETRY_COOLDOWN:
+            return
+        self._preload_retry_at[config_name] = now
+        status = self._repo_preload_status.setdefault(config_name, {
+            "state": "等待预下载", "attempt": 0, "detail": "",
+        })
+        status.update(state="等待预下载", detail="")
+        logger.info(
+            f"[仓库] 配置「{config_name}」canonical 未就绪，后台安排完整克隆"
+        )
+        self._repo_preload_tasks[config_name] = asyncio.create_task(
+            self._preload_repo_task(config_name, repo_cfg)
+        )
 
-    async def _cleanup_finished_fallback(self, config_name: str) -> None:
-        task = self._repo_preload_tasks.get(config_name)
-        if task is None or not task.done():
+    def _settle_analysis_repo_now(self, config_name: str) -> None:
+        """canonical 已就绪时清掉临时浅克隆。调用方需已持配置工作锁。"""
+        provider = self._analysis_repos.get(config_name)
+        if provider is None or provider.root is None:
             return
-        fallback = self._fallback_repos.get(config_name)
-        if fallback is None or not fallback.is_temporary or fallback.root is None:
-            return
-        status = self._repo_preload_status.get(config_name, {})
-        if status.get("state") == "预下载失败" and fallback.promote_to_cache():
-            self._fallback_repos.pop(config_name, None)
-            self._repos[config_name] = fallback
-            logger.info(f"[仓库] 配置「{config_name}」临时仓库已转为缓存")
+        canonical = self._repos.get(config_name)
+        if canonical is None or not self._canonical_ready(canonical):
             return
         try:
-            remove_repo_tree(fallback.root)
-            self._fallback_repos.pop(config_name, None)
+            remove_repo_tree(provider.root)
         except OSError as exc:
             logger.warning(f"[仓库] 删除配置「{config_name}」临时仓库失败：{exc}")
+            return
+        self._analysis_repos.pop(config_name, None)
+        logger.info(
+            f"[仓库] 配置「{config_name}」canonical 已就绪，临时浅克隆已清理"
+        )
+
+    async def _settle_analysis_repo(self, config_name: str) -> None:
+        """同一收尾的加锁版本（后台预下载任务结束时调用）。"""
+        async with self._config_lock(config_name):
+            self._settle_analysis_repo_now(config_name)
 
     async def _prepare_repo(self, config_name: str,
                             repo_cfg: RepoConfig,
@@ -2628,14 +2708,20 @@ class MaaAnalyzer:
             return prep
 
         try:
-            if not await provider.ensure_ready():
+            # 分析现场只浅克隆：完整克隆属于后台预下载，这里绝不等全量
+            if not await provider.ensure_ready(
+                shallow_only=True,
+                budget=float(repo_cfg.shallow_clone_timeout_seconds or 0),
+            ):
                 logger.warning(f"[分析] 项目代码不可用：{provider.last_error}")
                 return prep
 
             self._active_repos[config_name] = provider
 
             if repo_cfg.update_on_analyze and not repo_cfg.path:
-                updated, detail = await provider.update_latest()
+                updated, detail = await provider.update_latest(
+                    budget=int(repo_cfg.update_timeout_seconds or 0)
+                )
                 if updated:
                     logger.info(f"[分析] {detail}")
                 else:

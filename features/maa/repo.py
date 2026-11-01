@@ -61,12 +61,22 @@ SUBMODULE_TIMEOUT = 1200
 PROBE_TIMEOUT = 60
 
 # 按需拉取 / 切换单个 ref 的联网预算。
-# 整段分析共享一个阶段超时（settings.ai_stage_timeout_seconds），
-# 一个无响应的镜像就足以把它耗光，所以这些路径必须收紧：
+# 仓库相关阶段各有自己的配置项（repo.shallow_clone_timeout_seconds /
+# preload_timeout_seconds / update_timeout_seconds），这里的内置常量退化为
+# 「配置为 0 时的兜底」与单步上限；一个无响应的镜像仍然要靠这些上限兜住：
 # 先并发探测来源，只对可达来源做短超时 fetch，总耗时封顶。
 CHECKOUT_PROBE_TIMEOUT = 15
 CHECKOUT_FETCH_TIMEOUT = 90
 CHECKOUT_BUDGET_TIMEOUT = 180
+
+
+def _seconds_or(value: Any, default: int) -> int:
+    """配置值优先，0/None/非法值回退内置常量。"""
+    try:
+        raw = int(value or 0)
+    except (TypeError, ValueError):
+        raw = 0
+    return raw if raw > 0 else default
 
 # 扫描时始终跳过的目录名
 _SKIP_DIRS = {
@@ -504,7 +514,9 @@ class RepoProvider:
             candidates.extend(parent.glob(pattern))
         temp_root = parent / ".temporary"
         if temp_root.is_dir():
-            candidates.extend(temp_root.glob(f"{slug}-*"))
+            # 临时仓库本体 + 它被中断时留下的克隆暂存目录（.clone-*）
+            for pattern in (f"{slug}-*", ".clone-*"):
+                candidates.extend(temp_root.glob(pattern))
         for path in candidates:
             try:
                 remove_repo_tree(path)
@@ -521,8 +533,14 @@ class RepoProvider:
     # 准备仓库
     # ════════════════════════════════════════════════════════════
 
-    async def ensure_ready(self) -> bool:
-        """确保仓库可用。返回 False 表示不可用（已记录原因）。"""
+    async def ensure_ready(self, *, shallow_only: bool = False,
+                           budget: float = 0.0) -> bool:
+        """确保仓库可用。返回 False 表示不可用（已记录原因）。
+
+        shallow_only=True：分析/追问现场调用，**只允许浅克隆**，绝不在这里
+        做完整克隆——完整克隆只由后台预下载负责（见 docs/repo.md）。
+        budget>0：本次准备的总预算（秒），向下收紧克隆 / 探测 / 子模块超时。
+        """
         if self._ready:
             return True
 
@@ -546,7 +564,25 @@ class RepoProvider:
             logger.warning(f"[仓库] {self._last_error}")
             return False
 
+        cap = max(1, int(budget)) if budget and budget > 0 else 0
+        shallow = shallow_only or not self.cfg.preload_enabled
+
+        def _limit(default: int, configured: int = 0) -> int:
+            """配置值优先，其次内置常量；有预算时再向预算收紧。"""
+            limit = _seconds_or(configured, default)
+            return min(limit, cap) if cap else limit
+
+        shallow_limit = _limit(SHALLOW_CLONE_TIMEOUT,
+                               self.cfg.shallow_clone_timeout_seconds)
+        full_limit = _limit(FULL_CLONE_TIMEOUT, self.cfg.preload_timeout_seconds)
+        probe_limit = _limit(PROBE_TIMEOUT)
+        submodule_limit = _limit(SUBMODULE_TIMEOUT)
+
         if (root / ".git").exists():
+            if shallow:
+                # 分析/追问现场：现有仓库是什么形态就用什么形态，绝不升级
+                self._ready = True
+                return True
             origin = ""
             try:
                 origin = (await _run_git(
@@ -560,7 +596,7 @@ class RepoProvider:
             }
             source_ok = bool(origin) and _normalize_remote_url(origin) in configured
             # 预下载模式需要完整历史与子模块；旧缓存若是浅克隆则重新克隆
-            needs_full = bool(self.cfg.preload_enabled) and await self.is_shallow(root)
+            needs_full = await self.is_shallow(root)
             if source_ok and not needs_full:
                 self._ready = True
                 return True
@@ -570,7 +606,9 @@ class RepoProvider:
             backup = root.parent / f".stale-{safe_repo_dir_name(self._config_name)}-{uuid.uuid4().hex[:10]}"
             os.replace(root, backup)
             try:
-                await self._clone(root)
+                await self._clone(root, shallow=False, clone_timeout=full_limit,
+                                  probe_timeout=probe_limit,
+                                  submodule_timeout=submodule_limit)
             except asyncio.CancelledError:
                 if root.exists():
                     remove_repo_tree(root)
@@ -591,8 +629,11 @@ class RepoProvider:
             self._ready = True
             return True
 
+        limit = shallow_limit if shallow else full_limit
         try:
-            await self._clone(root)
+            await self._clone(root, shallow=shallow, clone_timeout=limit,
+                              probe_timeout=probe_limit,
+                              submodule_timeout=submodule_limit)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -606,18 +647,29 @@ class RepoProvider:
         self._ready = True
         return True
 
-    async def _clone(self, root: Path):
+    async def _clone(self, root: Path, *, shallow: bool = False,
+                     clone_timeout: int = 0, probe_timeout: int = 0,
+                     submodule_timeout: int = 0):
+        """克隆到 root。
+
+        `shallow` 由调用方**显式**决定，不再从 `preload_enabled` 猜：
+        分析/追问现场一律浅克隆（唯一形态），完整克隆只属于后台预下载。
+        `*_timeout` 为 0 时沿用内置常量。
+        """
         root.parent.mkdir(parents=True, exist_ok=True)
         if root.exists():
             self._last_error = f"仓库缓存目标已存在但不是 Git 仓库：{root}"
             raise RuntimeError(self._last_error)
         sources = await self._remote_sources(root)
-        # 预下载模式需要完整历史、全部 tag 与子模块；按需模式保持浅克隆
-        full = bool(self.cfg.preload_enabled)
-        timeout = FULL_CLONE_TIMEOUT if full else SHALLOW_CLONE_TIMEOUT
+        full = not shallow
+        timeout = clone_timeout or (
+            FULL_CLONE_TIMEOUT if full else SHALLOW_CLONE_TIMEOUT
+        )
+        probe_timeout = probe_timeout or PROBE_TIMEOUT
+        submodule_timeout = submodule_timeout or SUBMODULE_TIMEOUT
         errors: list[str] = []
         for index, url in enumerate(sources, start=1):
-            probe_error = await self._probe_source(url, sources)
+            probe_error = await self._probe_source(url, sources, timeout=probe_timeout)
             if probe_error:
                 errors.append(f"来源 #{index}: {probe_error}")
                 logger.warning(
@@ -640,7 +692,7 @@ class RepoProvider:
                 await _run_git(args, timeout=timeout)
                 if full:
                     # 子模块失败不应丢掉已下载的主仓库
-                    await self._sync_submodules(staging)
+                    await self._sync_submodules(staging, timeout=submodule_timeout)
                 os.replace(staging, root)
                 self._active_url = url
                 # 本地路径克隆会忽略 --depth，形态以 git 实际状态为准
@@ -686,6 +738,10 @@ class RepoProvider:
         触发的更新不能按「预下载」的预算等待，否则一个无响应的镜像就能把整个
         分析阶段挂到超时。budget=0 表示不设总时限（预下载使用）。
         """
+        if budget > 0:
+            # 预算同时收紧单步：探测与 fetch 各自都不该超过总预算
+            probe_timeout = min(int(probe_timeout), max(1, int(budget)))
+            fetch_timeout = min(int(fetch_timeout), max(1, int(budget)))
         root = root or self.root
         if root is None or not (root / ".git").exists():
             return False, "当前不是可更新的 Git 仓库"

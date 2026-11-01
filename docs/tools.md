@@ -94,4 +94,8 @@ agent 模式受三重限制，避免 token 与耗时失控：
 | `agent_deadline_seconds` | `600` | agent 循环总时长上限 |
 | `max_tool_result_chars` | `30000` | 单次工具结果字符上限 |
 
+> 仓库获取（克隆 / 更新）的时长上限见 [项目代码参考](repo.md)：分析现场只做**浅克隆**
+> （`shallow_clone_timeout_seconds`），完整克隆由后台预下载负责（`preload_timeout_seconds`），
+> 更新默认分支另有 `update_timeout_seconds`。
+
 路径安全回归测试：`python -m unittest discover -s tests -v`。

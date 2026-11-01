@@ -87,6 +87,8 @@ class LogArchiveTools:
         # 同一实例的解压 / 读取串行：zipfile 句柄与解压目录是可变状态，
         # 而工具调用、关闭、归档可能在同一分析内交错发生。
         self._io_lock = threading.RLock()
+        # 拿不到锁时暂存的释放动作：由正在跑的那次工具调用收尾（见 _run_io）
+        self._pending_release = ""
         self._extract = ExtractedArchive(
             self.zip_path,
             target_dir=extract_dir,
@@ -115,26 +117,53 @@ class LogArchiveTools:
         """
         def _call():
             with self._io_lock:
-                return func(**kwargs)
+                try:
+                    return func(**kwargs)
+                finally:
+                    # 期间被请求的释放在这里收尾（仍持锁，顺序正确）
+                    self._flush_pending_release()
 
         return await run_blocking(_call, limit=LOG_TOOL_THREADS)
 
+    # ── 释放 ──
+    # 这三个入口以前直接 `with self._io_lock`：一旦在"阶段超时取消后的 finally"
+    # 里执行、而此刻正有工具在别的线程持锁读文件，就会在**事件循环线程**上等
+    # threading.Lock —— 整个 Bot 全部配置停摆。所以改成：拿不到锁就登记一个待
+    # 释放动作，交给那次正在跑的工具调用收尾，自身立即返回。
+
     def close(self) -> None:
         """释放内存状态，不删除已解压目录（下次追问可直接复用）。"""
-        with self._io_lock:
-            self._extract.close()
+        self._request_release("close")
 
     def discard(self) -> None:
         """删除解压目录（没有历史记录、或本次分析未能归档时调用）。"""
-        with self._io_lock:
-            self._extract.discard()
+        self._request_release("discard")
 
     def release(self) -> None:
         """结束使用：目录可复用时只释放内存，临时目录直接删掉。"""
-        if self.persistent:
-            self.close()
-        else:
-            self.discard()
+        self._request_release("close" if self.persistent else "discard")
+
+    def _request_release(self, action: str) -> None:
+        """执行释放；拿不到锁就让正在跑的工具调用收尾（绝不阻塞调用方）。"""
+        if self._io_lock.acquire(blocking=False):
+            try:
+                self._apply_release(action)
+            finally:
+                self._io_lock.release()
+            return
+        self._pending_release = action
+
+    def _apply_release(self, action: str) -> None:
+        if action == "close":
+            self._extract.close()
+        elif action == "discard":
+            self._extract.discard()
+
+    def _flush_pending_release(self) -> None:
+        """在持锁的工具调用收尾时执行挂起的释放（调用方需已持锁）。"""
+        action, self._pending_release = self._pending_release, ""
+        if action:
+            self._apply_release(action)
 
     @property
     def persistent(self) -> bool:
