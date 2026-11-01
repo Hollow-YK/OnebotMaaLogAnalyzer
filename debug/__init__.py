@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import shutil
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -469,6 +470,49 @@ class DebugManager:
         # 模拟模型的工具循环行为与收敛行为，重启后同样需复现
         self.llm_tool_behavior: str = ""
         self.llm_converge_empty: bool = False
+
+    def close(self, *, clean_scratch: bool = True) -> None:
+        """收尾：关掉常驻浏览器，并清掉只属于本次运行的临时目录。
+
+        渲染进程**必须**退出：否则它会一直占着 `<data_dir>/_browser_profile`，
+        数据目录删不掉（调试与回归场景最容易踩，见 tests/test_debug_cleanup.py）。
+        """
+        try:
+            from features.maa.render import close_all
+
+            close_all()
+        except Exception as exc:
+            logger.warning(f"[调试] 关闭渲染浏览器失败：{exc}")
+        if clean_scratch:
+            self.clean_scratch()
+
+    def clean_scratch(self) -> None:
+        """删除运行残留：浏览器 profile、浏览器 stderr、发送暂存、仓库克隆暂存。
+
+        只删这些「跑一次就该消失」的目录，不动配置、历史与仓库缓存本体。
+        """
+        data_dir = Path(self.data_dir)
+        if not data_dir.exists():
+            return
+        targets: list[Path] = []
+        targets.extend(data_dir.glob("_browser_profile*"))
+        targets.append(data_dir / "_browser_stderr.log")
+        targets.append(data_dir / "_outbox")
+        repo_dir = data_dir / "repo"
+        if repo_dir.is_dir():
+            targets.append(repo_dir / ".temporary")
+            targets.extend(repo_dir.glob(".clone-*"))
+            targets.extend(repo_dir.glob(".stale-*"))
+        for path in targets:
+            if not path.exists():
+                continue
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except OSError as exc:
+                logger.warning(f"[调试] 清理运行残留失败（{path.name}）：{exc}")
 
     @classmethod
     def from_config(cls, cfg: dict, data_dir: Optional[str] = None) -> "DebugManager":

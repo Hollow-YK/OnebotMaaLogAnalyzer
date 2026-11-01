@@ -864,22 +864,43 @@ def _materialize_mock_repo(manager: "DebugManager", files: dict) -> Path:
 
 async def run_test_file(file_path: str,
                         manager: Optional["DebugManager"] = None) -> TestReport:
-    """从 JSON 文件加载并运行测试场景。"""
+    """从 JSON 文件加载并运行测试场景。
+
+    结束后**必定收尾**：关闭渲染浏览器并清掉本次运行的临时目录，保证
+    「跑完不留进程、不留文件」（见 tests/test_debug_cleanup.py）。
+    """
+    if manager is None:
+        manager = _manager_for_file(file_path)
+    try:
+        return await _run_test_file_inner(file_path, manager)
+    finally:
+        try:
+            manager.close()
+        except Exception as exc:
+            logger.warning(f"[调试] 收尾失败：{exc}")
+
+
+def _manager_for_file(file_path: str) -> "DebugManager":
+    """按场景文件旁边的 config.json（或默认配置）构建 DebugManager。"""
+    from debug import DebugManager
+
+    path = Path(file_path)
+    cfg_path = path.parent / "config.json"
+    if cfg_path.exists():
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+    else:
+        cfg = {
+            "bot": {"data_dir": str(path.parent / "data"), "configs": {}},
+        }
+    return DebugManager.from_config(cfg)
+
+
+async def _run_test_file_inner(file_path: str,
+                               manager: "DebugManager") -> TestReport:
+    """场景执行主体（manager 的收尾由 run_test_file 负责）。"""
     path = Path(file_path)
     # utf-8-sig 兼容带 BOM 的文件（Windows 编辑器常见）
     data = json.loads(path.read_text(encoding="utf-8-sig"))
-
-    if manager is None:
-        from debug import DebugManager
-
-        cfg_path = path.parent / "config.json"
-        if cfg_path.exists():
-            cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
-        else:
-            cfg = {
-                "bot": {"data_dir": str(path.parent / "data"), "configs": {}},
-            }
-        manager = DebugManager.from_config(cfg)
 
     report = TestReport(name=data.get("name", path.stem))
     t0 = time.perf_counter()

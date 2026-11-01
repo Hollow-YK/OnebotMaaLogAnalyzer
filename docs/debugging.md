@@ -98,13 +98,21 @@ curl http://127.0.0.1:8765/debug/configs
 ### 运行全部套件
 
 ```bash
-python -c "import asyncio;from debug.runner import run_test_file;from debug import DebugManager;names=('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach','followup_tool_loop','followup_converge_fallback','render_image');[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config({'bot':{'data_dir':'data/test','configs':{}}})))) for n in names]"
+python -c "import asyncio,shutil;from debug.runner import run_test_file;from debug import DebugManager;names=('smoke_test','analyze_flow','repo_lookup','commands_test','history_test','attachment_safety','followup_restart','followup_repo','followup_repo_attach','followup_tool_loop','followup_converge_fallback','render_image');[print(asyncio.run(run_test_file(f'debug/examples/{n}.json',DebugManager.from_config({'bot':{'configs':{}}}, data_dir='data/_test_run')))) for n in names];shutil.rmtree('data/_test_run', ignore_errors=True)"
 ```
 
-> 每个套件都要**新建** `DebugManager`（如上）。复用同一个实例会把上一个套件的
-> 会话 / 历史 / 内存状态带到下一个，表现为大量“重启后…”场景失败。
+> 每个套件都要**新建** `DebugManager`（如上），且显式给一个**专用数据目录**
+> （`data_dir=...`）。数据目录优先级是「显式 `data_dir` > `cfg['debug']['data_dir']`
+> > `data/test`」——`bot.data_dir` **不参与**，别传错地方。
 >
-> 每次运行前先删除 `data/test`，否则残留配置会导致群多归属 → `resolve_config` 返回 `None` 而误判失败。
+> **收尾是自动的**：`run_test_file` 结束时（含异常路径）会关闭所有常驻渲染浏览器
+> 并清掉本次运行的临时目录（浏览器 profile / `_outbox` / 仓库克隆暂存）。
+> 所以套件跑完不会残留无头浏览器进程，专用数据目录可以直接 `rmtree` 删掉；
+> 上面那条命令最后就顺手删了。
+>
+> 若要复用同一份数据目录，跑之前先删掉它，否则残留配置会导致群多归属 →
+> `resolve_config` 返回 `None` 而误判失败，累积的历史记录也会让 `history_count`
+> 断言失败。
 >
 > 调试夹具里的 `report` 段未声明时默认 `render=text`，这样多数场景不依赖本机浏览器；
 > 需要验证渲染时在场景里显式写 `"report": {"render": "image"}`（参考 `render_image.json`）。

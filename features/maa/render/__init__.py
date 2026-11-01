@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import html
 import logging
@@ -239,3 +240,9 @@ def close_all() -> None:
                 renderer.close()
         except Exception as exc:
             logger.debug(f"[渲染] 关闭浏览器失败：{exc}")
+
+
+# 兜底：进程退出时确保没有渲染浏览器残留。
+# 调试脚本、临时探针、异常路径都可能忘了调用 close_all()，而一个残留的
+# 无头浏览器会一直占着 <data_dir>/_browser_profile，导致数据目录删不掉。
+atexit.register(close_all)
