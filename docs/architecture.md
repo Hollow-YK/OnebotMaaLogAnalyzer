@@ -119,4 +119,13 @@ OnebotMaaLogAnalyzer/
 
 ## 数据兼容
 
-采用 `.tmp` 原子写入防止数据损坏，加载失败时自动尝试 `.tmp` 恢复。
+- **原子写入**：先写 `.tmp`，再用 `os.replace` 覆盖（不再 `unlink` + `rename`，
+  避免 Windows 上出现"文件不存在"的窗口）；`os.replace` 失败时原文件保持不动。
+- **`.tmp` 恢复**：加载失败时自动尝试用残留的 `.tmp` 顶替。
+- **损坏文件先备份**：`settings.json` / `<配置>/groups.json` / `commands.json` /
+  `settings.json` 覆盖 / `project.json` / `jobs/records.json` 解析失败时，先备份成
+  `<文件名>.corrupt-<时间戳>` 再按默认值重建；**备份也失败则进入写保护**，
+  宁可用默认值跑也不覆盖唯一一份数据。
+- **配置名清洗**：配置名只允许字母数字与 `._-`（中文等 Unicode 字母数字保留），
+  路径分隔符、`..`、绝对路径都会被替换，目录恒定落在 `data/<清洗后的名字>/`；
+  升级前已存在的老目录名会继续沿用，避免"历史不见了"。

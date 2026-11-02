@@ -667,7 +667,12 @@ class ArchivePersistenceTests(unittest.TestCase):
         )
         self.assertEqual(record.size_bytes, expected)
         self.assertGreater(record.size_bytes, old_size)
-        self.assertEqual(self.store.stats("cfg")["bytes"], expected)
+        # stats 现在还计入 records.json / followups.json（报告正文就存在 records.json 里）
+        index_bytes = self.store._records_path("cfg").stat().st_size
+        followups = self.store._followups_path("cfg")
+        if followups.is_file():
+            index_bytes += followups.stat().st_size
+        self.assertEqual(self.store.stats("cfg")["bytes"], expected + index_bytes)
 
         # 刷新后的体积落盘，重启后仍是实际值
         reloaded = HistoryStore(self.data).find_by_id("cfg", record.id)

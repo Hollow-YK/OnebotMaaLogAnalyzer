@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import time
+import uuid
 from core.concurrency import run_blocking
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -52,6 +54,18 @@ _FOLLOWUP_FILE = "followups.json"
 
 # 历史目录名（位于各配置目录下）
 HISTORY_DIR_NAME = "history"
+
+# 记录目录名：`<纳秒>_<随机后缀>`；老格式 `<秒>_<序号>` 也匹配，便于识别孤儿目录
+_RECORD_ID_RE = re.compile(r"^\d+_[0-9a-zA-Z]+$")
+
+
+def new_record_id() -> str:
+    """历史记录 ID：纳秒时间戳 + 随机后缀。
+
+    旧格式 `int(time.time())_<记录数+1>` 在同一秒、以及记录被清空后都会复用，
+    于是目录被 `mkdir(exist_ok=True)` 静默复用、归档被覆盖、追问串到别的记录。
+    """
+    return f"{time.time_ns()}_{uuid.uuid4().hex[:6]}"
 
 
 def _dir_size(path: Path) -> int:
@@ -111,7 +125,10 @@ class HistoryStore:
         self._records: dict[str, list[HistoryRecord]] = {}
         self._followups: dict[str, dict] = {}
         self._loaded = False
-        self.last_cleanup: float = 0.0
+        # 配置名 → 上次清理时间。以前是实例级字段，导致 cleanup_all 只清第一个配置
+        self._last_cleanup: dict[str, float] = {}
+        # records.json 解析失败且备份也失败时，禁止写回（别把坏文件覆盖成空表）
+        self._unwritable: set[str] = set()
 
     # ════════════════════════════════════════════════════════════
     # 目录
@@ -195,12 +212,39 @@ class HistoryStore:
                             **{k: v for k, v in item.items() if k in known}
                         ))
             except Exception as exc:
-                logger.warning(f"[历史] {config_name} records.json 读取失败：{exc}")
+                self._quarantine_records(config_name, path, exc)
         self._records[config_name] = records
         return records
 
+    def _quarantine_records(self, config_name: str, path: Path,
+                            exc: Exception) -> None:
+        """records.json 解析失败：先备份再重建索引，绝不静默覆盖。
+
+        备份成功 → 坏文件被移走（之后 save 写的是新索引，原文件仍可人工恢复）；
+        备份也失败 → 把该配置标为不可写：宁可不落盘，也不覆盖唯一一份数据。
+        """
+        backup = path.with_name(f"{path.name}.bad-{int(time.time())}")
+        try:
+            path.replace(backup)
+        except OSError as move_exc:
+            self._unwritable.add(config_name)
+            logger.error(
+                f"[历史] {config_name} records.json 解析失败，且备份也失败"
+                f"（{move_exc}）；已停止写回以免覆盖原文件：{exc}"
+            )
+            return
+        logger.warning(
+            f"[历史] {config_name} records.json 解析失败，已备份为 {backup.name} "
+            f"并重建索引：{exc}"
+        )
+
     def save(self, config_name: str) -> None:
         """持久化某配置的历史记录（原子写）。"""
+        if config_name in self._unwritable:
+            logger.warning(
+                f"[历史] {config_name} records.json 处于保护状态，跳过写回"
+            )
+            return
         records = self._records.get(config_name)
         if records is None:
             return
@@ -320,8 +364,20 @@ class HistoryStore:
         任何失败都只记日志并返回 None，不影响分析结果。
         """
         try:
-            record_id = f"{int(time.time())}_{len(self.load(config_name)) + 1}"
-            target = self.record_dir(config_name, record_id)
+            # 绝不覆盖已有目录：ID 唯一性不能靠"记录数 + 1"（清空后会回退复用）
+            record_id = ""
+            target: Optional[Path] = None
+            for _ in range(5):
+                candidate = new_record_id()
+                path = self.record_dir(config_name, candidate)
+                if not path.exists():
+                    record_id, target = candidate, path
+                    break
+            if target is None:
+                logger.warning(
+                    f"[历史] {config_name} 无法分配唯一记录 ID，已跳过归档"
+                )
+                return None
             target.mkdir(parents=True, exist_ok=True)
 
             size_bytes = 0
@@ -491,15 +547,35 @@ class HistoryStore:
         keep = int(keep_periods or 0)
 
         now = time.time()
-        if not force and self.last_cleanup:
-            if (now - self.last_cleanup) < period * 3600:
+        last = self._last_cleanup.get(config_name, 0.0)
+        if not force and last:
+            if (now - last) < period * 3600:
                 result.kept = len(self.load(config_name))
                 result.reason = "未到清理周期"
                 return result
 
         records = self.load(config_name)
+
+        # 手工清理顺带收掉"索引里没有、目录还在"的孤儿记录目录
+        # （records.json 曾损坏重建、或索引被手工删过）。放在"无记录"提前返回
+        # 之前，否则一个只剩孤儿目录的配置永远清不掉。
+        if force:
+            orphan_removed = 0
+            for path in self._orphan_record_dirs(config_name, records):
+                size = _dir_size(path)
+                shutil.rmtree(path, ignore_errors=True)
+                if path.exists():
+                    logger.warning(f"[历史] 孤儿记录目录删除失败：{path.name}")
+                    continue
+                orphan_removed += 1
+                result.freed_bytes += size
+            if orphan_removed:
+                logger.info(
+                    f"[历史] {config_name} 额外清理 {orphan_removed} 个孤儿记录目录"
+                )
+
         if not records:
-            self.last_cleanup = now
+            self._touch_cleanup(config_name, now, force=force)
             result.reason = "无记录"
             return result
 
@@ -520,10 +596,13 @@ class HistoryStore:
             survivors = survivors[len(survivors) - max_records:]
             result.reason = "超出记录数上限"
 
-        # 安全上限 2：历史目录总大小（从最旧开始删）
+        # 安全上限 2：历史目录总大小（从最旧开始删）。
+        # records.json / followups.json 也在该目录里，且**报告正文就存在
+        # records.json 中**——不计入就会一直低估真实占用。
+        index_bytes = self._index_bytes(config_name)
         if max_total_mb > 0:
             budget = max_total_mb * 1024 * 1024
-            total = sum(r.size_bytes for r in survivors)
+            total = sum(r.size_bytes for r in survivors) + index_bytes
             if total > budget:
                 survivors.sort(key=lambda r: r.created_at)
                 while survivors and total > budget:
@@ -535,7 +614,7 @@ class HistoryStore:
         if not expired:
             if size_changed:
                 self.save(config_name)
-            self.last_cleanup = now
+            self._touch_cleanup(config_name, now, force=force)
             result.kept = len(survivors)
             return result
 
@@ -547,7 +626,7 @@ class HistoryStore:
 
         self._records[config_name] = survivors
         self.save(config_name)
-        self.last_cleanup = now
+        self._touch_cleanup(config_name, now, force=force)
         result.kept = len(survivors)
 
         logger.info(
@@ -585,37 +664,97 @@ class HistoryStore:
         freed = _dir_size(target)
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
+        if target.exists():
+            # 删除失败（文件被占用等）：不能算作已释放，否则容量统计失真
+            logger.warning(
+                f"[历史] 删除 #{record.id} 目录失败，仍占用 {freed} 字节"
+            )
+            return 0
         return freed
 
     def cleanup_all(self, settings_of: dict, *, force: bool = False) -> dict:
         """
-        对所有已知配置执行清理。
+        对所有**已知**配置执行清理。
 
         settings_of: {配置名: AnalysisSettings}，用于取各自的周期配置。
+
+        除了当前配置，还覆盖"数据目录里已有历史目录、但已不在配置列表里"的
+        （配置改名 / 删除 / 关闭历史后的残留），否则这些目录只增不减。
+        `history_enabled=false` 只是不再新增归档，既有历史仍按周期清理。
         """
+        names = list(settings_of)
+        names.extend(n for n in self._known_config_names() if n not in settings_of)
         summary: dict[str, CleanupResult] = {}
-        for name, settings in settings_of.items():
-            if not getattr(settings, "history_enabled", True):
-                continue
+        for name in names:
             summary[name] = self.cleanup(
-                name,
-                period_hours=getattr(settings, "history_period_hours", 24),
-                keep_periods=getattr(settings, "history_keep_periods", 2),
-                max_records=getattr(settings, "history_max_records", 200),
-                max_total_mb=getattr(settings, "history_max_total_mb", 4096),
-                force=force,
+                name, force=force, **self._cleanup_kwargs(settings_of.get(name))
             )
         return summary
+
+    @staticmethod
+    def _cleanup_kwargs(settings) -> dict:
+        """按配置取清理参数；配置已不存在时（settings=None）用默认值。"""
+        def _int(key: str, default: int) -> int:
+            raw = getattr(settings, key, default)
+            if raw is None:
+                return default
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        return dict(
+            period_hours=_int("history_period_hours", 24),
+            keep_periods=_int("history_keep_periods", 2),
+            max_records=_int("history_max_records", 200),
+            max_total_mb=_int("history_max_total_mb", 4096),
+        )
+
+    def _touch_cleanup(self, config_name: str, now: float, *,
+                       force: bool) -> None:
+        """记录本次清理时间；手动清理（force）不算作一次周期清理。"""
+        if not force:
+            self._last_cleanup[config_name] = now
+
+    def _index_bytes(self, config_name: str) -> int:
+        """records.json + followups.json 的占用（报告正文就在 records.json 里）。"""
+        total = 0
+        for path in (self._records_path(config_name),
+                     self._followups_path(config_name)):
+            try:
+                if path.is_file():
+                    total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _orphan_record_dirs(self, config_name: str,
+                            records: list[HistoryRecord]) -> list[Path]:
+        """索引里没有、目录还在的记录目录（只按 ID 形状识别，避免误删）。"""
+        root = self._config_dir(config_name)
+        known = {str(r.id) for r in records}
+        found: list[Path] = []
+        try:
+            for entry in root.iterdir():
+                if not entry.is_dir() or entry.name in known:
+                    continue
+                if entry.name.startswith(".") or not _RECORD_ID_RE.match(entry.name):
+                    continue
+                found.append(entry)
+        except OSError:
+            return []
+        return found
 
     def stats(self, config_name: str) -> dict:
         """历史使用情况，供指令展示（按目录实际体积统计）。"""
         records = self.load(config_name)
         return {
             "count": len(records),
+            # 记录目录 + 索引文件（报告正文存在 records.json 里，必须计入）
             "bytes": sum(
                 _dir_size(self.record_dir(config_name, record.id))
                 for record in records
-            ),
+            ) + self._index_bytes(config_name),
             "oldest": min((r.created_at for r in records), default=0),
             "newest": max((r.created_at for r in records), default=0),
         }
