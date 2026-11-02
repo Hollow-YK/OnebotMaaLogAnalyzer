@@ -228,6 +228,89 @@ class FollowupAnswer:
 
 
 @dataclass
+class ArchivePartsState:
+    """分卷合并结果里可用于「是否齐全」判定的信息。"""
+
+    used: list[int] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+    has_log_content: bool = False
+
+    @property
+    def incomplete(self) -> bool:
+        """缺卷/断档，或已收到的卷里没有日志正文。"""
+        return bool(self.missing) or not self.has_log_content
+
+
+def judge_parts_state(zip_path: Path, used: dict[int, str],
+                      candidates: dict[int, tuple[str, str, int]],
+                      ) -> ArchivePartsState:
+    """按「编号连续 + 内容特征」判定分卷是否齐全。
+
+    - 编号：群列表里有但本次没下到的卷、已收编号的断档，都算缺；
+    - 内容：合并后的包里至少要有非图片成员（日志正文/配置）。分卷按整成员
+      切分，主日志可能落在任意一卷，所以"只有图片"说明关键卷还没上来。
+    """
+    missing: list[str] = []
+    numbers = sorted(int(n) for n in used)
+    for number in sorted(set(candidates) - set(numbers)):
+        name = Path(str(candidates[number][0])).name
+        missing.append(name or f"part{number:02d}")
+    if numbers and numbers != list(range(1, len(numbers) + 1)):
+        have = set(numbers)
+        for number in range(1, max(numbers) + 1):
+            if number not in have:
+                missing.append(f"part{number:02d}")
+
+    has_log = False
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            has_log = any(
+                not info.is_dir()
+                and Path(info.filename.replace("\\", "/")).suffix.lower()
+                not in IMAGE_SUFFIXES
+                for info in archive.infolist()
+            )
+    except (OSError, zipfile.BadZipFile):
+        has_log = False
+
+    return ArchivePartsState(
+        used=numbers, missing=sorted(set(missing)), has_log_content=has_log,
+    )
+
+
+def describe_parts_gap(state: ArchivePartsState) -> str:
+    """把「不完整」写成一句人话（同时进 AI 提示词与报告头）。"""
+    bits: list[str] = []
+    if state.missing:
+        bits.append("缺 " + "、".join(state.missing))
+    if not state.has_log_content:
+        bits.append("已收到的卷里没有日志正文")
+    return "；".join(bits) or "编号不连续"
+
+
+def decide_parts_action(state: Optional[ArchivePartsState], *,
+                        require_content: bool, action: str,
+                        defer: bool) -> str:
+    """分卷不完整的处理策略：``ok`` / ``defer`` / ``cancel`` / ``analyze``。
+
+    - ``ok``：齐全，照常分析；
+    - ``defer``：不完整但还有额外等待余量（交 LogWatcher 重排再等一轮）；
+    - ``cancel``：不完整且配置为取消；
+    - ``analyze``：不完整但照常分析（调用方负责把缺失写进提示词与报告）。
+    """
+    if state is None:
+        return "ok"
+    incomplete = bool(state.missing) or (
+        require_content and not state.has_log_content
+    )
+    if not incomplete:
+        return "ok"
+    if defer:
+        return "defer"
+    return "cancel" if str(action or "analyze").strip().lower() == "cancel" else "analyze"
+
+
+@dataclass
 class AnalysisOutcome:
     """一次分析的结构化结果，供上层格式化输出。"""
 
@@ -241,6 +324,10 @@ class AnalysisOutcome:
     error: str = ""
     digest: Optional[DigestResult] = None
     notes: list[str] = field(default_factory=list)
+    # 分卷不完整：内容缺日志正文或卷号有断档（由 judge_parts_state 判定）
+    parts_incomplete: bool = False
+    # 判定不完整时缺的卷名/编号（供日志、提示与延长等待）
+    missing_parts: list[str] = field(default_factory=list)
     # 报告的有序输出片段（文本 / 图片 / 文件，保持模型给出的位置）
     segments: list[OutSegment] = field(default_factory=list)
     # 追问上下文（摘要 + 代码参考），供分析后答疑使用
@@ -621,6 +708,7 @@ class MaaAnalyzer:
         file_size: Optional[int],
         uploader: str = "",
         progress: Optional[callable] = None,
+        defer_incomplete_parts: bool = False,
     ) -> AnalysisOutcome:
         project = project or ProjectConfig()
         part = parse_archive_part(file_name)
@@ -659,6 +747,7 @@ class MaaAnalyzer:
                         file_size=file_size,
                         uploader=uploader,
                         progress=progress,
+                        defer_incomplete_parts=defer_incomplete_parts,
                     )
             outcome.session_id = outcome.session_id or session_id
             return outcome
@@ -677,12 +766,15 @@ class MaaAnalyzer:
         file_size: Optional[int],
         uploader: str = "",
         progress: Optional[callable] = None,
+        defer_incomplete_parts: bool = False,
     ) -> AnalysisOutcome:
         """
         下载并分析一个日志包。
 
         project: 项目配置（名称 / 识别方式 / UI 开关 / 仓库）。
         progress: 可选异步回调 async (text: str) -> None，用于发送进度消息。
+        defer_incomplete_parts: 分卷内容不完整时先不分析，直接返回
+            `parts_incomplete=True`，交给 LogWatcher 额外等待后再试。
         """
         project = project or ProjectConfig()
         part = parse_archive_part(file_name)
@@ -720,8 +812,9 @@ class MaaAnalyzer:
             download_sem = self._download_semaphore(config_name, settings)
 
             extra_notes: list[str] = []
+            parts_state: Optional[ArchivePartsState] = None
             if part is not None and settings.merge_archive_parts:
-                downloaded, extra_notes = await self._download_archive_parts(
+                downloaded, extra_notes, parts_state = await self._download_archive_parts(
                     group_id=group_id,
                     file_name=file_name,
                     file_id=resolved_id,
@@ -763,6 +856,50 @@ class MaaAnalyzer:
                     error=overflow,
                 )
             logger.info(f"[分析] 内容检查通过：{file_name}")
+
+            # 分卷齐全性（判据见 judge_parts_state）：不完整时按配置决定
+            # 「再等一轮」/「取消并提示」/「照常分析并标注」。
+            decision = decide_parts_action(
+                parts_state,
+                require_content=bool(
+                    getattr(settings, "archive_part_require_content", True)
+                ),
+                action=str(
+                    getattr(settings, "archive_part_incomplete_action", "analyze")
+                    or "analyze"
+                ),
+                defer=defer_incomplete_parts,
+            )
+            if decision != "ok":
+                gap = describe_parts_gap(parts_state)
+                if decision == "defer":
+                    # 交给 LogWatcher：当作"还没到齐"，额外等待后再试
+                    self._finish_job(
+                        config_name, job, "等待分卷", f"分卷不完整：{gap}"
+                    )
+                    return AnalysisOutcome(
+                        ok=False, file_name=file_name,
+                        parts_incomplete=True,
+                        missing_parts=list(parts_state.missing),
+                        notes=[f"分卷不完整：{gap}"],
+                    )
+                if decision == "cancel":
+                    reason = (
+                        f"日志包不完整（{gap}），已取消本次分析；"
+                        "请补齐分卷后重新上传。"
+                    )
+                    self._finish_job(config_name, job, "已跳过", reason)
+                    return AnalysisOutcome(
+                        ok=False, file_name=file_name, skipped=True,
+                        parts_incomplete=True,
+                        missing_parts=list(parts_state.missing),
+                        error=reason,
+                    )
+                extra_notes.append(
+                    f"注意：日志包不完整（{gap}）；请只基于已收到的 "
+                    f"{len(parts_state.used)} 个分卷分析，"
+                    "并在结论里说明哪些部分可能缺失。"
+                )
 
             if progress:
                 await progress("日志包已下载，正在提取错误摘要。")
@@ -1131,7 +1268,7 @@ class MaaAnalyzer:
         work_dir: Path,
         settings: AnalysisSettings,
         semaphore: asyncio.Semaphore,
-    ) -> tuple[int, list[str]]:
+    ) -> tuple[int, list[str], ArchivePartsState]:
         """
         下载并合并同一组分卷日志包（*-part01.zip / *-part02.zip）。
 
@@ -1166,14 +1303,19 @@ class MaaAnalyzer:
                 timeout_seconds=max(10, int(settings.download_timeout_seconds or 120)),
             )
             reason = "无法获取群文件列表" if list_failed else "群内未找到其他分卷"
-            return downloaded, [
-                f"检测到分卷日志包 {file_name}，但{reason}，仅分析当前分卷。"
-            ]
+            state = judge_parts_state(
+                zip_path, {int(part.number): file_name}, candidates
+            )
+            note = f"检测到分卷日志包 {file_name}，但{reason}，仅分析当前分卷。"
+            if state.incomplete:
+                note += f"（{describe_parts_gap(state)}，日志包不完整）"
+            return downloaded, [note], state
 
         parts_dir = work_dir / "parts"
         parts_dir.mkdir(parents=True, exist_ok=True)
         downloaded_paths: list[Path] = []
         merged_names: list[str] = []
+        used: dict[int, str] = {}
         failures: list[str] = []
         for number in sorted(candidates):
             name, part_id, _ = candidates[number]
@@ -1187,6 +1329,7 @@ class MaaAnalyzer:
                 )
                 downloaded_paths.append(target)
                 merged_names.append(name)
+                used[number] = name
             except Exception as exc:
                 failures.append(f"{name}（{exc}）")
                 logger.warning(f"[分析] 分卷下载失败：{name}：{exc}")
@@ -1199,13 +1342,17 @@ class MaaAnalyzer:
         else:
             await asyncio.to_thread(self._merge_zip_parts, downloaded_paths, zip_path)
 
-        notes = [
+        state = judge_parts_state(zip_path, used, candidates)
+        parts_note = (
             f"检测到分卷日志包，已合并 {len(downloaded_paths)} 个分卷："
             + "、".join(merged_names)
-        ]
+        )
+        if state.incomplete:
+            parts_note += f"（{describe_parts_gap(state)}，日志包不完整）"
+        notes = [parts_note]
         if failures:
             notes.append("以下分卷下载失败，结果可能不完整：" + "；".join(failures))
-        return zip_path.stat().st_size, notes
+        return zip_path.stat().st_size, notes, state
 
     @staticmethod
     def _merge_zip_parts(parts: list[Path], target: Path) -> None:

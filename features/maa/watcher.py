@@ -38,7 +38,7 @@ class LogWatcher:
         self.followup = followup
         self.history = history
         # (群, 文件名, 大小) → 最近一次处理时间（用于跨入口去重）
-        self._recent: dict[tuple[str, str, int], float] = {}
+        self._recent: dict[tuple[str, str], float] = {}
         # (群, 归档标识) → 开始时间：正在分析中的日志包
         self._active: dict[tuple[str, str], float] = {}
         # (群, 归档标识) → 正在等待分卷到齐的任务
@@ -78,7 +78,9 @@ class LogWatcher:
             return False
 
         now = time.monotonic()
-        key = (str(group_id), str(file_name), int(file_size or 0))
+        # 键**不含** file_size：同一文件经两条入口上报时，大小字段可能一个有
+        # 一个没有，带上它就会判不出重复、导致重复分析 / 反复刷新静默计时。
+        key = (str(group_id), str(file_name))
 
         # 顺手清理过期条目，避免长期运行后无限增长
         if len(self._recent) > 256:
@@ -98,7 +100,7 @@ class LogWatcher:
         window = int(getattr(settings, "duplicate_window_seconds", 0) or 0)
         if window <= 0:
             return False
-        last = self._recent.get((key[0], key[1], 0))
+        last = self._recent.get((str(key[0]), str(key[1])))
         return last is not None and (time.monotonic() - last) < window
 
     def _touch_recent(self, group_id: str, file_name: str,
@@ -107,7 +109,13 @@ class LogWatcher:
         if int(getattr(settings, "duplicate_window_seconds", 0) or 0) <= 0:
             return
         now = time.monotonic()
-        self._recent[(str(group_id), str(file_name), int(file_size or 0))] = now
+        group = str(group_id)
+        self._recent[(group, str(file_name))] = now
+        # 分卷：同一归档再按 base 记一条。否则"刚分析完"的冷却键与记录键形状
+        # 不一致（一个用 base、一个用文件名），冷却永远命不中 → 补传就重复分析。
+        part = parse_archive_part(file_name)
+        if part is not None:
+            self._recent[(group, f"part:{part.base.lower()}")] = now
         part_key = self._part_key(group_id, file_name, settings)
         if part_key is not None:
             self._recent[(part_key[0], part_key[1], 0)] = now
@@ -294,10 +302,13 @@ class LogWatcher:
 
         batch = self._part_batches.get(key)
         if batch is None:
-            batch = {"parts": [], "task": None}
+            batch = {"parts": [], "numbers": set(), "task": None}
             self._part_batches[key] = batch
         if file_name not in batch["parts"]:
             batch["parts"].append(file_name)
+        parsed = parse_archive_part(file_name)
+        if parsed is not None:
+            batch.setdefault("numbers", set()).add(int(parsed.number))
         batch.update({
             "file_name": file_name,
             "file_info": file_info,
@@ -322,7 +333,13 @@ class LogWatcher:
     async def _run_part_batch(self, cfg: ConfigState, group_id: str,
                               key: tuple[str, str], settle: float,
                               settings) -> None:
-        """等待静默期结束，然后按合并分卷的方式分析一次。"""
+        """等待静默期结束，然后按合并分卷的方式分析一次。
+
+        齐全性 = 「编号连续 + 内容特征」（见 `judge_parts_state`）：
+        静默期到期但编号像是还没到齐（断档，或只收到孤零零的 part01）时，
+        最多额外等 `archive_part_wait_extra_rounds` 轮；分析侧发现内容缺日志
+        正文时同样再多等一轮，而不是静默丢卷或立刻出残报告。
+        """
         try:
             if settle > 0:
                 await asyncio.sleep(settle)
@@ -331,6 +348,30 @@ class LogWatcher:
 
         batch = self._part_batches.pop(key, None)
         if batch is None or key in self._active:
+            return
+
+        extra_rounds = max(
+            0, int(getattr(settings, "archive_part_wait_extra_rounds", 0) or 0)
+        )
+        waits = int(batch.get("extra_waits", 0) or 0)
+        require_content = bool(
+            getattr(settings, "archive_part_require_content", True)
+        )
+        numbers = sorted(int(n) for n in (batch.get("numbers") or ()))
+        contiguous = bool(numbers) and numbers == list(range(1, len(numbers) + 1))
+        # 孤零零的 part01：编号连续，但样本显示主日志常落在后面的卷里，
+        # 所以要求内容时保守地当作"还没到齐"。
+        suspicious = (not contiguous) or (require_content and numbers == [1])
+        if suspicious and waits < extra_rounds:
+            batch["extra_waits"] = waits + 1
+            batch["task"] = asyncio.create_task(
+                self._run_part_batch(cfg, group_id, key, max(1.0, settle), settings)
+            )
+            self._part_batches[key] = batch
+            logger.info(
+                f"[监听] 分卷看起来还没到齐（已收 {len(numbers)} 卷），"
+                f"额外等待 {max(1.0, settle):g}s 后再看：{batch['file_name']}"
+            )
             return
 
         file_name = batch["file_name"]
@@ -342,13 +383,14 @@ class LogWatcher:
         )
 
         self._active[key] = time.monotonic()
+        deferred = False
         try:
             if settings.send_progress_message:
                 await self.s.send_text(
                     int(group_id),
                     f"检测到日志包：{file_name}\n正在下载并分析，请稍等。",
                 )
-            await self._analyze(
+            outcome = await self._analyze(
                 cfg, group_id, uploader,
                 LogFileItem(
                     file_id=self._pick_str(
@@ -357,7 +399,24 @@ class LogWatcher:
                     file_name=file_name,
                     size=int(file_size or 0),
                 ),
+                defer_incomplete_parts=waits < extra_rounds,
             )
+            if outcome is not None and getattr(outcome, "parts_incomplete", False):
+                if waits < extra_rounds and not getattr(outcome, "skipped", False):
+                    # 内容不完整（如只收到图片卷）：额外等一轮再试。
+                    # 这里**不**记冷却，否则随后补上的卷会被冷却拦住。
+                    deferred = True
+                    batch["extra_waits"] = waits + 1
+                    batch["task"] = asyncio.create_task(
+                        self._run_part_batch(
+                            cfg, group_id, key, max(1.0, settle), settings
+                        )
+                    )
+                    self._part_batches[key] = batch
+                    logger.info(
+                        "[监听] 分卷内容不完整，额外等待 "
+                        f"{max(1.0, settle):g}s 后再试：{file_name}"
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -365,11 +424,14 @@ class LogWatcher:
             logger.exception(f"[监听] 分卷分析异常：{file_name}")
         finally:
             self._active.pop(key, None)
-            self._touch_recent(group_id, file_name, file_size, settings)
+            if not deferred:
+                self._touch_recent(group_id, file_name, file_size, settings)
 
     async def _analyze(self, cfg: ConfigState, group_id: str,
-                       uploader: str, file_info: LogFileItem) -> None:
-        """执行分析并发送全部回复（含错误提示）。"""
+                       uploader: str, file_info: LogFileItem,
+                       *, defer_incomplete_parts: bool = False,
+                       ) -> Optional[Any]:
+        """执行分析并发送全部回复（含错误提示）。返回 outcome 供分卷流程判断。"""
         settings = cfg.settings
         group_int = int(group_id)
 
@@ -378,7 +440,7 @@ class LogWatcher:
                 group_int,
                 f"日志包 {file_info.file_name} 缺少 file_id，无法下载分析。",
             )
-            return
+            return None
 
         async def progress(text: str):
             if settings.send_progress_message:
@@ -394,10 +456,15 @@ class LogWatcher:
             file_size=file_info.size or None,
             uploader=uploader,
             progress=progress,
+            defer_incomplete_parts=defer_incomplete_parts,
         )
 
+        if defer_incomplete_parts and getattr(outcome, "parts_incomplete", False):
+            # 分卷内容不完整：这次不回复用户，交给 _run_part_batch 额外等待后再试
+            return outcome
+
         if not settings.send_summary:
-            return
+            return outcome
 
         max_chars = max(1000, int(settings.reply_chunk_chars or 3500))
         # 按片段顺序发送（文本 / 图片 / 文件），收集 message_id 供引用追问
@@ -416,6 +483,7 @@ class LogWatcher:
             await self._send_outcome(
                 int(notify), outcome, settings, max_chars, link_history=False
             )
+        return outcome
 
     async def _notify_render_fallback(self, cfg: ConfigState, group_id: int,
                                       outcome) -> None:

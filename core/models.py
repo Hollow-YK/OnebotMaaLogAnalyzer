@@ -532,6 +532,15 @@ class AnalysisSettings(BaseModel):
     # 分卷包静默期：每收到一个新分卷就重新计时，连续该秒数无新分卷后才分析
     # 0 = 收到第一个分卷立即分析（可能缺少后续分卷）
     archive_part_settle_seconds: float = 30.0
+    # 分卷齐全性判据：编号连续 + 内容特征（至少一卷含非图片成员，即日志正文/配置）。
+    # 关掉内容判据则只按编号连续判定（编号无法发现"后面的卷还没上传"）。
+    archive_part_require_content: bool = True
+    # 判定不完整时额外等待的轮数，每轮再等 archive_part_settle_seconds 秒。
+    # 0 = 不额外等待（与旧行为一致）
+    archive_part_wait_extra_rounds: int = 1
+    # 额外等待用尽后仍不完整：analyze = 照常分析，并在提示词与报告里标注缺失；
+    # cancel = 取消本次分析并提示补齐后重传
+    archive_part_incomplete_action: str = "analyze"
     max_log_file_read_kb: int = 512
     small_log_full_read_mb: int = 5
     stream_medium_logs: bool = True

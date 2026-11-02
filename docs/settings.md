@@ -48,7 +48,13 @@
   连续 `archive_part_settle_seconds` 秒没有新分卷后才开始分析一次
 - 分卷静默期内到达的新分卷会取消上一次计时，因此上传顺序、间隔都不影响合并结果
 - 同一分卷经 `notice.group_upload` 与 `message.file` 重复上报不会重置静默计时
-- 分析进行中到达的分卷会被忽略；分析结束后的 `duplicate_window_seconds` 内不再重复触发
+- **齐全性判定** = 编号连续 + 内容特征（合并后至少有一卷含日志正文/配置）。
+  静默期到期仍判为不完整时，最多额外等 `archive_part_wait_extra_rounds` 轮；
+  仍不完整则按 `archive_part_incomplete_action` 处理（`analyze` = 照常分析并标注缺失，
+  `cancel` = 取消并提示补齐后重传）。注意编号看不出"后面的卷还没上传"，
+  所以只收到 `part01`（且没有日志正文）时会被保守地当作不完整、多等一轮。
+- 分析进行中到达的分卷仍会被忽略（入口即拦截）；分析结束后
+  `duplicate_window_seconds` 内不再重复触发
 
 ## 日志包命名与 UI 自动识别
 
@@ -148,6 +154,9 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 | `max_maafw_bak_mb` | `64` | 单个 `maafw.bak` 大小上限 MB；`0` = 不限制 |
 | `merge_archive_parts` | `true` | 自动合并 `*-partNN.zip` 分卷日志包 |
 | `archive_part_settle_seconds` | `30` | 分卷静默期：每来一个新分卷重新计时，连续该秒数无新分卷后才开始分析；`0` = 收到首个分卷立即分析 |
+| `archive_part_require_content` | `true` | 分卷齐全性是否要求"内容特征"（合并后至少一卷含日志正文/配置）；关掉则只按编号连续判定 |
+| `archive_part_wait_extra_rounds` | `1` | 判定分卷不完整时额外等待的轮数（每轮再等 `archive_part_settle_seconds` 秒）；`0` = 不额外等待 |
+| `archive_part_incomplete_action` | `analyze` | 额外等待用尽后仍不完整：`analyze` = 照常分析并在提示词/报告里标注缺失；`cancel` = 取消分析并提示补齐后重传 |
 | `max_log_chars` | `120000` | 单个日志摘要字符上限 |
 | `max_recognition_evidence_chars` | `35000` | OCR 重点证据块字符上限 |
 | `max_recognition_evidence_lines` | `60` | OCR 重点证据行数上限 |
