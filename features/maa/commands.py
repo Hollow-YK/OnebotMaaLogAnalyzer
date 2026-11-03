@@ -2,9 +2,12 @@
 QQ 指令系统 — 群内通过指令查看与修改配置。
 
 指令前缀默认 `/maa`，权限分三级（见 CommandConfig）：
-  - 查看类（read_level，默认 0）：群内任何人可用
+  - 查看类（read_level，默认 1）：管理员及以上可用
+    （status / get / project / repo / jobs / history / ai 会暴露群列表、上传记录、
+    本地仓库路径与用量，默认不再对普通成员开放）
   - 修改类（write_level，默认 2）：仅超管可用
-  - 追问答疑（followup_level，默认 0）
+  - 追问答疑（followup_level，默认 0）：群内任何人可引用报告追问；
+    但"结束会话"（`followup close`）至少需要管理员（1）
 
 设置项从 pydantic 模型动态生成，新增字段自动出现在 `get` / `set` 中，
 无需手工维护清单。
@@ -122,6 +125,44 @@ def _format_ui_switches(project: ProjectConfig) -> str:
     )
 
 
+# 需要写权限的子指令（保持查看基线不变，只把这些子指令提到 write_level）
+_WRITE_SUBCOMMANDS: dict[str, set] = {
+    "repo": {
+        "mode", "url", "path", "branch", "on", "enable", "开",
+        "off", "disable", "关", "mirror", "preload",
+    },
+    "history": {"clean", "clear", "清理", "purge", "清空"},
+    "project": {"set", "设置"},
+}
+
+# 需要"至少某个等级"的子指令：结束追问会话是写操作，而 followup_level 默认 0
+# （成员仍可追问），所以单独提权，而不是把整个 followup 抬到管理员。
+_MIN_LEVEL_SUBCOMMANDS: dict[str, tuple] = {
+    "followup": ({"close", "end", "结束"}, 1),
+}
+
+
+def required_level(commands: CommandConfig, action: str, rest: list,
+                   base: Optional[int] = None) -> int:
+    """算出某条指令（含子指令）所需的最低等级。
+
+    base 为该指令的基线等级（`handle()` 里从命令配置取：查看类 `read_level`、
+    修改类 `write_level`、追问答疑 `followup_level`）；未给时按查看类算。
+    """
+    if action == "help":
+        return 0
+    if base is None:
+        base = commands.read_level
+    required = int(base or 0)
+    sub = str(rest[0]).strip().lower() if rest else ""
+    if sub and sub in _WRITE_SUBCOMMANDS.get(action, ()):
+        required = max(required, int(commands.write_level or 0))
+    min_sub = _MIN_LEVEL_SUBCOMMANDS.get(action)
+    if min_sub is not None and sub in min_sub[0]:
+        required = max(required, int(min_sub[1]))
+    return required
+
+
 @dataclass
 class CommandResult:
     """指令执行结果。"""
@@ -230,20 +271,7 @@ class CommandHandler:
             )
 
         required, func = entry
-        # repo 的写入子指令需写权限；纯查看保持读权限
-        if action == "repo" and rest and rest[0].lower() in {
-            "mode", "url", "path", "branch", "on", "enable", "开",
-            "off", "disable", "关", "mirror", "preload",
-        }:
-            required = commands.write_level
-        # history clean / purge 需写权限
-        if action == "history" and rest and rest[0].lower() in {
-            "clean", "clear", "清理", "purge", "清空",
-        }:
-            required = commands.write_level
-        # project set 需写权限
-        if action == "project" and rest and rest[0].lower() in {"set", "设置"}:
-            required = commands.write_level
+        required = required_level(commands, action, rest, base=required)
 
         if level < required:
             return CommandResult(

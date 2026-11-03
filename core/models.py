@@ -62,9 +62,9 @@ class CommandConfig(BaseModel):
     owners: List[str] = Field(default_factory=list)   # 超管 QQ 号
     admins: List[str] = Field(default_factory=list)   # 管理员 QQ 号
 
-    read_level: int = 0    # 查看类指令所需等级
+    read_level: int = 1    # 查看类指令所需等级（默认仅管理员及以上）
     write_level: int = 2   # 修改类指令所需等级
-    followup_level: int = 0  # 追问答疑所需等级
+    followup_level: int = 0  # 追问答疑所需等级（`followup close` 另需 >=1）
 
     reply_chunk_chars: int = 3500
     max_list_items: int = 40

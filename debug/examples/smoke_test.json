@@ -7,7 +7,12 @@
         "listen_groups": [
           "123456"
         ],
-        "notify_group": "123456"
+        "notify_group": "123456",
+        "commands": {
+          "owners": [
+            "10001"
+          ]
+        }
       },
       "项目名组": {
         "listen_groups": [
@@ -127,6 +132,25 @@
       "assert": {
         "no_error": true,
         "reply_contains": "配置名：测试组"
+      }
+    },
+    {
+      "name": "指令 — 普通成员查看状态被拒绝（read_level 默认 1）",
+      "event": {
+        "post_type": "message",
+        "message_type": "group",
+        "group_id": 123456,
+        "user_id": 10002,
+        "raw_message": "/maa status",
+        "message": "/maa status",
+        "sender": {
+          "user_id": 10002,
+          "role": "member"
+        }
+      },
+      "assert": {
+        "no_error": true,
+        "reply_contains": "权限不足"
       }
     },
     {

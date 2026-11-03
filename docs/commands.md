@@ -30,7 +30,7 @@
 /maa enable|disable    启用 / 停用本配置
 /maa reload            按 config.json 重建运行时（等同重启，日志另开新文件）
 
-/maa followup close    结束当前追问会话
+/maa followup close    结束当前追问会话（需管理员及以上）
 ```
 
 ## 模型与报告
@@ -59,7 +59,7 @@
 | `commands.prefix` | `/maa` | 指令前缀 |
 | `commands.owners` | 空 | 超管 QQ 号列表 |
 | `commands.admins` | 空 | 管理员 QQ 号列表 |
-| `commands.read_level` | `0` | 查看类指令所需等级 |
+| `commands.read_level` | `1` | 查看类指令所需等级（`status` / `get` / `project` / `repo` / `jobs` / `history` / `ai`；默认仅管理员及以上） |
 | `commands.write_level` | `2` | 修改类指令所需等级 |
 | `commands.followup_level` | `0` | 追问答疑所需等级 |
 

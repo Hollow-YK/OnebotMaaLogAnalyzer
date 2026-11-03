@@ -68,7 +68,7 @@
 | `followup_window_minutes` | `0` | 会话有效时长；`0` = 跟随历史保留期 |
 | `followup_max_turns` | `10` | 单会话最多追问轮数 |
 | `followup_max_sessions` | `50` | 最多保留会话数 |
-| `followup_level` | `0` | 追问答疑所需权限等级，见 [QQ 指令](commands.md) |
+| `followup_level` | `0` | 追问答疑所需权限等级；`followup close`（结束会话）另需至少 `1`，见 [QQ 指令](commands.md) |
 
 > 窗口/轮数/会话数都是**按配置**生效的：改一个配置的设置不会影响另一个
 > 配置正在进行的会话。同一配置内追问与主分析排队串行（见[并发模型](architecture.md#并发模型)），

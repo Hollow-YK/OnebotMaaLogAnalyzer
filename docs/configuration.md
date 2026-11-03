@@ -658,14 +658,17 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `prefix` | `string` / `"/maa"` | 指令前缀 | `"prefix": "!maa"` |
 | `owners` | `string[]` / `[]` | 超管 QQ 号列表（等级 2，可修改任何配置） | `"owners": ["10001"]` |
 | `admins` | `string[]` / `[]` | 管理员 QQ 号列表（等级 1，配合 `write_level: 1` 授予写权限） | `"admins": ["10002"]` |
-| `read_level` | `int` / `0` | 查看类指令所需等级（`status` / `get` / `jobs` / `history` / `ai` …） | `"read_level": 1` |
+| `read_level` | `int` / `1` | 查看类指令所需等级（`status` / `get` / `project` / `repo` / `jobs` / `history` / `ai`；默认仅管理员及以上，`0` = 群内任何人） | `"read_level": 0` |
 | `write_level` | `int` / `2` | 修改类指令所需等级（`set` / `project set` / `repo` …） | `"write_level": 1` |
-| `followup_level` | `int` / `0` | 追问答疑所需等级 | `"followup_level": 1` |
+| `followup_level` | `int` / `0` | 追问答疑所需等级；`followup close`（结束会话）另需至少 `1` | `"followup_level": 1` |
 | `reply_chunk_chars` | `int` / `3500` | 指令回复的分段字符数 | `"reply_chunk_chars": 2000` |
 | `max_list_items` | `int` / `40` | `/maa jobs` 列表最多展示的任务条数 | `"max_list_items": 20` |
 
 - 等级 2 = `owners` 中的 QQ；等级 1 = `admins` 中的 QQ，或协议端上报的群管理 / 群主；其余为 0
 - 默认 `write_level: 2`（仅超管可改）是刻意的保守选择：`repo.url` 一旦可改，等于允许让 Bot 去读取任意 git 仓库
+- 默认 `read_level: 1`：查看类指令会暴露群列表、群内上传记录、本地仓库路径与模型用量，因此默认只对管理员开放；想让群成员也能查，显式设 `"read_level": 0`
+- 报告本身照常发到群里（主动推送不走指令），提级只影响手动查询
+- `followup_level` 默认 `0` 表示**群成员仍可引用报告追问**；但 `followup close`（结束会话）是写操作，任何情况下都至少需要等级 `1`
 - `system_prompt` 不允许通过指令修改（避免提示词注入）
 
 指令全集与输出格式见 [QQ 指令](commands.md)。
