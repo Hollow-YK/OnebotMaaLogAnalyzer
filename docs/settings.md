@@ -32,8 +32,11 @@
 | `file_list_delay_seconds` | `0` | 上传后等待群文件列表刷新的秒数 |
 | `send_progress_message` | `true` | 是否发送进度提示 |
 | `send_summary` | `true` | 是否发送分析结果 |
+| `merge_messages` | `true` | 将相邻文字和图片合并为普通消息；关闭后按片段顺序逐条发送。适用于主报告和追问，不是 QQ 合并转发 |
 | `reply_chunk_chars` | `3500` | 回复分段字符数 |
 | `duplicate_window_seconds` | `120` | 同一文件 / 同一组归档的去重与冷却窗口；`0` = 关闭去重 |
+
+使用 `/maa set merge_messages false` 关闭图文合并，`/maa set merge_messages true` 恢复。AstrBot 面板对应 `settings_merge_messages_mode`，可选 `enabled` / `disabled`。
 
 > **去重窗口**：部分协议端（如 SnowLuma）对一次上传会同时发出 `notice.group_upload`
 > 与带 file 段的消息事件，两条入口各自触发一次分析导致重复回复。窗口内的同一文件只处理一次。

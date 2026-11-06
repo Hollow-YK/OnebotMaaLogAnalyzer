@@ -644,6 +644,7 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `duplicate_window_seconds` | `int` / `120` | 同一文件 / 同一归档的去重与冷却窗口；`0` = 关闭去重 | `"duplicate_window_seconds": 60` |
 | `send_progress_message` | `bool` / `true` | 是否发送进度提示 | `"send_progress_message": false` |
 | `send_summary` | `bool` / `true` | 是否发送分析结果 | `"send_summary": true` |
+| `merge_messages` | `bool` / `true` | 将相邻文字和图片合并为普通消息；关闭后按片段顺序逐条发送。主报告和追问均生效，不是 QQ 合并转发。AstrBot 面板字段为 `settings_merge_messages_mode`（`enabled` / `disabled`） | `"merge_messages": false` |
 | `reply_chunk_chars` | `int` / `3500` | 回复分段字符数（最小 1000） | `"reply_chunk_chars": 2000` |
 | `send_images` | `bool` / `true` | 是否允许模型附图 | `"send_images": false` |
 | `max_report_images` | `int` / `4` | 最多附带图片数；`0` = 不发图片（与文件上限分别计数） | `"max_report_images": 6` |

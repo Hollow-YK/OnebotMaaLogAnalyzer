@@ -444,6 +444,7 @@ class AnalysisSettings(BaseModel):
     # ── 消息反馈 ──
     send_progress_message: bool = True
     send_summary: bool = True
+    merge_messages: bool = True         # 将相邻文字和图片合并为普通消息
     reply_chunk_chars: int = 3500
 
     # ── 结果附图 ──

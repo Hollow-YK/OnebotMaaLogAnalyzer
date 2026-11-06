@@ -543,13 +543,15 @@ class LogWatcher:
     async def send_segments(self, group_id: int, segments: list,
                             settings, max_chars: int) -> list:
         """
-        按片段顺序发送，图片与相邻文字合并为同一条消息（图文混排）。
+        按片段顺序发送，由 merge_messages 控制是否将相邻图文合并为普通消息。
 
         这样模型把 [附图: ...] 写在两段文字之间时，图片会真正出现在
         两段文字中间，而不是被拆成三条独立消息。
+        关闭合并时，每个文字分段和每张图片各发一条。
         文件附件无法混排，单独作为群文件上传。
         """
         sent: list = []
+        merge_messages = settings.merge_messages
         # 待合并的图文混排缓冲区（元素为消息段 dict）
         buffer: list[dict] = []
         buffer_len = 0
@@ -575,6 +577,8 @@ class LogWatcher:
                         await flush()
                     buffer.append({"type": "text", "data": {"text": chunk}})
                     buffer_len += len(chunk)
+                    if not merge_messages:
+                        await flush()
                 continue
 
             if seg.kind == "image":
@@ -585,6 +589,8 @@ class LogWatcher:
                 buffer.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(seg.data).decode()
                 }})
+                if not merge_messages:
+                    await flush()
                 continue
 
             # 文件：混排缓冲区先发完，再单独上传

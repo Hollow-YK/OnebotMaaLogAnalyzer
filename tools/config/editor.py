@@ -972,6 +972,7 @@ const LABELS = {
   'settings.duplicate_window_seconds': '同文件去重窗口（秒）',
   'settings.send_progress_message': '发送进度消息',
   'settings.send_summary': '发送摘要',
+  'settings.merge_messages': '合并相邻文字和图片',
   'settings.reply_chunk_chars': '单条消息字符上限',
   'settings.send_images': '发送图片',
   'settings.max_report_images': '图片数量上限',
@@ -1113,7 +1114,7 @@ const HELP = {
 
 const SETTINGS_GROUPS = [
   ['触发', ['enabled', 'file_list_delay_seconds', 'duplicate_window_seconds']],
-  ['消息反馈', ['send_progress_message', 'send_summary', 'reply_chunk_chars']],
+  ['消息反馈', ['send_progress_message', 'send_summary', 'merge_messages', 'reply_chunk_chars']],
   ['结果图片与附件', ['send_images', 'max_report_images', 'send_repo_images', 'send_files',
     'max_report_files', 'max_file_attachment_mb', 'inline_attachments']],
   ['追问答疑', ['followup_enabled', 'followup_window_minutes', 'followup_max_turns',

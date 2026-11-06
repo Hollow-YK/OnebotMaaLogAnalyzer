@@ -48,6 +48,7 @@ _FIELD_LABELS: dict[str, str] = {
     "max_maafw_bak_mb": "单个 maafw.bak 大小上限 MB（0=不限）",
     "send_progress_message": "是否发送进度提示",
     "send_summary": "是否发送分析结果",
+    "merge_messages": "是否将相邻文字和图片合并为普通消息",
     "reply_chunk_chars": "回复分段字符数",
     "send_images": "报告后是否附带图片",
     "max_report_images": "最多附带图片数",

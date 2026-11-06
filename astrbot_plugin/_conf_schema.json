@@ -636,6 +636,15 @@
       "disabled"
     ]
   },
+  "settings_merge_messages_mode": {
+    "description": "合并相邻文字和图片为普通消息",
+    "type": "string",
+    "default": "enabled",
+    "options": [
+      "enabled",
+      "disabled"
+    ]
+  },
   "settings_reply_chunk_chars": {
     "description": "回复分段字符数",
     "type": "int",
