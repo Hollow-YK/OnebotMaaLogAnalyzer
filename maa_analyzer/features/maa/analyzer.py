@@ -199,8 +199,6 @@ def build_digest_options(settings: AnalysisSettings,
         max_maafw_bak_files=max(0, int(settings.max_maafw_bak_files or 0)),
         max_maafw_bak_bytes=max(0, int(settings.max_maafw_bak_mb or 0)) * 1024 * 1024,
         log_head_lines=max(0, int(settings.log_head_lines or 0)),
-        context_before_lines=max(0, int(settings.context_before_lines or 0)),
-        context_after_lines=max(0, int(settings.context_after_lines or 0)),
         max_sections_per_log=max(1, int(settings.max_sections_per_log or 60)),
         max_log_chars=max(2000, int(settings.max_log_chars or 120000)),
         compress_context_noise=bool(settings.compress_context_noise),
@@ -1259,7 +1257,7 @@ class MaaAnalyzer:
         """
         判断是否需要跳过分析，返回原因（空串 = 继续分析）。
 
-        - 识别出的 UI 在 `project.ui.<名称>.enabled` 中被关闭 → 跳过
+        - 未知 UI 在 `project.ui.auto.enabled` 中被关闭 → 跳过
         - auto / known / any：必须命中内容特征
         - prefix：由 `require_log_layout` 决定是否额外校验内容
         """

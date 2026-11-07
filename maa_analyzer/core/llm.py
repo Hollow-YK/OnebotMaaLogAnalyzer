@@ -155,8 +155,6 @@ def cache_hit_rate(uncached: int, cache_read: int, cache_write: int = 0) -> floa
 class RequestParams:
     """一次请求实际使用的采样参数（已按优先级合并）。"""
 
-    temperature: float = 0.2
-    top_p: float = 1.0
     max_tokens: int = 8192
     max_context_tokens: int = 48000
 
@@ -192,7 +190,6 @@ class LLMClient:
         base_url: str = "",
         api_key: str = "",
         model: str = "",
-        temperature: float = 0.2,
         timeout_seconds: int = 180,
         connect_timeout_seconds: int = 10,
         max_concurrency: int = 2,
@@ -308,8 +305,6 @@ class LLMClient:
         payload: dict[str, Any] = {
             "model": model_name,
             "messages": messages,
-            "temperature": float(params.temperature),
-            "top_p": float(params.top_p),
             "max_tokens": int(params.max_tokens),
             "stream": False,
         }
@@ -329,7 +324,6 @@ class LLMClient:
         OpenAI 侧的参数兼容：部分实现/新模型会拒绝旧字段。
 
         - 新模型要求 `max_completion_tokens` 而非 `max_tokens`
-        - 推理模型不接受 `temperature` / `top_p`
         - 部分网关不接受 `tool_choice`
         每种情况只降级一次，避免掩盖真实错误。
         """
@@ -342,11 +336,6 @@ class LLMClient:
                 detail = str(exc).lower()
                 if "max_completion_tokens" in detail and "max_tokens" in payload:
                     payload["max_completion_tokens"] = payload.pop("max_tokens")
-                elif "temperature" in detail and (
-                    "unsupported" in detail or "not support" in detail
-                ):
-                    payload.pop("temperature", None)
-                    payload.pop("top_p", None)
                 elif "tool_choice" in detail and "tool_choice" in payload:
                     payload.pop("tool_choice", None)
                 else:
@@ -767,13 +756,7 @@ class AnthropicClient(LLMClient):
             "model": model_name,
             "max_tokens": max(1, int(params.max_tokens)),
             "messages": wire,
-            # Anthropic 的 temperature 只在 0~1 有效
-            "temperature": max(0.0, min(1.0, float(params.temperature))),
         }
-        # Anthropic 建议 temperature / top_p 只调一个；默认 top_p=1 时不发送
-        top_p = max(0.0, min(1.0, float(params.top_p)))
-        if abs(top_p - 1.0) > 1e-6:
-            payload["top_p"] = top_p
         if system:
             payload["system"] = system
         wire_tools = to_anthropic_tools(tools)

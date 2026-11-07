@@ -54,7 +54,7 @@ AstrBot/data/plugins/OnebotMaaLogAnalyzer/
 | `report_*` | 报告渲染模式、模板、尺寸、浏览器与渲染回退等高级项 |
 | `project_name` / `archive_match_mode` / `file_prefix` | 项目显示名、日志包识别模式与前缀 |
 | `require_log_layout_mode` / `ui_*_mode` | 日志布局校验与各 UI 日志包开关 |
-| `repo_*` | 项目代码仓库开关、来源、分支、检索模式、版本切换与扫描限制 |
+| `repo_*` | 项目代码仓库来源、分支、检索模式、版本切换与扫描限制 |
 | `llm_*` | 首选/备用候选、调用参数、端点、密钥、模型能力、全局兜底与熔断配置 |
 | `vision_*` / `send_*_mode` | 看图开关、数量、细节、索图与报告图片、附件发送开关 |
 | `followup_mode` / `followup_window_minutes` | 追问开关与窗口 |

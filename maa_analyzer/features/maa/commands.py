@@ -120,7 +120,7 @@ def _format_ui_switches(project: ProjectConfig) -> str:
     if not project.ui:
         return "（未配置，全部开启）"
     return ", ".join(
-        f"{key}={'开' if item.enabled else '关'}"
+        f"{key}={'开' if project.ui_enabled(key) else '关'}"
         for key, item in sorted(project.ui.items())
     )
 
@@ -361,7 +361,6 @@ class CommandHandler:
         lines = [
             "模型配置：",
             f"  候选顺序 = {candidates}",
-            f"  温度 = {cfg.llm.temperature if cfg.llm.temperature is not None else '（跟随模型）'}",
             f"  输出上限 = {cfg.llm.max_tokens or '（跟随模型）'}",
             "看图（vision）："
             f"{'开' if cfg.vision.enabled else '关'}"
@@ -449,7 +448,7 @@ class CommandHandler:
           /maa project set name MAK
           /maa project set archive_match_mode prefix
           /maa project set file_prefix MaaXXX-logs
-          /maa project set ui.mfaa.enabled false
+          /maa project set ui.auto.enabled false
           /maa project set repo.mode agent
         """
         sub = args[0].lower() if args else "get"
@@ -478,7 +477,7 @@ class CommandHandler:
         lines.extend(["", "各 UI 开关："])
         if project.ui:
             for key, item in sorted(project.ui.items()):
-                lines.append(f"  {key} = {'开' if item.enabled else '关'}")
+                lines.append(f"  {key} = {'开' if project.ui_enabled(key) else '关'}")
         else:
             lines.append("  （未配置，全部开启）")
 
@@ -488,7 +487,7 @@ class CommandHandler:
             f"  # 用 `{cfg.commands.prefix} repo` 查看详情",
             "",
             f"修改：{cfg.commands.prefix} project set <项> <值>",
-            f"      {cfg.commands.prefix} project set ui.mfaa.enabled false",
+            f"      {cfg.commands.prefix} project set ui.auto.enabled false",
         ])
         return CommandResult(text="\n".join(lines))
 
@@ -505,6 +504,8 @@ class CommandHandler:
         # ui.<名称>.<字段>
         if len(parts) == 3 and parts[0].lower() == "ui":
             ui_key = normalize_ui_key(parts[1])
+            if ui_key in {"mxu", "mfaa", "maafwapp"}:
+                return CommandResult(text="已知 UI 的日志包始终启用，无法修改开关。", ok=False)
             field_name = parts[2]
             field = ProjectUISettings.model_fields.get(field_name)
             if field is None or not _is_simple_type(field.annotation):
@@ -750,10 +751,8 @@ class CommandHandler:
             return await self._set_repo_field(cfg, "preload_enabled", value)
         if sub == "mirror":
             return await self._cmd_repo_mirror(cfg, args[1:])
-        if sub in ("on", "enable", "开"):
-            return await self._set_repo_field(cfg, "enabled", "true")
-        if sub in ("off", "disable", "关"):
-            return await self._set_repo_field(cfg, "enabled", "false")
+        if sub in ("on", "enable", "开", "off", "disable", "关"):
+            return CommandResult(text="项目代码参考始终开启，无法通过命令切换。", ok=False)
         return CommandResult(text=f"未知 repo 子指令：{sub}", ok=False)
 
     async def _cmd_repo_mirror(self, cfg: ConfigState,

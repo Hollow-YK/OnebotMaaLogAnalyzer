@@ -161,8 +161,6 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 | `max_recognition_evidence_chars` | `35000` | OCR 重点证据块字符上限 |
 | `max_recognition_evidence_lines` | `60` | OCR 重点证据行数上限 |
 | `log_head_lines` | `16` | 每个日志小节额外保留开头行数（版本、路径、控制器等环境信息） |
-| `context_before_lines` | `80` | 错误命中前保留行数（按折叠后行数计） |
-| `context_after_lines` | `60` | 错误命中后保留行数 |
 | `max_sections_per_log` | `60` | 单个日志最多提取的小节数 |
 
 ### `maafw.bak` 是什么

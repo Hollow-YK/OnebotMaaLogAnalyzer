@@ -22,11 +22,7 @@ ONEBOT_MODES = ("ws", "http_ws", "ws_reverse", "http_ws_reverse")
 PANEL_BASE_TRISTATE_MODE_FIELDS = {
     "enabled_mode",
     "require_log_layout_mode",
-    "ui_mxu_mode",
-    "ui_mfaa_mode",
-    "ui_maafwapp_mode",
     "ui_auto_mode",
-    "repo_mode",
     "vision_mode",
     "send_images_mode",
     "send_repo_images_mode",
@@ -35,7 +31,6 @@ PANEL_BASE_TRISTATE_MODE_FIELDS = {
     "history_mode",
     "commands_mode",
     "log_to_file_mode",
-    "llm_model_support_tools_mode",
     "llm_model_support_vision_mode",
     "llm_model_support_json_mode_mode",
 }
@@ -69,8 +64,6 @@ PANEL_PROFILE_FLOAT_OVERRIDES: dict[str, tuple[str, ...]] = {
         "settings", "context_compact_ratio"
     ),
     "settings_context_retain_ratio": ("settings", "context_retain_ratio"),
-    "llm_profile_temperature": ("llm", "temperature"),
-    "llm_profile_top_p": ("llm", "top_p"),
 }
 PANEL_PROFILE_INT_OVERRIDES: dict[str, tuple[str, ...]] = {
     "vision_max_images": ("vision", "max_images"),
@@ -137,8 +130,6 @@ PANEL_PROFILE_INT_OVERRIDES: dict[str, tuple[str, ...]] = {
     "settings_max_recognition_evidence_lines": ("settings", "max_recognition_evidence_lines"),
     "settings_max_recognition_evidence_chars": ("settings", "max_recognition_evidence_chars"),
     "settings_log_head_lines": ("settings", "log_head_lines"),
-    "settings_context_before_lines": ("settings", "context_before_lines"),
-    "settings_context_after_lines": ("settings", "context_after_lines"),
     "settings_duplicate_window_seconds": ("settings", "duplicate_window_seconds"),
     "llm_profile_max_tokens": ("llm", "max_tokens"),
 }
@@ -216,17 +207,12 @@ PANEL_LLM_ENDPOINT_INT_FIELDS = {
 }
 PANEL_LLM_MODEL_FIELDS = {
     "llm_endpoint_model",
-    "llm_model_support_tools_mode",
     "llm_model_support_vision_mode",
     "llm_model_support_json_mode_mode",
     "llm_model_max_tokens",
     "llm_model_max_context_tokens",
-    "llm_model_temperature",
-    "llm_model_top_p",
 }
 PANEL_LLM_GLOBAL_FIELDS = {
-    "llm_defaults_temperature",
-    "llm_defaults_top_p",
     "llm_defaults_max_tokens",
     "llm_defaults_max_context_tokens",
     "llm_circuit_failure_threshold",
@@ -268,17 +254,11 @@ PANEL_DEFAULTS: dict[str, Any] = {
     "archive_match_mode": 'auto',
     "file_prefix": "",
     "require_log_layout_mode": 'enabled',
-    "ui_mxu_mode": 'enabled',
-    "ui_mfaa_mode": 'enabled',
-    "ui_maafwapp_mode": 'enabled',
     "ui_auto_mode": 'enabled',
-    "repo_mode": 'disabled',
     "llm_provider": "",
     "llm_model": "",
     "llm_fallback_models": [],
-    "llm_profile_temperature": "",
     "llm_profile_max_tokens": -1,
-    "llm_profile_top_p": "",
     "llm_endpoint_selector": "",
     "llm_endpoint_name": "",
     "llm_endpoint_kind": 'openai',
@@ -289,15 +269,10 @@ PANEL_DEFAULTS: dict[str, Any] = {
     "llm_endpoint_connect_timeout_seconds": 10,
     "llm_endpoint_max_retries": 2,
     "llm_endpoint_model": "",
-    "llm_model_support_tools_mode": 'disabled',
     "llm_model_support_vision_mode": 'disabled',
     "llm_model_support_json_mode_mode": 'disabled',
     "llm_model_max_tokens": 0,
     "llm_model_max_context_tokens": 0,
-    "llm_model_temperature": "",
-    "llm_model_top_p": "",
-    "llm_defaults_temperature": '0.2',
-    "llm_defaults_top_p": '1.0',
     "llm_defaults_max_tokens": 8192,
     "llm_defaults_max_context_tokens": 48000,
     "llm_circuit_failure_threshold": 3,
@@ -402,8 +377,6 @@ PANEL_DEFAULTS: dict[str, Any] = {
     "settings_max_recognition_evidence_lines": 60,
     "settings_max_recognition_evidence_chars": 35000,
     "settings_log_head_lines": 16,
-    "settings_context_before_lines": 80,
-    "settings_context_after_lines": 60,
     "settings_duplicate_window_seconds": 120,
     "settings_send_progress_message_mode": 'enabled',
     "settings_send_summary_mode": 'enabled',
@@ -439,11 +412,7 @@ PANEL_PROFILE_FIELDS = (
         "archive_match_mode",
         "file_prefix",
         "require_log_layout_mode",
-        "ui_mxu_mode",
-        "ui_mfaa_mode",
-        "ui_maafwapp_mode",
         "ui_auto_mode",
-        "repo_mode",
         "llm_provider",
         "llm_model",
         "llm_fallback_models",
@@ -493,7 +462,6 @@ def default_config() -> dict:
                         "archive_match_mode": "auto",
                         "require_log_layout": True,
                         "repo": {
-                            "enabled": False,
                             "mode": "inject",
                             "path": "",
                             "url": "https://github.com/MAAXYZ/MaaXXX",
@@ -580,7 +548,6 @@ def default_config() -> dict:
                         {
                             "model": "gpt-4o-mini",
                             "supports": {
-                                "tools": True,
                                 "vision": True,
                                 "json_mode": True,
                             },
@@ -591,8 +558,6 @@ def default_config() -> dict:
                 }
             ],
             "defaults": {
-                "temperature": 0.2,
-                "top_p": 1.0,
                 "max_tokens": 8192,
                 "max_context_tokens": 48000,
             },
@@ -1012,7 +977,6 @@ def _apply_llm_panel_overrides(result: dict, panel: Mapping[str, Any]) -> None:
             supports = {}
             model["supports"] = supports
         for key, setting in (
-            ("llm_model_support_tools_mode", "tools"),
             ("llm_model_support_vision_mode", "vision"),
             ("llm_model_support_json_mode_mode", "json_mode"),
         ):
@@ -1024,22 +988,10 @@ def _apply_llm_panel_overrides(result: dict, panel: Mapping[str, Any]) -> None:
         ):
             if _changed(panel, key):
                 model[setting] = _nonnegative_int(panel, key)
-        for key, setting in (
-            ("llm_model_temperature", "temperature"),
-            ("llm_model_top_p", "top_p"),
-        ):
-            if _changed(panel, key):
-                model[setting] = _float(panel, key)
 
     if any(_changed(panel, key) for key in PANEL_LLM_GLOBAL_FIELDS):
         defaults = _ensure_dict(llm_cfg, "defaults")
         circuit = _ensure_dict(llm_cfg, "circuit_breaker")
-        for key, setting in (
-            ("llm_defaults_temperature", "temperature"),
-            ("llm_defaults_top_p", "top_p"),
-        ):
-            if _changed(panel, key):
-                defaults[setting] = _float(panel, key)
         for key, setting in (
             ("llm_defaults_max_tokens", "max_tokens"),
             ("llm_defaults_max_context_tokens", "max_context_tokens"),
@@ -1207,23 +1159,12 @@ def apply_panel_overrides(
         if any(
             _changed(panel, key)
             for key in (
-                "ui_mxu_mode",
-                "ui_mfaa_mode",
-                "ui_maafwapp_mode",
                 "ui_auto_mode",
             )
         ):
             project = _ensure_dict(profile, "project")
             ui = _ensure_dict(project, "ui")
-            _apply_ui_mode(panel, "ui_mxu_mode", ui, "mxu")
-            _apply_ui_mode(panel, "ui_mfaa_mode", ui, "mfaa")
-            _apply_ui_mode(panel, "ui_maafwapp_mode", ui, "maafwapp")
             _apply_ui_mode(panel, "ui_auto_mode", ui, "auto")
-        if _changed(panel, "repo_mode"):
-            project = _ensure_dict(profile, "project")
-            repo = _ensure_dict(project, "repo")
-            _apply_mode(panel, "repo_mode", repo, "enabled")
-
         if any(
             _changed(panel, key)
             for key in ("llm_provider", "llm_model", "llm_fallback_models")

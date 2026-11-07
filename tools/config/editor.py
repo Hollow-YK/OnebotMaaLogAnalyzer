@@ -95,7 +95,7 @@ PROVIDER_KINDS = (
     ("anthropic", "anthropic — Anthropic Messages /v1/messages"),
 )
 LOG_LEVELS = (("DEBUG", "DEBUG"), ("INFO", "INFO"), ("WARNING", "WARNING"), ("ERROR", "ERROR"))
-UI_KEYS = ("mxu", "mfaa", "maafwapp", "auto")
+UI_KEYS = ("auto",)
 
 
 # ── 默认文档（来自 pydantic 模型，保证与代码同步） ──
@@ -145,7 +145,7 @@ def default_document() -> dict:
                 "max_retries": 2,
                 "models": [{
                     "model": "gpt-4o-mini",
-                    "supports": {"tools": True, "vision": True, "json_mode": True},
+                    "supports": {"vision": True, "json_mode": True},
                     "max_tokens": 8192,
                     "max_context_tokens": 48000,
                 }],
@@ -275,7 +275,7 @@ def validate_document(cfg: Any) -> dict:
                     errors.append(f"配置「{display}」的 project.ui.{key} 必须是对象")
 
         repo = project.get("repo") if isinstance(project.get("repo"), dict) else {}
-        if repo.get("enabled"):
+        if repo:
             if not str(repo.get("path") or "").strip() and not str(repo.get("url") or "").strip():
                 errors.append(f"配置「{display}」启用了仓库但没有填 path 或 url")
             if str(repo.get("mode") or "inject") not in {"inject", "agent"}:
@@ -345,11 +345,6 @@ def validate_document(cfg: Any) -> dict:
         if count > 1:
             errors.append(f"llm.providers 中端点名重复：{name}")
 
-    defaults = llm.get("defaults") if isinstance(llm.get("defaults"), dict) else {}
-    for key, low, high in (("temperature", 0, 2), ("top_p", 0, 1)):
-        if key in defaults:
-            _check_number(defaults.get(key), f"llm.defaults.{key}", low, high, errors)
-
     # 候选模型与能力
     capability: dict[tuple[str, str], dict] = {}
     for provider in providers:
@@ -368,7 +363,6 @@ def validate_document(cfg: Any) -> dict:
         if not refs:
             continue
         seen: set[tuple[str, str]] = set()
-        any_tools = False
         any_vision = False
         for ref in refs:
             key = (str(ref.get("name") or ""), str(ref.get("model") or ""))
@@ -376,14 +370,8 @@ def validate_document(cfg: Any) -> dict:
                 warnings.append(f"配置「{name}」的候选列表存在重复：{key[0]}/{key[1]}")
             seen.add(key)
             supports = capability.get(key) or {}
-            if supports.get("tools"):
-                any_tools = True
             if supports.get("vision"):
                 any_vision = True
-        if refs and not any_tools:
-            warnings.append(
-                f"配置「{name}」的候选模型都没有声明 supports.tools，工具模式无法使用"
-            )
         vision_cfg = spec.get("vision") if isinstance(spec.get("vision"), dict) else {}
         if vision_cfg.get("enabled", True) and refs and not any_vision:
             warnings.append(
@@ -913,7 +901,6 @@ const LABELS = {
   'project.archive_match_mode': '日志包识别方式',
   'project.file_prefix': '文件名前缀',
   'project.require_log_layout': '要求日志布局特征',
-  'repo.enabled': '启用仓库对照',
   'repo.mode': '检索模式',
   'repo.path': '本地仓库路径',
   'repo.url': '仓库地址',
@@ -1030,8 +1017,6 @@ const LABELS = {
   'settings.max_recognition_evidence_lines': '识别证据行数上限',
   'settings.max_recognition_evidence_chars': '识别证据字符上限',
   'settings.log_head_lines': '日志头部行数',
-  'settings.context_before_lines': '命中前文行数',
-  'settings.context_after_lines': '命中后文行数',
   'commands.enabled': '启用指令',
   'commands.prefix': '指令前缀',
   'commands.owners': '超级管理员 QQ',
@@ -1044,11 +1029,7 @@ const LABELS = {
   'llm.models': '候选模型（按优先级）',
   'llm.name': '端点',
   'llm.model': '模型',
-  'llm.temperature': '温度覆盖',
   'llm.max_tokens': '输出 token 覆盖',
-  'llm.top_p': 'top_p 覆盖',
-  'defaults.temperature': '默认温度',
-  'defaults.top_p': '默认 top_p',
   'defaults.max_tokens': '默认输出 token',
   'defaults.max_context_tokens': '默认上下文 token',
   'circuit_breaker.failure_threshold': '失败阈值',
@@ -1064,13 +1045,10 @@ const LABELS = {
   'provider.connect_timeout_seconds': '连接超时（秒）',
   'provider.max_retries': '重试次数',
   'model.model': '模型名',
-  'model.supports.tools': '支持工具调用',
   'model.supports.vision': '支持看图',
   'model.supports.json_mode': '支持 JSON 模式',
   'model.max_tokens': '输出 token 上限',
   'model.max_context_tokens': '上下文 token 上限',
-  'model.temperature': '温度',
-  'model.top_p': 'top_p',
   'debug.enabled': '启用调试面板',
   'debug.http_port': '调试端口',
   'debug.data_dir': '调试数据目录',
@@ -1106,7 +1084,6 @@ const HELP = {
   'llm.models': '按顺序尝试：前面的失败（401 除外）会顺延到下一个候选。',
   'provider.base_url': 'openai 填 …/v1；anthropic 填 …（自动补 /v1/messages），例如 https://api.deepseek.com/anthropic。',
   'provider.api_key': '明文保存在 config.json 中，注意不要提交到公开仓库。',
-  'model.supports.tools': '分析默认使用工具循环，关闭后该模型无法承担带工具的调用。',
   'model.max_tokens': '0 = 使用 llm.defaults.max_tokens。',
   'debug.enabled': '开启后可在浏览器访问调试面板，正式部署请关闭。',
 };
@@ -1136,12 +1113,11 @@ const SETTINGS_GROUPS = [
     'small_log_full_read_mb', 'stream_medium_logs', 'large_log_threshold_mb',
     'max_large_log_read_kb', 'stream_large_logs', 'max_stream_log_mb',
     'max_sections_per_log', 'max_log_chars', 'compress_context_noise',
-    'max_recognition_evidence_lines', 'max_recognition_evidence_chars', 'log_head_lines',
-    'context_before_lines', 'context_after_lines']],
+    'max_recognition_evidence_lines', 'max_recognition_evidence_chars', 'log_head_lines']],
 ];
 
 const REPO_GROUPS = [
-  ['基本', ['enabled', 'mode']],
+  ['基本', ['mode']],
   ['来源', ['path', 'url', 'mirrors', 'branch', 'default_branch']],
   ['预下载与更新', ['preload_enabled', 'preload_retries', 'update_on_analyze', 'allow_ai_update',
     'preload_timeout_seconds', 'update_timeout_seconds', 'shallow_clone_timeout_seconds']],
@@ -1456,7 +1432,7 @@ function specFor(key, value, path) {
   if (path === 'report.template') { spec.type = 'template'; }
   if (path === 'report.browser_path') { spec.type = 'browser'; }
   if ((path === 'provider.api_key') || path === 'model.api_key') { spec.secret = true; }
-  if (path.startsWith('llm.') && (key === 'temperature' || key === 'top_p' || key === 'max_tokens')) {
+  if (path.startsWith('llm.') && key === 'max_tokens') {
     spec.nullable = true;
   }
   if (META.enums[path]) { spec.enums = META.enums[path]; }
@@ -1465,8 +1441,7 @@ function specFor(key, value, path) {
     || key === 'history_period_hours') {
     spec.type = 'number';
   }
-  if (path.endsWith('temperature') || path.endsWith('top_p')
-    || path.endsWith('device_scale_factor') || path.endsWith('settle_seconds')
+  if (path.endsWith('device_scale_factor') || path.endsWith('settle_seconds')
     || path === 'settings.file_list_delay_seconds') {
     spec.float = true;
   }
@@ -1617,12 +1592,13 @@ function renderConfigGroups(host, spec, name) {
 function renderProjectUI(host, project) {
   const box = el('section', 'group');
   box.appendChild(el('h3', '', '按 UI 开关（project.ui）'));
-  const help = el('div', 'help', '只控制是否分析该 UI 的日志；未配置时回退 auto。');
+  const help = el('div', 'help', '已知 UI 始终启用；此处控制未知 UI 的日志。');
   box.appendChild(help);
   const grid = el('div', 'grid');
   const ui = isPlainObject(project.ui) ? project.ui : (project.ui = {});
   const keys = Array.from(new Set([...UI_KEYS, ...Object.keys(ui)]));
   for (const key of keys) {
+    if (['mxu', 'mxuapp', 'mfaa', 'mfaavalonia', 'maafwapp', 'maafw'].includes(key.toLowerCase().replace(/[^a-z0-9]/g, ''))) continue;
     const current = isPlainObject(ui[key]) ? !!ui[key].enabled : true;
     const wrap = el('div', 'field');
     const line = el('div', 'switch');
@@ -1786,9 +1762,9 @@ function renderConfigModels(host, spec, name) {
   host.appendChild(box);
 
   const overrides = el('section', 'group');
-  overrides.appendChild(el('h3', '', '本配置的参数覆盖（留空 = 跟随全局）'));
+  overrides.appendChild(el('h3', '', '本配置的参数覆盖（留空 = 跟随模型或服务端默认值）'));
   const grid = el('div', 'grid');
-  for (const key of ['temperature', 'top_p', 'max_tokens']) {
+  for (const key of ['max_tokens']) {
     renderField(grid, llm, key, 'llm.' + key, {
       nullable: true,
       float: key !== 'max_tokens',
@@ -1864,16 +1840,11 @@ function renderLLM(host) {
       for (const key of ['max_tokens', 'max_context_tokens']) {
         renderField(mGrid, spec, key, 'model.' + key, specFor(key, spec[key], 'model.' + key));
       }
-      for (const key of ['temperature', 'top_p']) {
-        renderField(mGrid, spec, key, 'model.' + key, {
-          type: 'number', float: true, nullable: true,
-        });
-      }
       box.appendChild(mGrid);
 
-      if (!isPlainObject(spec.supports)) { spec.supports = { tools: true, vision: true, json_mode: true }; }
+      if (!isPlainObject(spec.supports)) { spec.supports = { vision: true, json_mode: true }; }
       const caps = el('div', 'grid');
-      for (const key of ['tools', 'vision', 'json_mode']) {
+      for (const key of ['vision', 'json_mode']) {
         renderField(caps, spec.supports, key, 'model.supports.' + key);
       }
       box.appendChild(el('div', 'sub-title', '能力'));
@@ -1885,7 +1856,7 @@ function renderLLM(host) {
     addModel.addEventListener('click', () => {
       provider.models.push({
         model: '',
-        supports: { tools: true, vision: false, json_mode: true },
+        supports: { vision: false, json_mode: true },
         max_tokens: 0,
         max_context_tokens: 0,
       });
@@ -1909,7 +1880,7 @@ function renderLLM(host) {
       max_retries: 2,
       models: [{
         model: '',
-        supports: { tools: true, vision: false, json_mode: true },
+        supports: { vision: false, json_mode: true },
         max_tokens: 0,
         max_context_tokens: 0,
       }],
@@ -2228,7 +2199,7 @@ function normalizeCfg(doc) {
     if (!Array.isArray(provider.models)) { provider.models = []; }
     for (const spec of provider.models) {
       if (isPlainObject(spec) && !isPlainObject(spec.supports)) {
-        spec.supports = { tools: true, vision: false, json_mode: true };
+        spec.supports = { vision: false, json_mode: true };
       }
     }
   }

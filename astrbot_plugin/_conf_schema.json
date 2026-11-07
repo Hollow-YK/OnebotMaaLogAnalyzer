@@ -104,46 +104,10 @@
       "disabled"
     ]
   },
-  "ui_mxu_mode": {
-    "description": "MXU 日志包开关",
-    "type": "string",
-    "default": "enabled",
-    "options": [
-      "enabled",
-      "disabled"
-    ]
-  },
-  "ui_mfaa_mode": {
-    "description": "MFAAvalonia 日志包开关",
-    "type": "string",
-    "default": "enabled",
-    "options": [
-      "enabled",
-      "disabled"
-    ]
-  },
-  "ui_maafwapp_mode": {
-    "description": "MaaFwApp 日志包开关",
-    "type": "string",
-    "default": "enabled",
-    "options": [
-      "enabled",
-      "disabled"
-    ]
-  },
   "ui_auto_mode": {
     "description": "未知 UI 兜底开关",
     "type": "string",
     "default": "enabled",
-    "options": [
-      "enabled",
-      "disabled"
-    ]
-  },
-  "repo_mode": {
-    "description": "项目代码仓库开关",
-    "type": "string",
-    "default": "disabled",
     "options": [
       "enabled",
       "disabled"
@@ -911,16 +875,6 @@
     "type": "int",
     "default": 16
   },
-  "settings_context_before_lines": {
-    "description": "错误命中前保留行数",
-    "type": "int",
-    "default": 80
-  },
-  "settings_context_after_lines": {
-    "description": "错误命中后保留行数",
-    "type": "int",
-    "default": 60
-  },
   "llm_fallback_models": {
     "description": "备用候选，格式 端点名:模型名；留空沿用高级 JSON",
     "type": "list",
@@ -929,20 +883,10 @@
       "type": "string"
     }
   },
-  "llm_profile_temperature": {
-    "description": "当前档案采样温度；留空沿用高级 JSON",
-    "type": "string",
-    "default": ""
-  },
   "llm_profile_max_tokens": {
     "description": "当前档案最大输出 token；-1 沿用高级 JSON",
     "type": "int",
     "default": -1
-  },
-  "llm_profile_top_p": {
-    "description": "当前档案 top_p；留空沿用高级 JSON",
-    "type": "string",
-    "default": ""
   },
   "llm_endpoint_selector": {
     "description": "要编辑的全局端点名；留空选择第一个",
@@ -999,15 +943,6 @@
     "type": "string",
     "default": ""
   },
-  "llm_model_support_tools_mode": {
-    "description": "模型支持工具调用",
-    "type": "string",
-    "default": "disabled",
-    "options": [
-      "enabled",
-      "disabled"
-    ]
-  },
   "llm_model_support_vision_mode": {
     "description": "模型支持看图",
     "type": "string",
@@ -1035,26 +970,6 @@
     "description": "模型上下文窗口 token",
     "type": "int",
     "default": 0
-  },
-  "llm_model_temperature": {
-    "description": "模型级温度；留空沿用高级 JSON",
-    "type": "string",
-    "default": ""
-  },
-  "llm_model_top_p": {
-    "description": "模型级 top_p；留空沿用高级 JSON",
-    "type": "string",
-    "default": ""
-  },
-  "llm_defaults_temperature": {
-    "description": "全局兜底温度",
-    "type": "string",
-    "default": "0.2"
-  },
-  "llm_defaults_top_p": {
-    "description": "全局兜底 top_p",
-    "type": "string",
-    "default": "1.0"
   },
   "llm_defaults_max_tokens": {
     "description": "全局兜底最大输出 token",

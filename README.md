@@ -60,7 +60,7 @@ python main.py               # 首次运行生成 config.json
         "base_url": "https://api.openai.com/v1",
         "api_key": "sk-...",
         "models": [
-          { "model": "gpt-4o", "supports": { "tools": true, "vision": true } }
+          { "model": "gpt-4o", "supports": { "vision": true } }
         ]
       }
     ]
@@ -81,9 +81,9 @@ python main.py               # 首次运行生成 config.json
       "name": "MAK",
       // 不需要前缀：文件名特征初筛 + 下载后内容特征识别
       "archive_match_mode": "auto",
-      // 按 UI 开关：键名 mxu / mfaa / maafwapp / auto
-      "ui": { "mfaa": { "enabled": true } },
-      "repo": { "enabled": true, "mode": "agent", "url": "https://github.com/..." }
+      // 未知 UI 的日志包开关；三种已知 UI 始终启用
+      "ui": { "auto": { "enabled": true } },
+      "repo": { "mode": "agent", "url": "https://github.com/..." }
     },
     "settings": { "max_log_files": 6 }
   }
@@ -135,7 +135,7 @@ Bot 只在**同时满足**以下条件时才会分析：
 | 配置启用 | 该配置的 `settings.enabled` 为 `true` |
 | 文件名初筛 | `project.archive_match_mode`：`auto`（已知 UI 命名 / 名字含 log·logs·日志）、`known`、`prefix`（用 `project.file_prefix`）、`any` |
 | 内容特征识别 | 下载后检查包内是否有日志或已知 UI 布局，非日志包直接跳过、不调用 AI（`prefix` 模式可用 `project.require_log_layout: false` 关闭） |
-| UI 开关 | `project.ui.<名称>.enabled` 为 `false` 时跳过该 UI 的日志包 |
+| UI 开关 | 三种已知 UI 始终启用；未知 UI 由 `project.ui.auto.enabled` 控制 |
 | 大小合规 | 不超过 `max_zip_size_mb`（超限会提示并记录跳过原因） |
 
 非 `/maa` 开头的聊天文本不会触发指令；只有**引用了 Bot 分析结果消息**的发言才会被当作追问。

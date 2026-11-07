@@ -460,27 +460,9 @@ class LLMPool:
     # ── 参数合并 ──
 
     def _params(self, candidate: Candidate, config_llm: ConfigLLM,
-                *, temperature: Optional[float] = None,
-                max_tokens: Optional[int] = None,
-                top_p: Optional[float] = None,
+                *, max_tokens: Optional[int] = None,
                 max_context_tokens: int = 0) -> RequestParams:
         spec = candidate.spec
-        temp = temperature
-        if temp is None:
-            temp = config_llm.temperature
-        if temp is None:
-            temp = spec.temperature
-        if temp is None:
-            temp = self.defaults.temperature
-
-        top = top_p
-        if top is None:
-            top = config_llm.top_p
-        if top is None:
-            top = spec.top_p
-        if top is None:
-            top = self.defaults.top_p
-
         tokens = max_tokens
         if tokens is None:
             tokens = config_llm.max_tokens
@@ -496,8 +478,6 @@ class LLMPool:
             context = int(self.defaults.max_context_tokens or 48000)
 
         return RequestParams(
-            temperature=float(temp),
-            top_p=float(top),
             max_tokens=max(1, int(tokens)),
             max_context_tokens=max(1024, context),
         )
@@ -546,9 +526,7 @@ class LLMPool:
         need: Iterable[str] = (),
         tools: Optional[list[dict]] = None,
         tool_choice: str = "auto",
-        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
         max_context_tokens: int = 0,
         phase: str = "",
         use_breaker: bool = True,
@@ -579,7 +557,7 @@ class LLMPool:
 
             params = self._params(
                 candidate, config_llm,
-                temperature=temperature, max_tokens=max_tokens, top_p=top_p,
+                max_tokens=max_tokens,
                 max_context_tokens=max_context_tokens,
             )
             attempts = max(0, int(candidate.provider.max_retries or 0)) + 1

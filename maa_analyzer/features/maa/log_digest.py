@@ -44,6 +44,10 @@ KEYWORD_PATTERNS = [
 ]
 
 
+CONTEXT_BEFORE_LINES = 80
+CONTEXT_AFTER_LINES = 60
+
+
 @dataclass
 class DigestOptions:
     max_prompt_chars: int = 600000
@@ -60,8 +64,6 @@ class DigestOptions:
     max_maafw_bak_files: int = 1
     max_maafw_bak_bytes: int = 64 * 1024 * 1024
     log_head_lines: int = 16
-    context_before_lines: int = 80
-    context_after_lines: int = 60
     max_sections_per_log: int = 60
     max_log_chars: int = 120000
     max_config_chars: int = 6000
@@ -566,7 +568,7 @@ def _stream_scan_log_member(
     stream_limit_bytes: int | None = None,
 ) -> tuple[LogProcessResult, int, bool]:
     max_bytes = max(0, int(opts.max_stream_log_bytes if stream_limit_bytes is None else stream_limit_bytes))
-    before_lines: deque[tuple[int, str]] = deque(maxlen=_context_raw_scan_limit(opts.context_before_lines))
+    before_lines: deque[tuple[int, str]] = deque(maxlen=_context_raw_scan_limit(CONTEXT_BEFORE_LINES))
     tail_lines: deque[str] = deque(maxlen=80)
     pending_sections: list[dict[str, Any]] = []
     captured_sections: list[dict[str, Any]] = []
@@ -717,7 +719,7 @@ def _consume_stream_line(
                     "start_line": start_line,
                     "end_line": line_no,
                     "hit_line": line_no,
-                    "after_remaining": _context_raw_scan_limit(opts.context_after_lines),
+                    "after_remaining": _context_raw_scan_limit(CONTEXT_AFTER_LINES),
                     "lines": list(before_lines) + [(line_no, compact_line)],
                 }
             )
@@ -969,8 +971,8 @@ def _format_context_section(
     hit_units = _compress_context_items(hit_items, opts)
     after_units = _compress_context_items(after_items, opts)
 
-    before_selected = before_units[-opts.context_before_lines :] if opts.context_before_lines > 0 else []
-    after_selected = after_units[: opts.context_after_lines] if opts.context_after_lines > 0 else []
+    before_selected = before_units[-CONTEXT_BEFORE_LINES :] if CONTEXT_BEFORE_LINES > 0 else []
+    after_selected = after_units[: CONTEXT_AFTER_LINES] if CONTEXT_AFTER_LINES > 0 else []
     selected = before_selected + hit_units + after_selected
     if not selected:
         return None
@@ -1188,8 +1190,8 @@ def _extract_error_context(name: str, text: str, opts: DigestOptions) -> str:
 
     sections = []
     for number, idx in enumerate(sorted(latest_match_by_signature.values()), 1):
-        start = max(0, idx - _context_raw_scan_limit(opts.context_before_lines))
-        end = min(len(lines), idx + _context_raw_scan_limit(opts.context_after_lines) + 1)
+        start = max(0, idx - _context_raw_scan_limit(CONTEXT_BEFORE_LINES))
+        end = min(len(lines), idx + _context_raw_scan_limit(CONTEXT_AFTER_LINES) + 1)
         items = [(line_index + 1, lines[line_index]) for line_index in range(start, end)]
         formatted = _format_context_section(items, idx + 1, opts)
         if not formatted:

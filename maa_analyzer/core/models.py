@@ -86,7 +86,11 @@ class CommandConfig(BaseModel):
 class ModelSupports(BaseModel):
     """模型能力声明：决定候选模型能否满足某次调用。"""
 
-    tools: bool = False
+    @property
+    def tools(self) -> bool:
+        """模型始终按支持工具调用处理，忽略旧配置中的声明。"""
+        return True
+
     vision: bool = False
     json_mode: bool = False
 
@@ -100,8 +104,6 @@ class ModelSpec(BaseModel):
     supports: ModelSupports = Field(default_factory=ModelSupports)
     max_tokens: int = 0          # 0 = 用 llm.defaults.max_tokens
     max_context_tokens: int = 0  # 0 = 用 llm.defaults.max_context_tokens
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
 
     model_config = {"populate_by_name": True, "alias_generator": _to_camel}
 
@@ -135,8 +137,6 @@ class LLMProviderConfig(BaseModel):
 class LLMDefaults(BaseModel):
     """全局 `llm.defaults`：参数兜底值。"""
 
-    temperature: float = 0.2
-    top_p: float = 1.0
     max_tokens: int = 8192
     max_context_tokens: int = 48000
 
@@ -181,9 +181,7 @@ class ConfigLLM(BaseModel):
     """`bot.configs.<名称>.llm`：本配置按优先级尝试的候选模型列表。"""
 
     models: List[ModelRef] = Field(default_factory=list)
-    temperature: Optional[float] = None
     max_tokens: Optional[int] = None
-    top_p: Optional[float] = None
 
     model_config = {"populate_by_name": True, "alias_generator": _to_camel}
 
@@ -245,7 +243,10 @@ class RepoConfig(BaseModel):
       - 分析结束后还原到分析前的分支、tag 或提交
     """
 
-    enabled: bool = False
+    @property
+    def enabled(self) -> bool:
+        """项目代码参考始终开启，忽略旧配置中的开关。"""
+        return True
 
     # ── 检索模式 ──
     # inject: 预检索后把命中片段拼进提示词（快、省 token，默认）
@@ -371,7 +372,7 @@ class ProjectConfig(BaseModel):
     - `name`：项目名（如 MAK），同时作为报告与提示词中的显示名
     - `archive_match_mode`：日志包识别方式
     - `file_prefix` / `require_log_layout`：仅 `prefix` 模式使用
-    - `ui`：按 UI 开关（键名 mxu / mfaa / maafwapp / auto）
+    - `ui`：未知 UI 的开关（auto）
     - `repo`：项目代码仓库
     """
 
@@ -397,6 +398,8 @@ class ProjectConfig(BaseModel):
     def ui_enabled(self, ui_key: str) -> bool:
         """该 UI 是否允许分析；未配置时回退 `auto`，再回退 True。"""
         key = normalize_ui_key(ui_key)
+        if key in {"mxu", "mfaa", "maafwapp"}:
+            return True
         item = self.ui.get(key)
         if item is not None:
             return bool(item.enabled)
@@ -506,7 +509,7 @@ class AnalysisSettings(BaseModel):
     system_prompt: str = ""
 
     # ── 日志包工具（让 AI 像读仓库一样读日志包原始文件）──
-    # 开启后，即使 repo.enabled=false，分析也会走工具模式：
+    # 开启后，分析会走工具模式：
     # 模型可调用 log_search / log_read_file / log_list_files 直接查压缩包内容，
     # 而不是只能看到摘要里已提取的部分。追问同样适用。
     log_tools_enabled: bool = True
@@ -554,8 +557,6 @@ class AnalysisSettings(BaseModel):
     max_recognition_evidence_lines: int = 60
     max_recognition_evidence_chars: int = 35000
     log_head_lines: int = 16
-    context_before_lines: int = 80
-    context_after_lines: int = 60
 
     model_config = {"populate_by_name": True, "alias_generator": _to_camel}
 

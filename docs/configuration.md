@@ -45,8 +45,8 @@ AstrBot 面板映射常用字段和大多数高级字段；复杂结构仍需编
 | `archive_match_mode` | 所选档案的 `project.archive_match_mode` | 保持原值 |
 | `file_prefix` | 所选档案的 `project.file_prefix` | 保持原值 |
 | `require_log_layout_mode` | 所选档案的 `project.require_log_layout` | `inherit` 保持原值 |
-| `ui_mxu_mode` / `ui_mfaa_mode` / `ui_maafwapp_mode` / `ui_auto_mode` | 所选档案的 `project.ui.<名称>.enabled` | `inherit` 保持原值 |
-| `repo_mode` / `repo_search_mode` / `repo_path` / `repo_url` | 所选档案的仓库开关、检索模式与来源 | `inherit` / 留空保持原值 |
+| `ui_auto_mode` | 所选档案的 `project.ui.auto.enabled` | `inherit` 保持原值 |
+| `repo_search_mode` / `repo_path` / `repo_url` | 所选档案的仓库检索模式与来源 | `inherit` / 留空保持原值 |
 | `repo_mirrors` / `repo_branch` / `repo_default_branch` | 仓库镜像、克隆分支与还原分支 | 留空 / 空列表保持原值 |
 | `repo_preload_*` / `repo_update_on_analyze_mode` / `repo_allow_ai_update_mode` | 仓库预下载、重试、分析前更新与 AI 更新权限 | `inherit` / `-1` 保持原值 |
 | `repo_auto_checkout_version_mode` / `repo_allow_ai_switch_tag_mode` / `repo_max_tag_switch_rounds` | 日志版本切 tag、AI 切 tag 与轮数限制 | `inherit` / `-1` 保持原值 |
@@ -55,7 +55,7 @@ AstrBot 面板映射常用字段和大多数高级字段；复杂结构仍需编
 | `repo_extensions` / `repo_max_file_kb` / `repo_max_scan_files` / `repo_max_files` | 仓库扫描扩展名、大小、文件数与注入文件数 | 空列表 / `-1` 保持原值 |
 | `repo_max_identifiers` / `repo_context_lines` / `repo_max_block_lines` / `repo_max_chars` | inject 模式标识符、上下文、JSON 块与字符限制 | `-1` 保持原值 |
 | `llm_provider` / `llm_model` / `llm_fallback_models` | 所选档案首选候选与备用候选链；备用项格式为 `端点名:模型名` | 保持原值 |
-| `llm_profile_temperature` / `llm_profile_max_tokens` / `llm_profile_top_p` | 所选档案的模型调用参数 | 继承标记保持原值 |
+| `llm_profile_max_tokens` | 所选档案的模型调用参数 | 继承标记保持原值 |
 | `llm_endpoint_selector` / `llm_endpoint_name` / `llm_endpoint_kind` / `llm_endpoint_base_url` / `llm_endpoint_api_key` | 选择并编辑一个全局 LLM 端点 | 留空保持原值 |
 | `llm_endpoint_max_*` / `llm_endpoint_timeout_seconds` / `llm_endpoint_connect_timeout_seconds` / `llm_endpoint_max_retries` | 端点并发、超时与重试 | `-1` 保持原值 |
 | `llm_endpoint_model` / `llm_model_*` | 选择并编辑该端点的一个模型能力、输出、上下文与采样参数 | 继承标记保持原值 |
@@ -112,7 +112,6 @@ AstrBot 面板映射常用字段和大多数高级字段；复杂结构仍需编
           "archive_match_mode": "auto",
           "require_log_layout": true,
           "repo": {
-            "enabled": false,
             "mode": "inject",
             "path": "",
             "url": "https://github.com/MAAXYZ/MaaXXX",
@@ -198,7 +197,7 @@ AstrBot 面板映射常用字段和大多数高级字段；复杂结构仍需编
         "models": [
           {
             "model": "gpt-4o-mini",
-            "supports": { "tools": true, "vision": true, "json_mode": true },
+            "supports": { "vision": true, "json_mode": true },
             "max_tokens": 8192,
             "max_context_tokens": 48000
           }
@@ -206,8 +205,6 @@ AstrBot 面板映射常用字段和大多数高级字段；复杂结构仍需编
       }
     ],
     "defaults": {
-      "temperature": 0.2,
-      "top_p": 1.0,
       "max_tokens": 8192,
       "max_context_tokens": 48000
     },
@@ -308,9 +305,7 @@ AstrBot 面板映射常用字段和大多数高级字段；复杂结构仍需编
 
       "llm": {
         "models": [{ "name": "default", "model": "gpt-4o-mini" }],
-        "temperature": 0.2,
-        "max_tokens": 8192,
-        "top_p": 1.0
+        "max_tokens": 8192
       },
 
       "vision": { "enabled": true },
@@ -376,11 +371,8 @@ data/
   // 仅 prefix 模式使用：是否额外做内容特征识别（默认 true）
   "require_log_layout": true,
 
-  // 按 UI 开关：键名 mxu / mfaa / maafwapp / auto
-  "ui": {
-    "mfaa":     { "enabled": true },
-    "maafwapp": { "enabled": false }   // 不分析 MaaFwApp 的日志包
-  },
+  // 未知 UI 的日志包开关；已知 UI 始终启用
+  "ui": { "auto": { "enabled": true } },
 
   // 项目代码仓库
   "repo": {
@@ -400,9 +392,9 @@ data/
 | `archive_match_mode` | `string` / `"auto"` | 下载前的文件名初筛方式：`auto` / `known` / `prefix` / `any`，见[识别方式](#识别方式archive_match_mode) | `"archive_match_mode": "auto"` |
 | `file_prefix` | `string` / `""` | **仅 `prefix` 模式**：文件名前缀；留空则该模式不会命中任何包 | `"file_prefix": "MaaAssistantKedrgame-logs"` |
 | `require_log_layout` | `bool` / `true` | **仅 `prefix` 模式**：是否额外做内容特征识别；`false` = 只信前缀 | `"require_log_layout": true` |
-| `ui` | `object` / `{}` | 按 UI 开关，键名 `mxu` / `mfaa` / `maafwapp` / `auto`。未配置该 UI 时回退 `auto`，再回退 `true` | `"ui": { "maafwapp": { "enabled": false } }` |
-| `ui.<名称>.enabled` | `bool` / `true` | 是否分析该 UI 的日志包；`false` 会在下载后直接跳过，不调用 AI | `"enabled": false` |
-| `repo` | `object` / — | 项目代码仓库，见 [repo](#repo项目代码仓库) | `"repo": { "enabled": true }` |
+| `ui` | `object` / `{}` | 未知 UI 的开关；已知 UI 始终启用，旧配置中的对应开关不再生效 | `"ui": { "auto": { "enabled": false } }` |
+| `ui.<名称>.enabled` | `bool` / `true` | 控制未知 UI 的日志包；`false` 会跳过，不调用 AI | `"enabled": false` |
+| `repo` | `object` / — | 项目代码仓库，见 [repo](#repo项目代码仓库) | `"repo": { "mode": "inject" }` |
 
 #### repo：项目代码仓库
 
@@ -410,7 +402,6 @@ data/
 
 ```jsonc
 "repo": {
-  "enabled": true,
   "mode": "inject",
   "path": "E:/Code/MAA/MaaXXX",
   "url": "https://github.com/MAAXYZ/MaaXXX",
@@ -421,9 +412,10 @@ data/
 }
 ```
 
+项目代码参考始终开启；旧配置中的 `repo.enabled` 不再生效。
+
 | 字段 | 类型 / 默认 | 说明 | 示例 |
 | --- | --- | --- | --- |
-| `enabled` | `bool` / `false` | 是否启用项目代码参考 | `"enabled": true` |
 | `mode` | `string` / `"inject"` | 检索模式：`inject`（预检索后把命中片段拼进提示词，快、省 token）/ `agent`（把仓库读写工具交给 AI，深、耗 token）；其它值按 `inject` | `"mode": "agent"` |
 | `path` | `string` / `""` | 本地仓库目录，**优先于 `url`**，不需要网络与 git，也不会执行仓库代码 | `"path": "E:/Code/MAA/MaaXXX"` |
 | `url` | `string` / `"https://github.com/MAAXYZ/MaaXXX"` | 主 git 地址（GitHub / Gitee / 自建镜像 / `file://` 均可） | `"url": "https://github.com/MAAXYZ/MaaXXX"` |
@@ -475,7 +467,7 @@ data/
   ├─ 文件名初筛（archive_match_mode，见上表）
   ├─ 下载（分卷则合并）
   └─ 内容特征识别
-       ├─ 识别出的 UI 被 project.ui.<名称>.enabled 关闭 → 跳过
+       ├─ 未知 UI 被 project.ui.auto.enabled 关闭 → 跳过
        ├─ 命中已知 UI 布局（maafw.log / device_info.txt / logs/log-* 等）→ 分析
        ├─ 有 .log / .jsonl / on_error 截图 → 分析
        └─ 都没有 → 跳过，不调用 AI，群里回一行「已跳过」
@@ -485,7 +477,7 @@ data/
 - `any` 适合完全自定义命名的日志包：所有 zip 都会下载后校验，代价是无谓下载
 - `prefix` 是唯一使用 `file_prefix` 的模式，`require_log_layout: false` 时**只信前缀**，不再校验内容
 - 内容特征识别只看包内容，仅靠文件名推断的 UI 不算命中，避免 `server-logs.zip` 这类误判
-- `project.ui.<名称>.enabled: false` 会在下载后直接跳过该 UI 的日志包（不调用 AI）
+- `project.ui.auto.enabled: false` 会跳过未知 UI 的日志包（不调用 AI）
 
 #### 解析优先级
 
@@ -502,7 +494,7 @@ project： config.json 的 project
 
 `project.repo` 由 `_prepare_repo` 直接读取，不经过 `settings`。
 
-`project.ui` 的键名会归一化：`mfaa` / `mfaaValonia` / `mfaa-avalonia` 等价，`maafwapp` / `maafw` 等价；`auto` 作为未命中时的兜底。
+MXU、MFAAvalonia 和 MaaFwApp 始终启用，旧配置中的对应开关及 `auto` 兜底均不能关闭它们。`auto` 控制未知 UI。
 
 #### 日志包命名与 UI 自动识别
 
@@ -529,9 +521,7 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
     { "name": "deepseek", "model": "deepseek-v4-pro" },
     { "name": "backup",   "model": "qwen-vl-max" }
   ],
-  "temperature": 0.2,
-  "max_tokens": 8192,
-  "top_p": 1.0
+  "max_tokens": 8192
 }
 ```
 
@@ -540,9 +530,7 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `models` | `object[]` / `[]` | 候选列表，元素为 `{name, model}`：`name` = `llm.providers[].name`，`model` = 该端点的 `models[].model`。为空则启动报错 | `"models": [{ "name": "default", "model": "gpt-4o-mini" }]` |
 | `models[].name` | `string` / `""` | 端点名，必须与 `llm.providers[].name` 完全一致 | `"name": "deepseek"` |
 | `models[].model` | `string` / `""` | 模型名，必须在该端点的 `models[]` 中声明过 | `"model": "deepseek-v4-pro"` |
-| `temperature` | `float` / `null` | 本配置的采样温度；`null` = 用模型级 → `llm.defaults` | `"temperature": 0.3` |
-| `max_tokens` | `int` / `null` | 本配置单次最大输出 token；`null` = 用模型级 → `llm.defaults` | `"max_tokens": 4096` |
-| `top_p` | `float` / `null` | 核采样；`null` = 用模型级 → `llm.defaults`。Anthropic 协议仅在非默认值时发送 | `"top_p": 0.9` |
+| `max_tokens` | `int` / `null` | 本配置单次最大输出 token；`null` = 用模型级，未设置时由 API 服务端决定 | `"max_tokens": 4096` |
 
 - 引用不存在的端点或模型会在启动时被拒绝（打印具体项并以非 0 退出）
 - 重复的 `{name, model}` 会被去重（保留首次出现）
@@ -702,8 +690,6 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `max_recognition_evidence_lines` | `int` / `60` | OCR 重点证据行数上限 | `"max_recognition_evidence_lines": 30` |
 | `max_recognition_evidence_chars` | `int` / `35000` | OCR 重点证据块字符上限 | `"max_recognition_evidence_chars": 20000` |
 | `log_head_lines` | `int` / `16` | 每个日志小节额外保留的开头行数（版本、路径、控制器等环境信息） | `"log_head_lines": 24` |
-| `context_before_lines` | `int` / `80` | 错误命中前保留行数（按折叠后行数计） | `"context_before_lines": 120` |
-| `context_after_lines` | `int` / `60` | 错误命中后保留行数 | `"context_after_lines": 90` |
 
 > 模型选择与采样参数不在 `settings` 中，而在 `bot.configs.<名称>.llm`（见 [llm](#llm候选模型)）。
 > 上下文压缩与提示词缓存的组织方式见 [上下文与缓存](context.md)。
@@ -789,7 +775,7 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
       "models": [
         {
           "model": "gpt-4o-mini",
-          "supports": { "tools": true, "vision": true, "json_mode": true },
+          "supports": { "vision": true, "json_mode": true },
           "max_tokens": 8192,
           "max_context_tokens": 128000
         }
@@ -804,14 +790,14 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
       "models": [
         {
           "model": "deepseek-v4-flash",
-          "supports": { "tools": true, "vision": false },
+          "supports": { "vision": false },
           "max_tokens": 8192,
           "max_context_tokens": 128000
         }
       ]
     }
   ],
-  "defaults": { "temperature": 0.2, "top_p": 1.0, "max_tokens": 8192, "max_context_tokens": 48000 },
+  "defaults": { "max_tokens": 8192, "max_context_tokens": 48000 },
   "circuit_breaker": { "failure_threshold": 3, "cooldown_seconds": 300 }
 }
 ```
@@ -835,20 +821,15 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | 字段 | 类型 / 默认 | 说明 | 示例 |
 | --- | --- | --- | --- |
 | `model` | `string` / `""` | 端点接受的模型名，原样作为请求的 `model`；同一端点内不可重复 | `"model": "gpt-4o-mini"` |
-| `supports.tools` | `bool` / `false` | 是否支持工具调用。带工具的调用只会在 `true` 的候选上尝试 | `"tools": true` |
 | `supports.vision` | `bool` / `false` | 是否支持图片输入。带图调用只会在 `true` 的候选上尝试 | `"vision": true` |
 | `supports.json_mode` | `bool` / `false` | 声明该模型支持 JSON 模式（当前版本不发送 `response_format`，仅作能力声明与后续扩展） | `"json_mode": true` |
 | `max_tokens` | `int` / `0` | 该模型的单次最大输出；`0` = 用 `llm.defaults.max_tokens` | `"max_tokens": 8192` |
 | `max_context_tokens` | `int` / `0` | 该模型的上下文窗口；`0` = 用 `llm.defaults.max_context_tokens`。输入预算 = 窗口 − 输出 − 安全余量 | `"max_context_tokens": 128000` |
-| `temperature` | `float` / `null` | 模型级温度；`null` = 用 `llm.defaults.temperature` | `"temperature": 0.1` |
-| `top_p` | `float` / `null` | 模型级 `top_p`；`null` = 用 `llm.defaults.top_p` | `"top_p": 0.95` |
 
 ### llm.defaults
 
 | 字段 | 类型 / 默认 | 说明 | 示例 |
 | --- | --- | --- | --- |
-| `temperature` | `float` / `0.2` | 全局兜底温度 | `"temperature": 0.3` |
-| `top_p` | `float` / `1.0` | 全局兜底 `top_p` | `"top_p": 0.9` |
 | `max_tokens` | `int` / `8192` | 全局兜底最大输出 | `"max_tokens": 4096` |
 | `max_context_tokens` | `int` / `48000` | 全局兜底上下文窗口（最小 1024） | `"max_context_tokens": 96000` |
 
@@ -873,25 +854,23 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 Anthropic 协议的自动适配：
 
 - 强制要求 `max_tokens`，用 `models[].max_tokens` 或 `llm.defaults.max_tokens` 填充
-- `temperature` 钳制在 0–1；`top_p` 仅在非默认值时发送
 - 端点要求显式 `thinking` 时，自动补 `{"type": "disabled"}` 后重试
 - `stop_reason` 映射为统一的结束原因，`cache_read_input_tokens` / `cache_creation_input_tokens` 计入缓存统计
 
-OpenAI 端点的参数降级：遇到新模型参数差异时自动重试一次，`max_tokens` → `max_completion_tokens`，并丢弃不支持的 `temperature` / `top_p` / `tool_choice`。
+OpenAI 端点的参数降级：遇到新模型参数差异时自动重试一次，`max_tokens` → `max_completion_tokens`，并丢弃不支持的 `tool_choice`。
 
 ### 参数优先级
 
 低 → 高：
 
 ```text
-temperature / top_p：llm.defaults → providers[].models[] → bot.configs.<名称>.llm
 max_tokens：         llm.defaults → providers[].models[] → bot.configs.<名称>.llm
 上下文窗口：          llm.defaults → providers[].models[] → settings.max_context_tokens
 ```
 
 ### 能力过滤与降级
 
-`supports.tools` / `supports.vision` 决定候选能否满足带工具 / 带图调用：
+所有模型均按支持工具调用处理，旧配置中的 `supports.tools` 不再生效。请确保所选模型和服务实际支持工具调用。`supports.vision` 决定候选能否满足带图调用：
 
 - 过滤在**原列表顺序**上进行，完全相同的 `{name, model}` 会被去重
 - 过滤后为空则该能力降级（不提供工具 / 不注入图片），并在报告中注明，而不是整体失败
