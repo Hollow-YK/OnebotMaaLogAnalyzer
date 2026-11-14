@@ -439,7 +439,7 @@ data/
 | 模式 | 文件名初筛 | 内容特征识别 |
 | --- | --- | --- |
 | `auto`（默认） | 已知 UI 命名，或名字含 `log` / `logs` / `日志` | 强制 |
-| `known` | 仅已知 UI 命名（MXU / MFAAvalonia / MaaFwApp） | 强制 |
+| `known` | 仅已知 UI 命名（MXU / MFAAvalonia / MaaFwApp / MaaTauriAndroid / MWU / MFW-PyQt6） | 强制 |
 | `prefix` | 仅 `file_prefix` 开头 | 由 `require_log_layout` 决定（默认 `true`） |
 | `any` | 任意 `.zip` | 强制 |
 
@@ -454,7 +454,7 @@ data/
        └─ 都没有 → 跳过，不调用 AI，群里回一行「已跳过」
 ```
 
-- `auto` / `known` / `any` **不需要任何前缀**；三种已知 UI 的文件名与布局都能自动识别
+- `auto` / `known` / `any` **不需要任何前缀**；六种已知 UI 的文件名与布局都能自动识别
 - `any` 适合完全自定义命名的日志包：所有 zip 都会下载后校验，代价是无谓下载
 - `prefix` 是唯一使用 `file_prefix` 的模式，`require_log_layout: false` 时**只信前缀**，不再校验内容
 - 内容特征识别只看包内容，仅靠文件名推断的 UI 不算命中，避免 `server-logs.zip` 这类误判
@@ -475,17 +475,20 @@ project： config.json 的 project
 
 `project.repo` 由 `_prepare_repo` 直接读取，不经过 `settings`。
 
-MXU、MFAAvalonia 和 MaaFwApp 始终启用，旧配置中的对应开关及 `auto` 兜底均不能关闭它们。`auto` 控制未知 UI。
+MXU、MFAAvalonia、MaaFwApp、MaaTauriAndroid、MWU 和 MFW-PyQt6 始终启用，旧配置中的对应开关及 `auto` 兜底均不能关闭它们。`auto` 控制未知 UI。
 
 #### 日志包命名与 UI 自动识别
 
-`auto` / `known` / `any` 模式下都会接受三种已知 UI 命名：
+`auto` / `known` / `any` 模式下都会接受六种已知 UI 命名：
 
 | UI | 文件名示例 | `project.ui` 键 |
 | --- | --- | --- |
 | MXU | `MaaAssistantKedrgame-logs-1.0.0-alpha.4-20260814-135755.zip` | `mxu` |
 | MFAAvalonia | `log_20261019_110324.zip`、`log_20261019_141709-part01.zip` | `mfaa` |
 | MaaFwApp | `maafw_logs_20261022_195657.zip` | `maafwapp` |
+| MaaTauriAndroid | `maa_tauri_android-logs-1760000000000-<uuid>.zip` | `mta` |
+| MWU | `mwu-logs.zip` | `mwu` |
+| MFW-PyQt6 | `Demo-1.2.3-20261114_101010.zip` | `mfw` |
 
 Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版本，并写入摘要和报告头；分卷包 `*-partNN.zip` 会先等待上传（连续 `archive_part_settle_seconds` 秒无新分卷），再自动下载并合并分析。合并后按「编号连续 + 内容特征」判断是否齐全：不完整时最多额外等 `archive_part_wait_extra_rounds` 轮，仍不完整则按 `archive_part_incomplete_action` 处理（照常分析并标注缺失，或取消并提示补齐后重传）。
 

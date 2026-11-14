@@ -69,6 +69,9 @@
 | MXU | `MaaAssistantKedrgame-logs-1.0.0-alpha.4-20260814-135755.zip` | 根目录 `maafw.log`、`on_error/`、`config/mxu-*.json` |
 | MFAAvalonia | `log_20261019_110324.zip`、`log_20261019_141709-part01.zip` | `debug/maafw.log`、`logs/log-*.log`、`debug/on_error/` |
 | MaaFwApp | `maafw_logs_20261022_195657.zip` | `log/maafw.log`、`log/app.log`、`device_info.txt`、`pi/debug/maafw.log`、`log/run/*.jsonl` |
+| MaaTauriAndroid | `maa_tauri_android-logs-1760000000000-<uuid>.zip` | `logs/maa/maafw.log`、`logs/maa_tauri_android-filtered.log`、`logs/app/mta.log`、`device-info.txt`、`snapshots/*.json` |
+| MWU | `mwu-logs.zip` | `mwu.log`、`debug/maafw.log`、`debug/on_error/`、`updater.log` |
+| MFW-PyQt6 | `Demo-1.2.3-20261114_101010.zip` | `debug/gui.log`、`debug/maafw.log`、`debug/on_error/`、`live/*.png` |
 
 Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 的 `device_info.txt`
 自动解析 **UI 类型、软件版本、资源版本、MaaFramework 版本、设备与系统**，写入摘要和报告头。
@@ -76,6 +79,9 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 - MXU 的版本号来自文件名（`-logs-<版本>-<时间戳>`），属于项目/资源版本
 - MFAAvalonia 从 `程序版本`、`资源版本`、`MaaFramework 版本` 解析
 - MaaFwApp 从 `device_info.txt` 的 `Version` / `MaaFwApp` / `Framework` 解析
+- MaaTauriAndroid 从 `device-info.txt` 与 `snapshots/project.json` 解析
+- MWU 通过 `mwu.log` 布局识别，框架版本来自 `debug/maafw.log`
+- MFW-PyQt6 从文件名与 `debug/gui.log` 解析资源名、资源版本、软件版本和工作目录
 - MFAA 的 `资源版本` 也会用于自动对齐项目仓库 tag
 
 ### 内容特征识别

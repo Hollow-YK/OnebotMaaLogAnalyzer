@@ -534,7 +534,7 @@ class CommandHandler:
         # ui.<名称>.<字段>
         if len(parts) == 3 and parts[0].lower() == "ui":
             ui_key = normalize_ui_key(parts[1])
-            if ui_key in {"mxu", "mfaa", "maafwapp"}:
+            if ui_key in {"mxu", "mfaa", "maafwapp", "mta", "mwu", "mfw"}:
                 return CommandResult(text="已知 UI 的日志包始终启用，无法修改开关。", ok=False)
             field_name = parts[2]
             field = ProjectUISettings.model_fields.get(field_name)

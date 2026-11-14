@@ -4,7 +4,7 @@
 
 监听群内上传的日志压缩包，自动下载并提取错误片段、配置摘要与错误截图列表，再用专用的日志诊断提示词调用 AI 分析，把结论与相关图片发回群内。
 
-支持 **MXU**（`*-logs-<版本>-<时间戳>.zip`）、**MFAAvalonia**（`log_<时间戳>.zip`）、**MaaFwApp**（`maafw_logs_<时间戳>.zip`）等 UI 的日志包，并自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版本；分卷包 `*-partNN.zip` 会自动合并分析。
+支持 **MXU**（`*-logs-<版本>-<时间戳>.zip`）、**MFAAvalonia**（`log_<时间戳>.zip`）、**MaaFwApp**（`maafw_logs_<时间戳>.zip`）、**MaaTauriAndroid**（`maa_tauri_android-logs-*.zip`）、**MWU**（`mwu-logs.zip`）、**MFW-PyQt6**（`*-<版本>-<时间戳>.zip`）等 UI 的日志包，并自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版本；分卷包 `*-partNN.zip` 会自动合并分析。
 
 分析完成后，群内可**引用分析结果继续追问**，也可用 **`/maa` 指令**查看与修改配置。
 
@@ -12,7 +12,7 @@
 
 - **双入口部署** — `python main.py` 可继续作为裸 OneBot Bot 运行；也可安装为 AstrBot 插件，由 AstrBot 的 AIOCQHTTP 适配器收发消息，不需要再启动一个裸 Bot 进程
 - **自动分析** — 匹配到日志包立即下载分析，无需任何人操作
-- **多 UI 适配** — 自动识别 MXU / MFAAvalonia / MaaFwApp 日志包布局与命名，解析 UI 类型、软件版本、资源版本、MaaFramework 版本；**无需配置文件名前缀**，下载后校验布局避免误判；自动合并分卷包
+- **多 UI 适配** — 自动识别 MXU / MFAAvalonia / MaaFwApp / MaaTauriAndroid / MWU / MFW-PyQt6 日志包布局与命名，解析 UI 类型、软件版本、资源版本、MaaFramework 版本；**无需配置文件名前缀**，下载后校验布局避免误判；自动合并分卷包
 - **智能摘要** — 按 UI 布局选择框架日志 / UI 日志 / 运行记录，提取错误/警告/失败/异常/OCR 识别失败片段与配置摘要；大日志流式扫描，按签名去重只保留关键片段
 - **AI 可读原始文件** — 摘要之外，AI 可用工具自主检索**日志压缩包**与**项目代码仓库**内的原始内容（只读；压缩包按需解压：历史开启时随记录保留供追问复用，关闭时落临时目录、分析结束即删）
 - **图片化报告** — 报告正文、截图与文件卡片由无头浏览器渲染成图片发送，取消单条 3500 字限制；浏览器缺失时自动回退纯文本
@@ -81,7 +81,7 @@ python main.py               # 首次运行生成 config.json
       "name": "MAK",
       // 不需要前缀：文件名特征初筛 + 下载后内容特征识别
       "archive_match_mode": "auto",
-      // 未知 UI 的日志包开关；三种已知 UI 始终启用
+      // 未知 UI 的日志包开关；六种已知 UI 始终启用
       "ui": { "auto": { "enabled": true } },
       "repo": { "mode": "agent", "url": "https://github.com/..." }
     },
@@ -138,7 +138,7 @@ Bot 只在**同时满足**以下条件时才会分析：
 | 配置启用 | 该配置的 `settings.enabled` 为 `true` |
 | 文件名初筛 | `project.archive_match_mode`：`auto`（已知 UI 命名 / 名字含 log·logs·日志）、`known`、`prefix`（用 `project.file_prefix`）、`any` |
 | 内容特征识别 | 下载后检查包内是否有日志或已知 UI 布局，非日志包直接跳过、不调用 AI（`prefix` 模式可用 `project.require_log_layout: false` 关闭） |
-| UI 开关 | 三种已知 UI 始终启用；未知 UI 由 `project.ui.auto.enabled` 控制 |
+| UI 开关 | 六种已知 UI 始终启用；未知 UI 由 `project.ui.auto.enabled` 控制 |
 | 大小合规 | 不超过 `max_zip_size_mb`（超限会提示并记录跳过原因） |
 
 非 `/maa` 开头的聊天文本不会触发指令；只有**引用了 Bot 分析结果消息**的发言才会被当作追问。
@@ -150,9 +150,12 @@ Bot 只在**同时满足**以下条件时才会分析：
 | MXU | `MaaAssistantKedrgame-logs-1.0.0-alpha.4-20260814-135755.zip` | 根目录 `maafw.log`、`on_error/`、`config/mxu-*.json` |
 | MFAAvalonia | `log_20261019_110324.zip`、`log_20261019_141709-part01.zip` | `debug/maafw.log`、`logs/log-*.log`、`debug/on_error/` |
 | MaaFwApp | `maafw_logs_20261022_195657.zip` | `log/maafw.log`、`log/app.log`、`device_info.txt`、`pi/debug/maafw.log`、`log/run/*.jsonl` |
+| MaaTauriAndroid | `maa_tauri_android-logs-1760000000000-<uuid>.zip` | `logs/maa/maafw.log`、`logs/maa_tauri_android-filtered.log`、`logs/app/mta.log`、`device-info.txt`、`snapshots/*.json` |
+| MWU | `mwu-logs.zip` | `mwu.log`、`debug/maafw.log`、`debug/on_error/`、`updater.log` |
+| MFW-PyQt6 | `Demo-1.2.3-20261114_101010.zip` | `debug/gui.log`、`debug/maafw.log`、`debug/on_error/`、`live/*.png` |
 
 版本来源：MXU 取文件名中的 `-logs-<版本>-<时间戳>`；MFAAvalonia 取 `程序版本` / `资源版本` / `MaaFramework 版本`；
-MaaFwApp 取 `device_info.txt` 的 `Version` / `MaaFwApp` / `Framework`。未知布局会回退到通用日志选择。
+MaaFwApp 取 `device_info.txt` 的 `Version` / `MaaFwApp` / `Framework`；MaaTauriAndroid 取 `device-info.txt` 与 `snapshots/project.json`；MWU 主要依赖 `mwu.log` 布局；MFW-PyQt6 取 `debug/gui.log` 与文件名。未知布局会回退到通用日志选择。
 
 ## 文档
 

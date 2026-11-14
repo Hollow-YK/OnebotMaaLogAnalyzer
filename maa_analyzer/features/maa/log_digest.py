@@ -12,6 +12,9 @@ from typing import Any
 from .archive_profile import (
     UI_MAAFWAPP,
     UI_MFAA,
+    UI_MTA,
+    UI_MWU,
+    UI_MFW,
     UI_MXU,
     UI_UNKNOWN,
     ArchiveProfile,
@@ -339,6 +342,10 @@ def _select_log_infos(
       - MFAAvalonia：debug/maafw.log / logs/log-*.log
       - MaaFwApp：log/maafw.log / log/app.log / pi/debug/maafw.log /
         pi/debug/custom/*.log / log/run/*.jsonl / logcat
+      - MaaTauriAndroid：logs/maa/maafw.log / logs/maa_tauri_android-filtered.log /
+        logs/app/mta.log / logs/runs/*.jsonl / logs/logcat-full.txt
+      - MWU：mwu.log / debug/maafw.log / updater.log
+      - MFW-PyQt6：debug/gui.log / debug/maafw.log / debug 子目录 / live/*.png
     """
     ui = profile.ui_type if profile is not None else UI_UNKNOWN
     notes = notes if notes is not None else []
@@ -373,6 +380,22 @@ def _select_log_infos(
             role = "app"
         elif ui == UI_MFAA and lower.startswith("logs/") and base.endswith(".log"):
             role = "app"
+        elif ui == UI_MTA and lower in {
+            "logs/maa_tauri_android-filtered.log", "logs/app/mta.log",
+        }:
+            role = "app"
+        elif ui == UI_MTA and lower.startswith("logs/runs/") and base.endswith(".jsonl"):
+            role = "run"
+        elif ui == UI_MTA and lower in {"logs/logcat-full.txt", "logs/properties.txt"}:
+            role = "debug"
+        elif ui == UI_MWU and lower == "mwu.log":
+            role = "app"
+        elif ui == UI_MWU and lower == "updater.log":
+            role = "debug"
+        elif ui == UI_MFW and lower == "debug/gui.log":
+            role = "app"
+        elif ui == UI_MFW and lower == "debug/crash.log":
+            role = "debug"
         elif ui == UI_MAAFWAPP and lower == "log/app.log":
             role = "app"
         elif ui == UI_MAAFWAPP and lower.startswith("log/run/") and base.endswith(".jsonl"):
@@ -434,6 +457,9 @@ def _select_log_infos(
     role_plan: tuple[tuple[str, int], ...]
     if ui == UI_MXU:
         role_plan = (("dated", 1), ("agent", 1), ("custom", 1), ("run", 1))
+    elif ui == UI_MFW:
+        role_plan = (("schedule", 1), ("custom", 1), ("run", 1),
+                     ("agent", 1), ("dated", 1))
     else:
         # 定时任务触发记录往往直接包含 FAILED_START / INVALID_PLAN，优先保留
         role_plan = (("schedule", 1), ("run", 1), ("custom", 1),

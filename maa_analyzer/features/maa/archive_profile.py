@@ -9,11 +9,14 @@
     `debug/maafw.log`、`logs/log-YYYYMMDD.log`、`debug/on_error/`
   - MaaFwApp（Android）：`maafw_logs_<时间戳>.zip`
     `log/maafw.log`、`log/app.log`、`device_info.txt`、`pi/debug/maafw.log`
+  - MWU：`mwu-logs.zip`，`mwu.log` + `debug/maafw.log` + `updater.log`
+  - MFW-PyQt6：`<资源名>-<资源版本>-<时间戳>.zip`，`debug/gui.log` + `debug/maafw.log`
 
 本模块只做只读识别：读取少量元数据文件，不修改压缩包。
 """
 from __future__ import annotations
 
+import json
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -22,12 +25,16 @@ from pathlib import PurePosixPath
 from ...core.archive_names import (
     UI_MAAFWAPP,
     UI_MFAA,
+    UI_MTA,
+    UI_MWU,
+    UI_MFW,
     UI_MXU,
     UI_UNKNOWN,
     ArchivePart,
     detect_ui_from_file_name,
     is_known_log_archive_name,
     is_part_of,
+    mfw_file_parts,
     mxu_file_parts,
     normalize_archive_name,
     parse_archive_part,
@@ -42,6 +49,9 @@ __all__ = [
     "UI_DISPLAY_NAMES",
     "UI_MAAFWAPP",
     "UI_MFAA",
+    "UI_MTA",
+    "UI_MWU",
+    "UI_MFW",
     "UI_MXU",
     "UI_UNKNOWN",
     "detect_archive_profile",
@@ -56,6 +66,9 @@ UI_DISPLAY_NAMES = {
     UI_MXU: "MXU",
     UI_MFAA: "MFAAvalonia",
     UI_MAAFWAPP: "MaaFwApp",
+    UI_MTA: "MaaTauriAndroid",
+    UI_MWU: "MWU",
+    UI_MFW: "MFW-PyQt6",
     UI_UNKNOWN: "未知 UI",
 }
 
@@ -70,6 +83,9 @@ _MFAA_RESOURCE_VERSION = re.compile(r"资源版本\s*[:：]\s*([^\s，,]+)")
 _MFAA_FRAMEWORK_VERSION = re.compile(r"MaaFramework\s*版本\s*[:：]\s*([^\s，,]+)")
 _MFAA_INSTALL_DIR = re.compile(r"应用安装目录\s*[:：]\s*(.+)")
 _MFAA_RUNTIME = re.compile(r"\.NET\s*运行时\s*[:：]\s*(.+)")
+_MFW_UI_VERSION = re.compile(r"\bMFW\s*版本\s*[:：]\s*([^\s]+)")
+_MFW_RESOURCE_VERSION = re.compile(r"资源版本\s*[:：]\s*([^\s]+)")
+_MFW_WORKING_DIR = re.compile(r"当前工作目录\s*[:：]\s*(.+)")
 
 _METADATA_LABELS = {
     "export time": "导出时间",
@@ -112,7 +128,7 @@ class ArchiveProfile:
 
     @property
     def ui_key(self) -> str:
-        """project.ui 的键名（mxu / mfaa / maafwapp / auto）。"""
+        """project.ui 的键名（mxu / mfaa / maafwapp / mta / mwu / mfw / auto）。"""
         return ui_key_from_type(self.ui_type)
 
     @property
@@ -212,13 +228,18 @@ def _detect_profile(
     profile.ui_type = layout_ui or file_ui or UI_UNKNOWN
     _apply_file_name(profile, name)
 
-    if profile.ui_type == UI_MAAFWAPP:
+    if profile.ui_type == UI_MTA:
+        _parse_mta_device_info(profile, archive, members, lower_names)
+        _parse_mta_project_snapshot(profile, archive, members, lower_names)
+    elif profile.ui_type == UI_MAAFWAPP:
         _parse_device_info(profile, archive, members, lower_names)
         _parse_maafwapp_app_log(profile, archive, members, lower_names)
     elif profile.ui_type == UI_MFAA:
         _parse_mfaa_app_log(profile, archive, members, lower_names)
     elif profile.ui_type == UI_MXU:
         _parse_mxu_config_name(profile, lower_names)
+    if profile.ui_type == UI_MFW:
+        _parse_mfw_gui_log(profile, archive, members, lower_names)
 
     # 所有 UI 都尽量从 maafw.log 头部补齐框架版本
     _parse_maafw_header(profile, archive, members, lower_names)
@@ -227,6 +248,21 @@ def _detect_profile(
 
 def _detect_ui_from_layout(lower_names: list[str]) -> str:
     name_set = set(lower_names)
+    # MaaTauriAndroid 的导出有多个专属标记；`device-info.txt` 不能单独用它
+    # 判定，否则会与 MaaFwApp 同名文件混淆。
+    mta_markers = {
+        "logs/maa_tauri_android-filtered.log",
+        "logs/app/mta.log",
+        "logs/runs/index.json",
+        "snapshots/settings.json",
+        "snapshots/project.json",
+    }
+    if any(name in mta_markers for name in lower_names):
+        return UI_MTA
+    if "mwu.log" in name_set:
+        return UI_MWU
+    if "debug/gui.log" in name_set:
+        return UI_MFW
     if "device_info.txt" in name_set or "log/app.log" in name_set:
         return UI_MAAFWAPP
     if any(name.startswith("config/mxu-") for name in lower_names):
@@ -247,11 +283,11 @@ def _detect_ui_from_layout(lower_names: list[str]) -> str:
 
 
 def _apply_file_name(profile: ArchiveProfile, name: str) -> None:
-    """从文件名补齐项目名 / 资源版本（仅 MXU 命名）。"""
-    if not name or profile.ui_type not in (UI_MXU, UI_UNKNOWN):
+    """从文件名补齐项目名 / 资源版本（MXU / MFW 命名）。"""
+    if not name or profile.ui_type not in (UI_MXU, UI_MFW, UI_UNKNOWN):
         return
 
-    parts = mxu_file_parts(name)
+    parts = mfw_file_parts(name) if profile.ui_type == UI_MFW else mxu_file_parts(name)
     if parts is None:
         return
     project, version = parts
@@ -264,6 +300,50 @@ def _apply_file_name(profile: ArchiveProfile, name: str) -> None:
 # ════════════════════════════════════════════════════════════════
 # 各 UI 的元数据解析
 # ════════════════════════════════════════════════════════════════
+
+
+def _parse_mta_device_info(
+    profile: ArchiveProfile,
+    archive: zipfile.ZipFile,
+    members: list[zipfile.ZipInfo],
+    lower_names: list[str],
+) -> None:
+    info = _find_info(members, lower_names, "device-info.txt")
+    values = _parse_key_values(_read_text(archive, info, limit=64 * 1024))
+    if not values:
+        return
+
+    _set_if_empty(profile, "ui_version", _clean_version(values.get("maatauriandroid", "")))
+    _set_if_empty(profile, "framework_version", _clean_version(values.get("framework", "")))
+    _set_if_empty(profile, "device", values.get("device", ""))
+    _set_if_empty(profile, "os_version", _android_os(values.get("android", "")))
+
+    for key in ("abi",):
+        if values.get(key):
+            profile.metadata.setdefault(key, values[key])
+
+
+def _parse_mta_project_snapshot(
+    profile: ArchiveProfile,
+    archive: zipfile.ZipFile,
+    members: list[zipfile.ZipInfo],
+    lower_names: list[str],
+) -> None:
+    info = _find_info(members, lower_names, "snapshots/project.json")
+    text = _read_text(archive, info, limit=256 * 1024)
+    if not text:
+        return
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+
+    name = str(data.get("name", "") or data.get("label", "") or "").strip()
+    version = str(data.get("version", "") or "").strip()
+    _set_if_empty(profile, "project_name", name)
+    _set_if_empty(profile, "resource_version", _clean_version(version))
 
 
 def _find_info(
@@ -429,6 +509,31 @@ def _parse_mfaa_app_log(
         profile.metadata.setdefault(".net runtime", runtime.strip())
 
 
+def _parse_mfw_gui_log(
+    profile: ArchiveProfile,
+    archive: zipfile.ZipFile,
+    members: list[zipfile.ZipInfo],
+    lower_names: list[str],
+) -> None:
+    info = _find_info(members, lower_names, "debug/gui.log")
+    text = _read_text(archive, info, limit=256 * 1024)
+    if not text:
+        return
+
+    for line in text.splitlines():
+        resource_match = _MFW_RESOURCE_VERSION.search(line)
+        if resource_match:
+            profile.resource_version = _clean_version(resource_match.group(1))
+        ui_match = _MFW_UI_VERSION.search(line)
+        if ui_match:
+            _set_if_empty(profile, "ui_version", _clean_version(ui_match.group(1)))
+            continue
+        work_match = _MFW_WORKING_DIR.search(line)
+        if work_match:
+            profile.metadata.setdefault("working", work_match.group(1).strip())
+            break
+
+
 def _project_from_install_dir(path: str) -> str:
     base = str(path or "").strip().replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
     if not base:
@@ -446,7 +551,10 @@ def _parse_maafw_header(
     lower_names: list[str],
 ) -> None:
     # 按优先级选择框架日志：当前 UI 的主日志优先
-    preferred = ["log/maafw.log", "debug/maafw.log", "maafw.log", "pi/debug/maafw.log"]
+    preferred = [
+        "log/maafw.log", "debug/maafw.log", "maafw.log",
+        "logs/maa/maafw.log", "pi/debug/maafw.log",
+    ]
     candidates = [
         info for info, name in zip(members, lower_names)
         if PurePosixPath(name).name == "maafw.log"
