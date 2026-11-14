@@ -143,6 +143,13 @@ class OneBotAPI:
         })
         return data.get("message_id") if isinstance(data, dict) else None
 
+    async def send_group_forward_msg(self, group_id: int, messages: list[dict]) -> Optional[int]:
+        """发送自定义节点组成的 QQ 合并转发。"""
+        data = await self._call("send_group_forward_msg", {
+            "group_id": group_id, "messages": messages,
+        })
+        return data.get("message_id") if isinstance(data, dict) else None
+
     # ==================== 群文件 ====================
 
     async def get_group_root_files(self, group_id: int,

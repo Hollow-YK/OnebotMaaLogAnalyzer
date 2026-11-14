@@ -285,6 +285,14 @@ class MaaService:
         """发送纯文本群消息，返回 message_id。"""
         return await self.send_message(group_id, text)
 
+    async def send_forward_messages(
+        self, group_id: int, messages: list[list[dict]]
+    ) -> Optional[str]:
+        """发送 QQ 合并转发，返回外层卡片的消息 ID。"""
+        if not messages:
+            return None
+        return await self.port.send_forward_messages(group_id, messages)
+
     async def send_image(self, group_id: int, image_bytes: bytes) -> Optional[str]:
         """发送图片消息。"""
         return await self.port.send_image(group_id, image_bytes)

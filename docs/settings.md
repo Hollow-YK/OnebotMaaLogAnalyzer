@@ -32,11 +32,13 @@
 | `file_list_delay_seconds` | `0` | 上传后等待群文件列表刷新的秒数 |
 | `send_progress_message` | `true` | 是否发送进度提示 |
 | `send_summary` | `true` | 是否发送分析结果 |
-| `merge_messages` | `true` | 将相邻文字和图片合并为普通消息；关闭后按片段顺序逐条发送。适用于主报告和追问，不是 QQ 合并转发 |
+| `forward_analysis_results` | `false` | 将主分析报告的图文内容套一层 QQ 合并转发发送；文件附件在卡片后单独上传，追问仍发送普通消息 |
 | `reply_chunk_chars` | `3500` | 回复分段字符数 |
 | `duplicate_window_seconds` | `120` | 同一文件 / 同一组归档的去重与冷却窗口；`0` = 关闭去重 |
 
-使用 `/maa set merge_messages false` 关闭图文合并，`/maa set merge_messages true` 恢复。AstrBot 面板对应 `settings_merge_messages_mode`，可选 `enabled` / `disabled`。
+使用 `/maa set forward_analysis_results true` 开启 QQ 合并转发，设为 `false` 关闭。WebUI「消息反馈」中对应「将分析结果以 QQ 合并转发发送」；AstrBot 面板对应 `settings_forward_analysis_results_mode`，可选 `enabled` / `disabled`（默认）。监听群和额外通知群均生效；引用外层转发卡片可以追问。底层 QQ 协议端需支持 `send_group_forward_msg`。
+
+原 `merge_messages` 开关已移除，旧配置中的该字段会被忽略；相邻图文始终按顺序组合，长文本仍按 `reply_chunk_chars` 分段。旧开关不会自动转换为合并转发开关。
 
 > **去重窗口**：部分协议端（如 SnowLuma）对一次上传会同时发出 `notice.group_upload`
 > 与带 file 段的消息事件，两条入口各自触发一次分析导致重复回复。窗口内的同一文件只处理一次。

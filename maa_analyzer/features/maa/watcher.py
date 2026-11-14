@@ -20,6 +20,7 @@ from ...core.log_context import config_log_context
 from ...core.models import ConfigState, LogFileItem
 from ...features.maa.analyzer import MaaAnalyzer
 from ...features.maa.archive_profile import parse_archive_part
+from ...features.maa.attachments import OutSegment
 from ...features.maa.text_utils import format_bytes, split_text
 
 if TYPE_CHECKING:
@@ -519,9 +520,8 @@ class LogWatcher:
         """
         按报告片段顺序发送内容，返回成功发出的 message_id 列表。
 
-        片段保持模型给出的位置，因此附件可以插在文字中间。
+        图文保持模型给出的位置；转发模式下文件附件在卡片后单独上传。
         """
-        sent: list = []
         segments = None
         if hasattr(outcome, "output_segments"):
             segments = outcome.output_segments()
@@ -529,27 +529,28 @@ class LogWatcher:
             segments = getattr(outcome, "segments", None)
 
         if not segments:
-            # 兜底：没有片段时按纯文本发送
-            for chunk in outcome.report_chunks(max_chars):
-                mid = await self.s.send_text(group_id, chunk)
-                if mid:
-                    sent.append(mid)
-            return sent
+            # 纯文本兜底同样遵守合并转发设置。
+            segments = [OutSegment("text", text=chunk)
+                        for chunk in outcome.report_chunks(max_chars)]
 
-        return await self.send_segments(group_id, segments, settings, max_chars)
+        return await self.send_segments(
+            group_id, segments, settings, max_chars,
+            forward=settings.forward_analysis_results,
+        )
 
     async def send_segments(self, group_id: int, segments: list,
-                            settings, max_chars: int) -> list:
+                            settings, max_chars: int, *, forward: bool = False) -> list:
         """
-        按片段顺序发送，由 merge_messages 控制是否将相邻图文合并为普通消息。
+        按片段顺序组合相邻图文；主报告可选择包进一张 QQ 合并转发卡片。
 
-        这样模型把 [附图: ...] 写在两段文字之间时，图片会真正出现在
+        这样模型把 [附件@日志: ...] 写在两段文字之间时，图片会真正出现在
         两段文字中间，而不是被拆成三条独立消息。
-        关闭合并时，每个文字分段和每张图片各发一条。
-        文件附件无法混排，单独作为群文件上传。
+        追问使用默认的普通消息发送。文件附件单独作为群文件上传；
+        合并转发模式下在整张卡片发出后上传。
         """
         sent: list = []
-        merge_messages = settings.merge_messages
+        messages: list[list[dict]] = []
+        files: list = []
         # 待合并的图文混排缓冲区（元素为消息段 dict）
         buffer: list[dict] = []
         buffer_len = 0
@@ -558,11 +559,22 @@ class LogWatcher:
             nonlocal buffer, buffer_len
             if not buffer:
                 return
-            mid = await self.s.send_message(group_id, list(buffer))
-            if mid:
-                sent.append(mid)
+            if forward:
+                messages.append(list(buffer))
+            else:
+                mid = await self.s.send_message(group_id, list(buffer))
+                if mid:
+                    sent.append(mid)
             buffer = []
             buffer_len = 0
+
+        async def send_file(seg: OutSegment) -> None:
+            try:
+                ok = await self.s.send_file(group_id, seg.name, seg.data)
+                if ok:
+                    logger.info(f"[监听] 已发送文件：{seg.name}（{seg.label}）")
+            except Exception as exc:
+                logger.warning(f"[监听] 发送文件失败（{seg.name}）：{exc}")
 
         for seg in segments:
             if seg.kind == "text":
@@ -575,8 +587,6 @@ class LogWatcher:
                         await flush()
                     buffer.append({"type": "text", "data": {"text": chunk}})
                     buffer_len += len(chunk)
-                    if not merge_messages:
-                        await flush()
                 continue
 
             if seg.kind == "image":
@@ -587,8 +597,6 @@ class LogWatcher:
                 buffer.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(seg.data).decode()
                 }})
-                if not merge_messages:
-                    await flush()
                 continue
 
             # 文件：混排缓冲区先发完，再单独上传
@@ -596,14 +604,18 @@ class LogWatcher:
                 logger.warning(f"[监听] 文件片段内容为空，已跳过：{seg.label}")
                 continue
             await flush()
-            try:
-                ok = await self.s.send_file(group_id, seg.name, seg.data)
-                if ok:
-                    logger.info(f"[监听] 已发送文件：{seg.name}（{seg.label}）")
-            except Exception as exc:
-                logger.warning(f"[监听] 发送文件失败（{seg.name}）：{exc}")
+            if forward:
+                files.append(seg)
+                continue
+            await send_file(seg)
 
         await flush()
+        if forward and messages:
+            mid = await self.s.send_forward_messages(group_id, messages)
+            if mid:
+                sent.append(mid)
+        for seg in files:
+            await send_file(seg)
         return sent
 
     async def _link_history(self, cfg: ConfigState, outcome, message_ids: list) -> None:

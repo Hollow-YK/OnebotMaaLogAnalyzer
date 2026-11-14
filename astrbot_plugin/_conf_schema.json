@@ -600,10 +600,10 @@
       "disabled"
     ]
   },
-  "settings_merge_messages_mode": {
-    "description": "合并相邻文字和图片为普通消息",
+  "settings_forward_analysis_results_mode": {
+    "description": "将分析结果以 QQ 合并转发发送",
     "type": "string",
-    "default": "enabled",
+    "default": "disabled",
     "options": [
       "enabled",
       "disabled"

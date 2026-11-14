@@ -57,7 +57,7 @@
 
 - `report.render_followup=true`（默认）时同样渲染成图片，受 `report` 的分页与模板设置约束
 - `false` 时按纯文本分段发送（`settings.reply_chunk_chars`）
-- `settings.merge_messages=true`（默认）时将相邻文字和图片合并为普通消息；设为 `false` 后按片段顺序逐条发送，长文字仍按长度拆分。这不是 QQ 合并转发。
+- 相邻文字和图片按顺序组合为普通消息，长文字按长度拆分。`settings.forward_analysis_results` 仅控制主报告是否使用 QQ 合并转发，不影响追问回复；主报告开启转发后可引用外层卡片追问。
 - 附件指令 `[附件@...]` 与主报告行为一致；`[看图@...]` 始终只给模型看
 - 渲染失败会回退纯文本，并附一行原因说明
 

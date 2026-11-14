@@ -566,7 +566,7 @@ class AstrBotPlatformAdapter:
         return await self.map_group_message(event)
 
     async def _call_action_result(
-        self, action: str, **params: Any
+        self, action: str, *, route_group_id: int | None = None, **params: Any
     ) -> tuple[bool, Any]:
         """Call a bot action and report whether the call itself succeeded.
 
@@ -574,7 +574,12 @@ class AstrBotPlatformAdapter:
         successful call can still carry a ``None`` payload, and the value is
         whatever the implementation handed back.
         """
-        bot, params = self._action_route(params)
+        route_params = dict(params)
+        if route_group_id is not None:
+            route_params["group_id"] = route_group_id
+        bot, routed = self._action_route(route_params)
+        if "self_id" in routed:
+            params["self_id"] = routed["self_id"]
         if bot is None:
             return False, None
         call_action = getattr(bot, "call_action", None)
@@ -649,6 +654,32 @@ class AstrBotPlatformAdapter:
             "type": "image",
             "data": {"file": f"base64://{encoded}"},
         }])
+
+    async def send_forward_messages(
+        self, group_id: int, messages: Sequence[Sequence[Mapping[str, Any]]]
+    ) -> str | None:
+        if not messages:
+            return None
+        _, route = self._action_route({"group_id": _api_id(group_id)})
+        user_id = route.get("self_id")
+        name = "Maa 日志分析"
+        if not user_id:
+            _, result = await self._call_action_result(
+                "get_login_info", route_group_id=group_id
+            )
+            info = result.get("data", result) if isinstance(result, Mapping) else None
+            if isinstance(info, Mapping):
+                user_id = info.get("user_id")
+                name = str(info.get("nickname") or name)
+        if not user_id:
+            logger.warning("[AstrBot] 无法获取机器人账号，取消发送合并转发")
+            return None
+        nodes = [{"type": "node", "data": {
+            "uin": str(user_id), "name": name, "content": list(message),
+        }} for message in messages]
+        return _message_id(await self._call_action(
+            "send_group_forward_msg", group_id=_api_id(group_id), messages=nodes,
+        ))
 
     async def upload_group_file(
         self, group_id: int, file: str, name: str

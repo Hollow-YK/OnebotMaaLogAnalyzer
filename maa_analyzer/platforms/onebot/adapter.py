@@ -60,6 +60,22 @@ class OneBotPlatformAdapter:
             "data": {"file": f"base64://{encoded}"},
         }])
 
+    async def send_forward_messages(
+        self, group_id: int, messages: Sequence[Sequence[Mapping[str, Any]]]
+    ) -> str | None:
+        if not messages:
+            return None
+        info = await self.api.get_login_info()
+        if not info or not info.get("user_id"):
+            logger.warning("[发送] 无法获取机器人账号，取消发送合并转发")
+            return None
+        nodes = [{"type": "node", "data": {
+            "uin": str(info["user_id"]),
+            "name": str(info.get("nickname") or "Maa 日志分析"),
+            "content": list(message),
+        }} for message in messages]
+        return _message_id(await self.api.send_group_forward_msg(group_id, nodes))
+
     async def upload_group_file(
         self, group_id: int, file: str, name: str
     ) -> bool:

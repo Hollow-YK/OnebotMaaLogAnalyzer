@@ -123,6 +123,12 @@ class PlatformPort(Protocol):
     async def send_image(self, group_id: int, image_bytes: bytes) -> str | None:
         ...
 
+    async def send_forward_messages(
+        self, group_id: int, messages: Sequence[Sequence[Mapping[str, Any]]]
+    ) -> str | None:
+        """Send message bodies inside one QQ merged-forward card."""
+        ...
+
     async def send_file(
         self, group_id: int, file_name: str, data: bytes
     ) -> bool:

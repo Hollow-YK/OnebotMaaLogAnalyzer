@@ -478,7 +478,7 @@ class PanelOverrideTests(unittest.TestCase):
         }
         expected = {
             "file_list_delay_seconds", "duplicate_window_seconds",
-            "send_progress_message", "send_summary", "merge_messages", "reply_chunk_chars",
+            "send_progress_message", "send_summary", "forward_analysis_results", "reply_chunk_chars",
             "max_report_images", "max_report_files",
             "max_file_attachment_mb", "inline_attachments",
             "followup_max_turns", "followup_max_sessions",
@@ -514,7 +514,7 @@ class PanelOverrideTests(unittest.TestCase):
             "settings_file_list_delay_seconds": "1.5",
             "settings_duplicate_window_seconds": 60,
             "settings_send_progress_message_mode": "disabled",
-            "settings_merge_messages_mode": "disabled",
+            "settings_forward_analysis_results_mode": "enabled",
             "settings_system_prompt": "你是日志分析助手",
             "settings_context_compact_ratio": "0.75",
         }
@@ -523,7 +523,7 @@ class PanelOverrideTests(unittest.TestCase):
         self.assertEqual(settings["file_list_delay_seconds"], 1.5)
         self.assertEqual(settings["duplicate_window_seconds"], 60)
         self.assertIs(settings["send_progress_message"], False)
-        self.assertIs(settings["merge_messages"], False)
+        self.assertIs(settings["forward_analysis_results"], True)
         self.assertEqual(settings["system_prompt"], "你是日志分析助手")
         self.assertEqual(settings["context_compact_ratio"], 0.75)
 
