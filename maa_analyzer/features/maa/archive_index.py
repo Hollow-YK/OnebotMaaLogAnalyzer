@@ -528,6 +528,7 @@ def _select_primary_logs(
         add_info(info)
 
     # 3. 运行记录 / Agent / 自定义截图日志（按 UI 调整优先级）
+    role_plan: tuple[tuple[str, int], ...]
     if ui == UI_MXU:
         role_plan = (("dated", 1), ("agent", 1), ("custom", 1), ("run", 1))
     elif ui == UI_MFW:
