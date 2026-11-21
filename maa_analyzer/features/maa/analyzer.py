@@ -2305,6 +2305,7 @@ class MaaAnalyzer:
         tool_calls_total = 0
         overflow_retries = 0
         round_index = 0
+        stop_reason = "达到工具轮次上限"
         compactor = compactor or self._compactor(
             config_name, settings, phase, context_budget
         )
@@ -2319,6 +2320,7 @@ class MaaAnalyzer:
         while round_index < max_rounds:
             if time.monotonic() > deadline:
                 logger.warning(f"[{phase}] 工具循环达到时长上限，使用已有内容")
+                stop_reason = "达到工具循环时长上限"
                 break
             round_index += 1
             if compactor.needs_compaction(messages):
@@ -2336,6 +2338,7 @@ class MaaAnalyzer:
             except ContextOverflowError:
                 if overflow_retries >= 2:
                     logger.error(f"[{phase}] 上下文仍然超限，放弃本轮工具调用")
+                    stop_reason = "上下文多次超限"
                     break
                 overflow_retries += 1
                 logger.warning(
@@ -2355,6 +2358,7 @@ class MaaAnalyzer:
 
             if reply is None:
                 logger.warning(f"[{phase}] 工具轮次调用失败，使用已有内容")
+                stop_reason = "模型请求失败"
                 break
             if reply.content:
                 last_text = reply.content
@@ -2438,12 +2442,15 @@ class MaaAnalyzer:
             return last_text or None
 
         logger.info(
-            f"[{phase}] 工具循环达到轮次上限（共 {tool_calls_total} 次工具调用），要求收敛"
+            f"[{phase}] 工具循环结束：{stop_reason}；"
+            f"已进行 {round_index}/{max_rounds} 轮，"
+            f"共处理 {tool_calls_total} 次工具调用"
+            f"（单轮上限 {per_round} 次）；要求模型基于已有结果输出"
         )
         messages.append({
             "role": "user",
             "content": convergence_prompt or (
-                "已达到检索轮次上限，请立即基于目前掌握的信息输出最终分析报告，"
+                "检索已结束，请立即基于目前掌握的信息输出最终分析报告，"
                 "不要再请求调用工具。格式与之前一致。"
             ),
         })

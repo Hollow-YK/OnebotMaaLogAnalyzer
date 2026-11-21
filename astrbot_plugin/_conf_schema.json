@@ -1048,12 +1048,12 @@
         ]
       },
       "repo_max_tool_rounds": {
-        "description": "工具调用最大轮数",
+        "description": "工具循环最大轮数（分析与追问共用）",
         "type": "int",
         "default": 8
       },
       "repo_max_tool_calls_per_round": {
-        "description": "单轮工具调用上限",
+        "description": "每轮最多处理的工具调用数（不含跳过的调用）",
         "type": "int",
         "default": 6
       },
