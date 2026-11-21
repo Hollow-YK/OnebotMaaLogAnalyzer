@@ -175,9 +175,17 @@ def validate_llm_config(llm_cfg: dict, configs_cfg: dict) -> list[str]:
                     f"配置「{config_name}」引用了不存在的端点：{name}"
                 )
                 continue
-            if referenced_provider.find_model(model) is None:
+            spec = referenced_provider.find_model(model)
+            if spec is None:
                 errors.append(
                     f"配置「{config_name}」引用了端点 {name} 上不存在的模型：{model}"
+                )
+                continue
+            if not spec.supports.tools:
+                errors.append(
+                    f"配置「{config_name}」的候选 {name}/{model} 不支持工具调用。"
+                    "本版本的分析一律由模型调用工具读取日志与项目代码，"
+                    "请在 llm.providers[].models[].supports.tools 开启或换用支持工具的模型。"
                 )
                 continue
             key = (name, model)

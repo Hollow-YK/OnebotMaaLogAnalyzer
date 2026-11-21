@@ -31,9 +31,9 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Optional
 
-from ...features.maa.log_digest import (
+from ...features.maa.archive_index import (
     IMAGE_SUFFIXES,
-    DigestResult,
+    ArchiveInfo,
     read_zip_member,
 )
 from ...features.maa.safety import (
@@ -311,7 +311,7 @@ def split_report(report: str) -> list[OutSegment]:
 
 def build_report_segments(
     report: str,
-    digest: Optional[DigestResult],
+    archive: Optional[ArchiveInfo],
     *,
     repo_files: Optional[dict[str, bytes]] = None,
     max_images: int = 4,
@@ -333,8 +333,8 @@ def build_report_segments(
 
     # 日志包索引：仅完整相对路径（不做文件名回退，避免误命中）
     zip_full: dict[str, str] = {}
-    if digest and digest.zip_path:
-        for name in (getattr(digest, "all_members", None) or digest.all_images):
+    if archive and archive.zip_path:
+        for name in (getattr(archive, "all_members", None) or archive.all_images):
             normalized = normalize_tool_path(name)
             if normalized:
                 zip_full.setdefault(normalized.lower(), name)
@@ -388,8 +388,8 @@ def build_report_segments(
         # 严格按模型声明的来源查找，不跨来源回退，避免命中同名非预期文件
         if seg.source == SOURCE_ZIP:
             member = zip_full.get(wanted)
-            if member and digest and digest.zip_path:
-                data = read_zip_member(digest.zip_path, member, max_bytes=limit)
+            if member and archive and archive.zip_path:
+                data = read_zip_member(archive.zip_path, member, max_bytes=limit)
                 if data:
                     source = f"日志包 {member}"
         elif seg.source == SOURCE_REPO:

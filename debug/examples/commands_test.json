@@ -85,8 +85,8 @@
         "message_type": "group",
         "group_id": 111111,
         "user_id": 55555,
-        "raw_message": "/maa set max_log_files 3",
-        "message": "/maa set max_log_files 3",
+        "raw_message": "/maa set max_report_images 3",
+        "message": "/maa set max_report_images 3",
         "sender": {
           "user_id": 55555,
           "role": "member"
@@ -104,8 +104,8 @@
         "message_type": "group",
         "group_id": 111111,
         "user_id": 90002,
-        "raw_message": "/maa set max_log_files 3",
-        "message": "/maa set max_log_files 3",
+        "raw_message": "/maa set max_report_images 3",
+        "message": "/maa set max_report_images 3",
         "sender": {
           "user_id": 90002,
           "role": "admin"
@@ -123,8 +123,8 @@
         "message_type": "group",
         "group_id": 222222,
         "user_id": 77777,
-        "raw_message": "/maa set max_log_files 3",
-        "message": "/maa set max_log_files 3",
+        "raw_message": "/maa set max_report_images 3",
+        "message": "/maa set max_report_images 3",
         "sender": {
           "user_id": 77777,
           "role": "admin"
@@ -142,8 +142,8 @@
         "message_type": "group",
         "group_id": 222222,
         "user_id": 55555,
-        "raw_message": "/maa set max_log_files 3",
-        "message": "/maa set max_log_files 3",
+        "raw_message": "/maa set max_report_images 3",
+        "message": "/maa set max_report_images 3",
         "sender": {
           "user_id": 55555,
           "role": "member"
@@ -161,8 +161,8 @@
         "message_type": "group",
         "group_id": 111111,
         "user_id": 90001,
-        "raw_message": "/maa set max_log_files 5",
-        "message": "/maa set max_log_files 5",
+        "raw_message": "/maa set max_report_images 5",
+        "message": "/maa set max_report_images 5",
         "sender": {
           "user_id": 90001,
           "role": "member"
@@ -189,7 +189,7 @@
       },
       "assert": {
         "no_error": true,
-        "reply_contains": "max_log_files = 5"
+        "reply_contains": "max_report_images = 5"
       }
     },
     {
@@ -199,8 +199,8 @@
         "message_type": "group",
         "group_id": 111111,
         "user_id": 90001,
-        "raw_message": "/maa set max_log_files abc",
-        "message": "/maa set max_log_files abc",
+        "raw_message": "/maa set max_report_images abc",
+        "message": "/maa set max_report_images abc",
         "sender": {
           "user_id": 90001,
           "role": "member"
@@ -209,44 +209,6 @@
       "assert": {
         "no_error": true,
         "reply_contains": "值无效"
-      }
-    },
-    {
-      "name": "指令 — repo mode 切换为 agent",
-      "event": {
-        "post_type": "message",
-        "message_type": "group",
-        "group_id": 111111,
-        "user_id": 90001,
-        "raw_message": "/maa repo mode agent",
-        "message": "/maa repo mode agent",
-        "sender": {
-          "user_id": 90001,
-          "role": "member"
-        }
-      },
-      "assert": {
-        "no_error": true,
-        "reply_contains": "已设置"
-      }
-    },
-    {
-      "name": "指令 — repo mode 非法值被拒绝",
-      "event": {
-        "post_type": "message",
-        "message_type": "group",
-        "group_id": 111111,
-        "user_id": 90001,
-        "raw_message": "/maa repo mode banana",
-        "message": "/maa repo mode banana",
-        "sender": {
-          "user_id": 90001,
-          "role": "member"
-        }
-      },
-      "assert": {
-        "no_error": true,
-        "reply_contains": "只能是 inject 或 agent"
       }
     },
     {

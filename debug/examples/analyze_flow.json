@@ -8,7 +8,7 @@
         "notify_group": "123456",
         "settings": {
           "send_progress_message": false,
-          "max_log_files": 3
+          "max_log_file_read_kb": 256
         }
       },
       "关闭组": {

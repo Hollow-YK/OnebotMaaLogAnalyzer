@@ -1,10 +1,11 @@
 # 项目代码参考
 
-开启后，Bot 会在调用 AI 前完成三件事：
+开启后，Bot 会在调用 AI 前完成两件事：
 
-1. **对齐版本** — 优先从压缩包内解析资源版本（如 MFAAvalonia 的 `资源版本：v1.4.7`），否则从文件名提取（如 `MaaXXX-logs-1.0.0-alpha.9-20260907-033044.zip` → `1.0.0-alpha.9`），自动 checkout 对应 tag，使代码参考与日志实际运行的版本一致
-2. **检索代码** — 见下方两种模式
-3. **还原位置** — 分析结束（无论成败）**精确还原到分析前所在的 ref**（分支 / tag / 提交），不会把你的工作分支切走
+1. **对齐版本** — 优先从压缩包内解析资源版本（如 MFAAvalonia 的 `资源版本：v1.4.7`），否则从文件名提取（如 `MaaXXX-logs-1.0.0-alpha.9-20260907-033044.zip` → `1.0.0-alpha.9`），自动 checkout 对应 tag，使代码与日志实际运行的版本一致
+2. **准备好仓库** — 代码检索**完全交给 AI 的只读工具**（`list_dir` / `search_repo` / `read_file` / `list_tags`），Bot 不再预检索、也不再往提示词里拼代码片段
+
+分析结束（无论成败）会**精确还原到分析前所在的 ref**（分支 / tag / 提交），不会把你的工作分支切走。
 
 来源二选一（`path` 优先）：本地已有仓库目录，或 git 主地址与备用镜像。备用镜像按配置顺序依次尝试；克隆到 `data/repo/<安全配置名>` 并复用。
 
@@ -17,16 +18,21 @@
 > 每个来源在克隆前会先用 `git ls-remote` 探测（60 秒，可用预算收紧），无响应的镜像会直接跳过，而不是等到克隆超时。
 > 单次上限由配置决定：浅克隆 `shallow_clone_timeout_seconds`（默认 600s）、后台完整克隆 `preload_timeout_seconds`（默认 1800s，含子模块）、更新默认分支 `update_timeout_seconds`（默认 600s）；`0` 表示沿用内置常量。
 
-## 两种检索模式
+## 检索方式：只用工具
 
-| 模式 | `mode` | 原理 | 耗时 | token 成本 | 适用 |
-| --- | --- | --- | --- | --- | --- |
-| 注入 | `inject`（默认） | Bot 从日志提取标识符 → 正则检索仓库 → 把命中片段拼进提示词 | 快（~1s 检索） | 低（单次调用） | 日常排查 |
-| 自主 | `agent` | 把仓库读写工具交给 AI，由 AI 多轮自主检索 | 慢（多轮往返） | 高（每轮重发上下文） | 疑难问题、需追踪跨文件流程 |
+`repo.mode` 已移除——分析一律由 AI 通过只读工具自主检索（与日志包工具同一套循环）：
 
-> **inject 的局限**：只注入排序后的前 `max_files` 个文件；AI 无法在分析中途追加检索，也无法追踪 `next` 链跨文件跳转；“什么算相关”由 Bot 的正则决定。
->
-> **agent 的代价**：每轮工具调用都要重发全部上下文（真实日志摘要约 170K 字符），token 与耗时成倍上升。受 `max_tool_rounds` / `agent_deadline_seconds` 双重限制。
+```
+模型：search_repo("PVP_Click:StartBattle")
+  → 命中 assets/resource/pipeline/PVP.json:42
+模型：read_file("assets/resource/pipeline/PVP.json", start_line=30, end_line=90)
+  → 读到 threshold / template / roi / expected
+```
+
+- 每轮工具调用都会重发上下文，因此受 `max_tool_rounds`、`max_tool_calls_per_round`、
+  `agent_deadline_seconds` 与上下文预算共同限制；
+- 只读：AI 不能改仓库、不能指定 URL、不能执行任意 Git 命令；
+- 远端更新与版本切换只能通过受限的 `pull_latest` / `checkout_ref` 工具。
 
 ## 配置示例
 
@@ -35,7 +41,6 @@
 "project": {
   "name": "MAK",
   "repo": {
-    "mode": "inject",                            // 或 "agent"
     "path": "E:/Code/MAA/MaaXXX",               // 本地仓库（推荐，无需网络与 git）
     "url": "https://github.com/MAAXYZ/MaaXXX",  // 主地址
     "mirrors": ["https://mirror.example/MaaXXX.git"], // 按顺序备用
@@ -53,8 +58,6 @@
 
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `enabled` | `false` | 是否启用项目代码参考 |
-| `mode` | `inject` | 检索模式：`inject` 或 `agent` |
 | `path` | 空 | 本地仓库目录，**优先于 `url`**，不执行任何仓库代码 |
 | `url` | `https://github.com/MAAXYZ/MaaXXX` | 主 git 地址；始终浅克隆 |
 | `mirrors` | `[]` | 备用 git 地址，按顺序依次尝试，直到一个来源成功 |
@@ -63,35 +66,30 @@
 | `preload_enabled` | `true` | 启动后后台完整克隆一次（全部历史 / tag + 子模块）；关闭时在首次日志到达时浅克隆 |
 | `preload_retries` | `3` | 启动预下载失败时的尝试次数（最大 5 次，间隔递增） |
 | `update_on_analyze` | `false` | 每份日志分析前更新默认分支，然后再对齐日志版本 tag |
-| `allow_ai_update` | `true` | agent 模式允许 AI 用 `pull_latest` 更新当前配置仓库的默认分支；不接受 URL 或 Git 命令 |
+| `allow_ai_update` | `true` | 允许 AI 用 `pull_latest` 更新当前配置仓库的默认分支；不接受 URL 或 Git 命令 |
 | `auto_checkout_version` | `true` | 按压缩包内解析的资源版本（无则用文件名版本）自动切 tag |
 | `allow_ai_switch_tag` | `true` | 允许 AI 获取并切换到其他 tag / commit 复核，与预下载开关无关 |
 | `max_tag_switch_rounds` | `2` | AI 切换 tag 的最大轮次（`0` = 不开放该工具） |
 | `restore_latest_after_analyze` | `true` | 分析结束后还原到分析前的位置 |
 | `refuse_dirty_worktree` | `true` | 工作区有未提交改动时拒绝切换（保护本地开发） |
-| `max_tool_rounds` | `8` | **agent** 工具调用最大轮次 |
-| `max_tool_calls_per_round` | `6` | **agent** 单轮最多执行的工具数 |
-| `max_tool_result_chars` | `30000` | **agent** 单次工具结果字符上限 |
-| `max_tool_result_tokens` | `0` | **agent** 单次工具结果 token 上限；`0` = 由字符上限估算 |
+| `max_tool_rounds` | `8` | 工具调用最大轮次 |
+| `max_tool_calls_per_round` | `6` | 单轮最多执行的工具数 |
+| `max_tool_result_chars` | `30000` | 单次工具结果字符上限 |
+| `max_tool_result_tokens` | `0` | 单次工具结果 token 上限；`0` = 由字符上限估算 |
 | `max_tool_context_tokens` | `0` | 工具结果累计 token 预算；`0` = 不超过上下文预算的 50% |
-| `agent_deadline_seconds` | `600` | **agent** 循环总时长上限 |
+| `agent_deadline_seconds` | `600` | 工具循环总时长上限 |
 | `shallow_clone_timeout_seconds` | `600` | 分析/追问现场**浅克隆**的单次上限（秒）；`0` = 内置 |
 | `preload_timeout_seconds` | `1800` | 后台预下载一次**完整克隆**（含子模块）的总上限（秒）；`0` = 内置 |
 | `update_timeout_seconds` | `600` | 分析/追问里「更新默认分支」的总预算（探测 + fetch，秒）；`0` = 内置 |
 | `extensions` | `json/jsonc/yaml/yml/toml/md/txt` | 参与扫描的文件扩展名 |
 | `max_file_kb` | `256` | 跳过大于该值的文件 KB |
 | `max_scan_files` | `20000` | 单次扫描文件数上限 |
-| `max_files` | `12` | **inject** 注入提示词的文件数上限 |
-| `max_identifiers` | `24` | **inject** 从日志中提取的标识符上限 |
-| `context_lines` | `2` | **inject** 普通命中行的上下文行数 |
-| `max_block_lines` | `150` | **inject** 命中节点定义时展开的 JSON 对象最大行数 |
-| `max_chars` | `60000` | **inject** 代码片段段落字符上限 |
 
 ## 注意事项
 
 > **失败不影响分析**：仓库不存在、git 未安装、克隆失败、tag 不存在或检索异常时，只记录日志并跳过该段落，分析照常进行。
 >
-> **命中节点定义时会自动展开整个 JSON 对象**（inject 模式），因此 `threshold`、`template`、`roi`、`expected` 等关键字段会完整呈现。
+> **关键字段由 AI 自行读取**：`read_file` 读到节点定义附近时，`threshold`、`template`、`roi`、`expected` 等字段会原样出现在工具结果里。
 >
 > **版本号前缀自动兼容**：日志里是 `1.0.0-alpha.9`、仓库 tag 是 `v1.0.0-alpha.9` 也能正确匹配；若日志版本比 tag 更细（带构建号），会退化为前缀匹配。
 >

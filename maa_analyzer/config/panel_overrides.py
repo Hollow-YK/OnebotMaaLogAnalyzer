@@ -160,10 +160,6 @@ VisionDetail = Annotated[
         lambda value: _lower_text(value, {"", "low", "high", "auto"})
     ),
 ]
-RepoSearchMode = Annotated[
-    str,
-    BeforeValidator(lambda value: _lower_text(value, {"", "inject", "agent"})),
-]
 LLMEndpointKind = Literal["openai", "anthropic"]
 
 
@@ -257,7 +253,6 @@ class AnalysisSettingsPatch(PanelPatchModel):
 
     download_concurrency: NonNegativeInt | None = None
     download_timeout_seconds: NonNegativeInt | None = None
-    digest_timeout_seconds: NonNegativeInt | None = None
     ai_stage_timeout_seconds: NonNegativeInt | None = None
     max_context_tokens: NonNegativeInt | None = None
     context_compact_enabled: Mode | None = Field(
@@ -275,50 +270,18 @@ class AnalysisSettingsPatch(PanelPatchModel):
     )
 
     system_prompt: str | None = None
-    log_tools_enabled: Mode | None = Field(
-        default=None, validation_alias="settings_log_tools_enabled_mode"
-    )
     cleanup_after_done: Mode | None = Field(
         default=None, validation_alias="settings_cleanup_after_done_mode"
-    )
-    save_digest_debug: Mode | None = Field(
-        default=None, validation_alias="settings_save_digest_debug_mode"
     )
 
     max_zip_size_mb: NonNegativeInt | None = None
     max_total_uncompressed_mb: NonNegativeInt | None = None
-    max_prompt_chars: NonNegativeInt | None = None
-    max_zip_members: NonNegativeInt | None = None
-    max_log_files: NonNegativeInt | None = None
-    max_maafw_bak_files: NonNegativeInt | None = None
-    max_maafw_bak_mb: NonNegativeInt | None = None
     merge_archive_parts: Mode | None = Field(
         default=None,
         validation_alias="settings_merge_archive_parts_mode",
     )
     archive_part_settle_seconds: FiniteFloat | None = None
     max_log_file_read_kb: NonNegativeInt | None = None
-    small_log_full_read_mb: NonNegativeInt | None = None
-    stream_medium_logs: Mode | None = Field(
-        default=None,
-        validation_alias="settings_stream_medium_logs_mode",
-    )
-    large_log_threshold_mb: NonNegativeInt | None = None
-    max_large_log_read_kb: NonNegativeInt | None = None
-    stream_large_logs: Mode | None = Field(
-        default=None,
-        validation_alias="settings_stream_large_logs_mode",
-    )
-    max_stream_log_mb: NonNegativeInt | None = None
-    max_sections_per_log: NonNegativeInt | None = None
-    max_log_chars: NonNegativeInt | None = None
-    compress_context_noise: Mode | None = Field(
-        default=None,
-        validation_alias="settings_compress_context_noise_mode",
-    )
-    max_recognition_evidence_lines: NonNegativeInt | None = None
-    max_recognition_evidence_chars: NonNegativeInt | None = None
-    log_head_lines: NonNegativeInt | None = None
 
 
 class CommandConfigPatch(PanelPatchModel):
@@ -362,10 +325,6 @@ class RepoConfigPatch(PanelPatchModel):
 
     model_config = ConfigDict(alias_generator=_repo_alias)
 
-    mode: RepoSearchMode | None = Field(
-        default=None,
-        validation_alias="repo_search_mode",
-    )
     path: str | None = None
     url: str | None = None
     mirrors: StringList | None = None
@@ -405,11 +364,6 @@ class RepoConfigPatch(PanelPatchModel):
     extensions: StringList | None = None
     max_file_kb: NonNegativeInt | None = None
     max_scan_files: NonNegativeInt | None = None
-    max_files: NonNegativeInt | None = None
-    max_identifiers: NonNegativeInt | None = None
-    context_lines: NonNegativeInt | None = None
-    max_block_lines: NonNegativeInt | None = None
-    max_chars: NonNegativeInt | None = None
 
 
 class ProjectUIPatch(PanelPatchModel):

@@ -20,24 +20,47 @@ from maa_analyzer.config import (
     synchronize_panel_config,
 )
 from maa_analyzer.core.models import AnalysisSettings, CommandConfig, ConfigLLM, ModelSupports, ProjectConfig, ReportConfig, VisionConfig
-from maa_analyzer.core.llm_pool import LLMPool
+from maa_analyzer.core.llm_pool import LLMPool, validate_llm_config
 from tools.config.editor import _config_defaults
 
 
 class PanelOverrideTests(unittest.TestCase):
-    def test_model_tools_are_always_enabled_with_legacy_settings(self):
-        for legacy in ({}, {"tools": False}, {"tools": True}):
-            with self.subTest(legacy=legacy):
-                supports = ModelSupports.model_validate(legacy)
-                self.assertTrue(supports.tools)
-                self.assertNotIn("tools", supports.model_dump())
+    def test_model_tools_default_enabled_and_can_be_disabled(self):
+        self.assertTrue(ModelSupports.model_validate({}).tools)
+        self.assertTrue(ModelSupports.model_validate({"tools": True}).tools)
+        self.assertFalse(ModelSupports.model_validate({"tools": False}).tools)
+        self.assertIn("tools", ModelSupports.model_validate({}).model_dump())
 
-    def test_legacy_disabled_tools_model_remains_a_candidate(self):
+    def test_tools_disabled_model_is_not_a_candidate(self):
         pool = LLMPool({"providers": [{"name": "main", "base_url": "https://example.com",
                                       "models": [{"model": "model", "supports": {"tools": False}}]}]})
         config = ConfigLLM.model_validate({"models": [{"name": "main", "model": "model"}]})
-        self.assertTrue(pool.has_capability(config, "tools"))
+        self.assertFalse(pool.has_capability(config, "tools"))
         self.assertFalse(pool.has_capability(config, "vision"))
+
+    def test_tools_disabled_candidate_is_rejected_by_validation(self):
+        errors = validate_llm_config(
+            {"providers": [{
+                "name": "main",
+                "base_url": "https://example.com",
+                "models": [{"model": "model", "supports": {"tools": False}}],
+            }]},
+            {"Alpha": {"llm": {"models": [{"name": "main", "model": "model"}]}}},
+        )
+        self.assertTrue(
+            any("不支持工具调用" in error for error in errors), errors
+        )
+
+    def test_tools_enabled_candidate_passes_validation(self):
+        errors = validate_llm_config(
+            {"providers": [{
+                "name": "main",
+                "base_url": "https://example.com",
+                "models": [{"model": "model", "supports": {"tools": True}}],
+            }]},
+            {"Alpha": {"llm": {"models": [{"name": "main", "model": "model"}]}}},
+        )
+        self.assertEqual(errors, [])
 
     def test_repo_is_always_enabled_with_legacy_settings(self):
         for legacy in ({}, {"enabled": False}, {"enabled": True}):
@@ -471,23 +494,16 @@ class PanelOverrideTests(unittest.TestCase):
             "followup_max_turns", "followup_max_sessions",
             "history_max_records", "history_max_total_mb",
             "download_concurrency",
-            "download_timeout_seconds", "digest_timeout_seconds",
+            "download_timeout_seconds",
             "ai_stage_timeout_seconds", "max_context_tokens",
             "context_compact_enabled", "context_compact_ratio",
             "context_retain_ratio", "context_prune_tool_result_tokens",
             "context_summary_tokens", "analysis_cache_hours",
             "circuit_breaker_enabled", "system_prompt",
-            "log_tools_enabled", "cleanup_after_done", "save_digest_debug",
+            "cleanup_after_done",
             "max_zip_size_mb", "max_total_uncompressed_mb",
-            "max_prompt_chars", "max_zip_members", "max_log_files",
-            "max_maafw_bak_files", "max_maafw_bak_mb", "merge_archive_parts",
+            "merge_archive_parts",
             "archive_part_settle_seconds", "max_log_file_read_kb",
-            "small_log_full_read_mb", "stream_medium_logs",
-            "large_log_threshold_mb", "max_large_log_read_kb",
-            "stream_large_logs", "max_stream_log_mb", "max_sections_per_log",
-            "max_log_chars", "compress_context_noise",
-            "max_recognition_evidence_lines",
-            "max_recognition_evidence_chars", "log_head_lines",
         }
         mapped_settings = set(AnalysisSettingsPatch.model_fields)
         self.assertLessEqual(expected, mapped_settings)
@@ -520,7 +536,6 @@ class PanelOverrideTests(unittest.TestCase):
             self._config(),
             {
                 "default_config": "Alpha",
-                "repo_search_mode": "agent",
                 "repo_path": " /repos/maa ",
                 "repo_url": "https://example.com/maa.git",
                 "repo_mirrors": [" https://mirror.example/maa.git ", ""],
@@ -544,15 +559,9 @@ class PanelOverrideTests(unittest.TestCase):
                 "repo_extensions": [" .json ", ".yaml", ""],
                 "repo_max_file_kb": 512,
                 "repo_max_scan_files": 5000,
-                "repo_max_files": 8,
-                "repo_max_identifiers": 12,
-                "repo_context_lines": 4,
-                "repo_max_block_lines": 80,
-                "repo_max_chars": 30000,
             },
         )
         repo = result["bot"]["configs"]["Alpha"]["project"]["repo"]
-        self.assertEqual(repo["mode"], "agent")
         self.assertEqual(repo["path"], "/repos/maa")
         self.assertEqual(repo["url"], "https://example.com/maa.git")
         self.assertEqual(repo["mirrors"], ["https://mirror.example/maa.git"])
@@ -576,17 +585,6 @@ class PanelOverrideTests(unittest.TestCase):
         self.assertEqual(repo["extensions"], [".json", ".yaml"])
         self.assertEqual(repo["max_file_kb"], 512)
         self.assertEqual(repo["max_scan_files"], 5000)
-        self.assertEqual(repo["max_files"], 8)
-        self.assertEqual(repo["max_identifiers"], 12)
-        self.assertEqual(repo["context_lines"], 4)
-        self.assertEqual(repo["max_block_lines"], 80)
-        self.assertEqual(repo["max_chars"], 30000)
-
-    def test_invalid_repo_search_mode_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "repo_search_mode"):
-            apply_panel_overrides(
-                self._config(), {"repo_search_mode": "browse"}
-            )
 
     def test_invalid_advanced_float_and_mode_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "report_device_scale_factor"):

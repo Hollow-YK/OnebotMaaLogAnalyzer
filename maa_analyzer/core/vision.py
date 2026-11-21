@@ -106,16 +106,16 @@ def read_repo_image(root: Optional[Path], rel: str,
         return None
 
 
-def select_error_screenshots(digest: Any, vision: VisionConfig,
+def select_error_screenshots(archive: Any, vision: VisionConfig,
                              already: int = 0) -> list[tuple[str, bytes]]:
     """
     从摘要里的 on_error 截图清单挑出可直接注入的图片。
 
     返回 [(路径, 字节)]，最多 `max_images - already` 张。
     """
-    if digest is None or not vision.enabled or not vision.attach_error_screenshots:
+    if archive is None or not vision.enabled or not vision.attach_error_screenshots:
         return []
-    zip_path = str(getattr(digest, "zip_path", "") or "")
+    zip_path = str(getattr(archive, "zip_path", "") or "")
     if not zip_path:
         return []
     room = max(0, int(vision.max_images or 0) - max(0, already))
@@ -123,7 +123,7 @@ def select_error_screenshots(digest: Any, vision: VisionConfig,
         return []
     limit = max_image_bytes(vision)
     picked: list[tuple[str, bytes]] = []
-    for rel in (getattr(digest, "error_images", None) or []):
+    for rel in (getattr(archive, "error_images", None) or []):
         if len(picked) >= room:
             break
         data = read_zip_image(zip_path, rel, limit)

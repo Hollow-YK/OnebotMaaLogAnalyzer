@@ -31,7 +31,6 @@ def default_config() -> dict:
                         "archive_match_mode": "auto",
                         "require_log_layout": True,
                         "repo": {
-                            "mode": "inject",
                             "path": "",
                             "url": "https://github.com/MAAXYZ/MaaXXX",
                             "mirrors": [],

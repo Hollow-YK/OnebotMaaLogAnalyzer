@@ -84,13 +84,13 @@ class CommandConfig(BaseModel):
 
 
 class ModelSupports(BaseModel):
-    """模型能力声明：决定候选模型能否满足某次调用。"""
+    """模型能力声明：决定候选模型能否满足某次调用。
 
-    @property
-    def tools(self) -> bool:
-        """模型始终按支持工具调用处理，忽略旧配置中的声明。"""
-        return True
+    本版本的分析一律通过工具读取日志与项目代码，因此**不再支持不支持
+    工具调用的模型**：`tools` 为假时配置校验会直接报错，而不是静默降级。
+    """
 
+    tools: bool = True
     vision: bool = False
     json_mode: bool = False
 
@@ -235,10 +235,13 @@ class RepoConfig(BaseModel):
       - url:  git 仓库地址；mirrors 按顺序作为备用来源
         预下载开启 → 完整克隆并初始化子模块；关闭 → 浅克隆并按需拉取
 
+    AI 一律通过只读工具（list_dir / search_repo / read_file / list_tags）
+    自主检索，远端更新与版本切换只能通过受限的专用工具执行。
+
     版本切换：
-      - 从日志包文件名提取版本号（如 ...-logs-1.0.0-alpha.9-20260907-033044.zip），
-        自动 checkout 对应 tag，使代码参考与日志实际运行的版本一致
-      - allow_ai_switch_tag 开启时，AI 可在限定轮次内获取其他 tag / commit 复核
+      - 从日志包文件名或运行环境解析出的版本号，自动 checkout 对应 tag，
+        使代码与日志实际运行的版本一致
+      - allow_ai_switch_tag 开启时，AI 可在限定轮次内获取其他 tag / commit
         （与预下载开关无关）
       - 分析结束后还原到分析前的分支、tag 或提交
     """
@@ -247,11 +250,6 @@ class RepoConfig(BaseModel):
     def enabled(self) -> bool:
         """项目代码参考始终开启，忽略旧配置中的开关。"""
         return True
-
-    # ── 检索模式 ──
-    # inject: 预检索后把命中片段拼进提示词（快、省 token，默认）
-    # agent:  把仓库读写工具交给 AI，由 AI 自主多轮检索（深、token 消耗高）
-    mode: str = "inject"
 
     # ── 来源 ──
     path: str = ""
@@ -287,27 +285,20 @@ class RepoConfig(BaseModel):
     restore_latest_after_analyze: bool = True
     refuse_dirty_worktree: bool = True      # 工作区有未提交改动时拒绝切换（保护本地开发）
 
-    # ── agent 模式 ──
+    # ── 工具调用 ──
     max_tool_rounds: int = 8           # 工具调用最大轮次
     max_tool_calls_per_round: int = 6  # 单轮最多执行的工具数
     max_tool_result_chars: int = 30000  # 单次工具结果字符上限
     max_tool_result_tokens: int = 0    # 0 = 由 max_tool_result_chars 估算推导
     max_tool_context_tokens: int = 0   # 0 = 不超过本次上下文预算的 50%
-    agent_deadline_seconds: int = 600  # agent 循环总时长上限
+    agent_deadline_seconds: int = 600  # 工具循环总时长上限
 
-    # ── 扫描范围 ──
+    # ── 检索范围 ──
     extensions: List[str] = Field(
         default_factory=lambda: [".json", ".jsonc", ".yaml", ".yml", ".toml", ".md", ".txt"]
     )
-    max_file_kb: int = 256            # 跳过大于该值的文件
-    max_scan_files: int = 20000       # 单次扫描文件数上限
-    max_files: int = 12               # 注入提示词的文件数上限
-
-    # ── 注入提示词 ──
-    max_identifiers: int = 24         # 从日志中提取的标识符上限
-    context_lines: int = 2            # 命中行前后附带的上下文行数
-    max_block_lines: int = 150        # 命中 JSON 对象定义时展开的最大行数
-    max_chars: int = 60000            # 代码片段段落字符上限
+    max_file_kb: int = 256            # 工具读取/跳过大于该值的文件
+    max_scan_files: int = 20000       # 单次搜索扫描文件数上限
 
     model_config = {"populate_by_name": True, "alias_generator": _to_camel}
 
@@ -328,10 +319,6 @@ class RepoConfig(BaseModel):
     def git_ops_allowed(self) -> bool:
         """是否需要（且允许）对仓库执行 git 切换操作。"""
         return self.auto_checkout_version or self.allow_ai_switch_tag
-
-    def use_agent(self) -> bool:
-        """是否使用 agent 自主检索模式。"""
-        return str(self.mode or "").strip().lower() == "agent"
 
 
 _UI_KEY_ALIASES = {
@@ -420,7 +407,7 @@ class ProjectConfig(BaseModel):
         文件名初筛（下载前）。
 
         内容特征识别始终在下载后进行，见 `require_log_layout` 与
-        `DigestResult.is_log_archive`。
+        `ArchiveInfo.is_log_archive`。
         """
         name = normalize_archive_name(file_name)
         if not name.lower().endswith(".zip"):
@@ -492,7 +479,6 @@ class AnalysisSettings(BaseModel):
     # 因此不再提供「同配置并发分析数」；单次分析内的分卷下载仍可按下面的下载并发并行。
     download_concurrency: int = 2
     download_timeout_seconds: int = 120
-    digest_timeout_seconds: int = 0
     # 整个 AI 阶段（含工具循环与收敛）的总时长上限
     ai_stage_timeout_seconds: int = 300
     # 0 = 用 llm.defaults.max_context_tokens；非 0 时按配置覆盖
@@ -516,28 +502,15 @@ class AnalysisSettings(BaseModel):
     # ── 模型调用 ──
     system_prompt: str = ""
 
-    # ── 日志包工具（让 AI 像读仓库一样读日志包原始文件）──
-    # 开启后，分析会走工具模式：
-    # 模型可调用 log_search / log_read_file / log_list_files 直接查压缩包内容，
-    # 而不是只能看到摘要里已提取的部分。追问同样适用。
-    log_tools_enabled: bool = True
-
     # ── 临时文件 ──
     cleanup_after_done: bool = True
-    save_digest_debug: bool = False
 
-    # ── 压缩包与摘要 ──
+    # ── 压缩包 ──
     max_zip_size_mb: int = 100
     # 解压后总大小上限（MB）：下载完成后只读 zip 中央目录求和，
-    # 超限直接判定“内容过多”并跳过整次分析（不提取摘要、不调用 AI）。
+    # 超限直接判定“内容过多”并跳过整次分析（不索引、不调用 AI）。
     # 通过之后下游不再比对总量。
     max_total_uncompressed_mb: int = 1024
-    max_prompt_chars: int = 200000
-    max_zip_members: int = 300
-    max_log_files: int = 6
-    max_maafw_bak_files: int = 1
-    # 单个 maafw.bak 日志的大小上限（MB）；0 = 不限制。避免误扫数百 MB 备份
-    max_maafw_bak_mb: int = 64
     # 分卷日志包（*-part01.zip / *-part02.zip）自动合并分析
     merge_archive_parts: bool = True
     # 分卷包静默期：每收到一个新分卷就重新计时，连续该秒数无新分卷后才分析
@@ -552,19 +525,8 @@ class AnalysisSettings(BaseModel):
     # 额外等待用尽后仍不完整：analyze = 照常分析，并在提示词与报告里标注缺失；
     # cancel = 取消本次分析并提示补齐后重传
     archive_part_incomplete_action: str = "analyze"
+    # 日志包工具：单次读取窗口 / 结果上限（见 core/models.RepoConfig 的工具段）
     max_log_file_read_kb: int = 512
-    small_log_full_read_mb: int = 5
-    stream_medium_logs: bool = True
-    large_log_threshold_mb: int = 50
-    max_large_log_read_kb: int = 256
-    stream_large_logs: bool = True
-    max_stream_log_mb: int = 0
-    max_sections_per_log: int = 60
-    max_log_chars: int = 120000
-    compress_context_noise: bool = True
-    max_recognition_evidence_lines: int = 60
-    max_recognition_evidence_chars: int = 35000
-    log_head_lines: int = 16
 
     model_config = {"populate_by_name": True, "alias_generator": _to_camel}
 

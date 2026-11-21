@@ -81,10 +81,6 @@ ARCHIVE_MODES = (
     ("prefix", "prefix — 仅前缀识别"),
     ("any", "any — 任意 zip 都下载检查"),
 )
-REPO_MODES = (
-    ("inject", "inject — 预检索后注入提示词（省 token）"),
-    ("agent", "agent — 交给 AI 自主多轮检索（深、费 token）"),
-)
 RENDER_MODES = (
     ("auto", "auto — 能用浏览器就出图"),
     ("image", "image — 强制出图"),
@@ -288,8 +284,6 @@ def validate_document(cfg: Any) -> dict:
         if repo:
             if not str(repo.get("path") or "").strip() and not str(repo.get("url") or "").strip():
                 errors.append(f"配置「{display}」启用了仓库但没有填 path 或 url")
-            if str(repo.get("mode") or "inject") not in {"inject", "agent"}:
-                errors.append(f"配置「{display}」的 repo.mode 只能是 inject 或 agent")
 
         report = spec.get("report") if isinstance(spec.get("report"), dict) else {}
         template_name = str(report.get("template") or "").strip()
@@ -441,7 +435,6 @@ def collect_meta() -> dict:
             "onebot.mode": [{"value": key, "label": label} for key, label in ONEBOT_MODES],
             "project.archive_match_mode": [{"value": key, "label": label}
                                            for key, label in ARCHIVE_MODES],
-            "repo.mode": [{"value": key, "label": label} for key, label in REPO_MODES],
             "report.render": [{"value": key, "label": label} for key, label in RENDER_MODES],
             "vision.detail": [{"value": key, "label": label} for key, label in VISION_DETAILS],
             "provider.kind": [{"value": key, "label": label} for key, label in PROVIDER_KINDS],
@@ -911,7 +904,6 @@ const LABELS = {
   'project.archive_match_mode': '日志包识别方式',
   'project.file_prefix': '文件名前缀',
   'project.require_log_layout': '要求日志布局特征',
-  'repo.mode': '检索模式',
   'repo.path': '本地仓库路径',
   'repo.url': '仓库地址',
   'repo.mirrors': '镜像地址',
@@ -989,7 +981,6 @@ const LABELS = {
   'settings.history_max_total_mb': '历史体积上限（MB）',
   'settings.download_concurrency': '下载并发',
   'settings.download_timeout_seconds': '下载超时（秒）',
-  'settings.digest_timeout_seconds': '摘要超时（秒）',
   'settings.ai_stage_timeout_seconds': 'AI 阶段总时长（秒）',
   'settings.max_context_tokens': '上下文 token 上限',
   'settings.context_compact_enabled': '自动压缩上下文',
@@ -1000,34 +991,15 @@ const LABELS = {
   'settings.analysis_cache_hours': '结果缓存（小时）',
   'settings.circuit_breaker_enabled': '启用熔断',
   'settings.system_prompt': '追加系统提示词',
-  'settings.log_tools_enabled': '启用日志包工具',
   'settings.cleanup_after_done': '完成后清理临时文件',
-  'settings.save_digest_debug': '保存摘要调试文件',
   'settings.max_zip_size_mb': '压缩包上限（MB）',
   'settings.max_total_uncompressed_mb': '解压总量上限（MB，超限直接跳过分析）',
-  'settings.max_prompt_chars': '提示词字符上限',
-  'settings.max_zip_members': '成员数上限',
-  'settings.max_log_files': '日志文件数上限',
-  'settings.max_maafw_bak_files': 'maafw.bak 数量上限',
-  'settings.max_maafw_bak_mb': 'maafw.bak 大小上限（MB）',
   'settings.merge_archive_parts': '合并分卷日志包',
   'settings.archive_part_settle_seconds': '分卷静默期（秒）',
   'settings.archive_part_require_content': '分卷齐全性要求含日志正文',
   'settings.archive_part_wait_extra_rounds': '不完整时额外等待轮数',
   'settings.archive_part_incomplete_action': '仍不完整时 analyze/cancel',
   'settings.max_log_file_read_kb': '单次读取上限（KB）',
-  'settings.small_log_full_read_mb': '小日志全读阈值（MB）',
-  'settings.stream_medium_logs': '流式读取中等日志',
-  'settings.large_log_threshold_mb': '大日志阈值（MB）',
-  'settings.max_large_log_read_kb': '大日志单次读取（KB）',
-  'settings.stream_large_logs': '流式读取大日志',
-  'settings.max_stream_log_mb': '流式日志上限（MB）',
-  'settings.max_sections_per_log': '每日志分段上限',
-  'settings.max_log_chars': '日志字符上限',
-  'settings.compress_context_noise': '压缩上下文噪声',
-  'settings.max_recognition_evidence_lines': '识别证据行数上限',
-  'settings.max_recognition_evidence_chars': '识别证据字符上限',
-  'settings.log_head_lines': '日志头部行数',
   'commands.enabled': '启用指令',
   'commands.prefix': '指令前缀',
   'commands.owners': '超级管理员 QQ',
@@ -1076,7 +1048,6 @@ const HELP = {
   'project.archive_match_mode': 'auto 适合大多数情况：先按文件名初筛，再按内容确认。',
   'project.require_log_layout': '开启后会检查压缩包里是否有 MaaFramework 的日志目录结构。',
   'repo.path': '指向本地仓库目录时无需网络与 git，优先级高于 url。',
-  'repo.mode': 'inject 快且省 token；agent 让 AI 自己多轮检索，理解更深但更贵。',
   'repo.refuse_dirty_worktree': '本地仓库有未提交改动时拒绝切换 tag，避免打断开发。',
   'repo.extensions': '注入提示词时允许读取的文件类型。',
   'vision.max_images': '一次请求最多附带的图片数量，注意模型上下文与费用。',
@@ -1090,7 +1061,6 @@ const HELP = {
   'settings.context_prune_tool_result_tokens': '压缩时历史工具结果裁剪到的 token 上限。',
   'settings.context_summary_tokens': '压缩摘要本身的目标 token 上限。',
   'settings.followup_window_minutes': '0 = 跟随历史保留期。',
-  'settings.max_log_chars': '进入提示词的日志字符上限，越大越贵。',
   'commands.read_level': '0 任何人 / 1 管理员 / 2 超管。',
   'llm.models': '按顺序尝试：前面的失败（401 除外）会顺延到下一个候选。',
   'provider.base_url': 'openai 填 …/v1；anthropic 填 …（自动补 /v1/messages），例如 https://api.deepseek.com/anthropic。',
@@ -1108,36 +1078,26 @@ const SETTINGS_GROUPS = [
     'followup_max_sessions']],
   ['分析历史', ['history_enabled', 'history_period_hours', 'history_keep_periods',
     'history_max_records', 'history_max_total_mb']],
-  ['并发与超时', ['download_concurrency', 'download_timeout_seconds',
-    'digest_timeout_seconds', 'ai_stage_timeout_seconds', 'max_context_tokens',
-    'analysis_cache_hours', 'circuit_breaker_enabled']],
   ['上下文压缩', ['context_compact_enabled', 'context_compact_ratio',
     'context_retain_ratio', 'context_prune_tool_result_tokens',
     'context_summary_tokens']],
-  ['模型', ['system_prompt', 'log_tools_enabled']],
-  ['临时文件', ['cleanup_after_done', 'save_digest_debug']],
-  ['压缩包与摘要', ['max_zip_size_mb', 'max_total_uncompressed_mb', 'max_prompt_chars',
-    'max_zip_members', 'max_log_files', 'max_maafw_bak_files', 'max_maafw_bak_mb',
+  ['模型', ['system_prompt']],
+  ['临时文件', ['cleanup_after_done']],
+  ['压缩包与日志处理', ['max_zip_size_mb', 'max_total_uncompressed_mb',
     'merge_archive_parts', 'archive_part_settle_seconds',
     'archive_part_require_content', 'archive_part_wait_extra_rounds',
-    'archive_part_incomplete_action', 'max_log_file_read_kb',
-    'small_log_full_read_mb', 'stream_medium_logs', 'large_log_threshold_mb',
-    'max_large_log_read_kb', 'stream_large_logs', 'max_stream_log_mb',
-    'max_sections_per_log', 'max_log_chars', 'compress_context_noise',
-    'max_recognition_evidence_lines', 'max_recognition_evidence_chars', 'log_head_lines']],
+    'archive_part_incomplete_action', 'max_log_file_read_kb']],
 ];
 
 const REPO_GROUPS = [
-  ['基本', ['mode']],
   ['来源', ['path', 'url', 'mirrors', 'branch', 'default_branch']],
   ['预下载与更新', ['preload_enabled', 'preload_retries', 'update_on_analyze', 'allow_ai_update',
     'preload_timeout_seconds', 'update_timeout_seconds', 'shallow_clone_timeout_seconds']],
   ['版本切换', ['auto_checkout_version', 'allow_ai_switch_tag', 'max_tag_switch_rounds',
     'restore_latest_after_analyze', 'refuse_dirty_worktree']],
-  ['agent 模式', ['max_tool_rounds', 'max_tool_calls_per_round', 'max_tool_result_chars',
+  ['工具调用', ['max_tool_rounds', 'max_tool_calls_per_round', 'max_tool_result_chars',
     'max_tool_result_tokens', 'max_tool_context_tokens', 'agent_deadline_seconds']],
-  ['扫描范围', ['extensions', 'max_file_kb', 'max_scan_files', 'max_files']],
-  ['注入提示词', ['max_identifiers', 'context_lines', 'max_block_lines', 'max_chars']],
+  ['检索范围', ['extensions', 'max_file_kb', 'max_scan_files']],
 ];
 
 const REPORT_GROUPS = [

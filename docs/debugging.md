@@ -34,7 +34,7 @@ debug> quit                                           # 退出
 | `clear` / `quit` | 清屏 / 退出 |
 
 > 调试模式下 `download_url` 会自动生成一个最小 MaaXXX 日志包，
-> 因此无需准备真实 zip 即可跑通「下载 → 摘要 → AI」完整链路（AI 输出为模拟内容）。
+> 因此无需准备真实 zip 即可跑通「下载 → 索引 → AI」完整链路（AI 输出为模拟内容）。
 
 ## HTTP 调试端点
 
@@ -123,12 +123,12 @@ python -c "import asyncio,shutil;from debug.runner import run_test_file;from deb
 | --- | --- |
 | `smoke_test.json` | 日志包与文本消息边界 |
 | `analyze_flow.json` | 端到端流程与边界情况 |
-| `repo_lookup.json` | 项目代码参考（inject / agent） |
+| `repo_lookup.json` | 项目代码参考与仓库工具 |
 | `commands_test.json` | 指令权限 / 附图 / 追问答疑 |
 | `history_test.json` | 历史归档 / 周期清理 / 跨天追问 |
 | `attachment_safety.json` | 附件来源 / 相对路径 / 敏感文件防护 |
 | `followup_restart.json` | **重启后继续追问**（真实子进程重启） |
-| `followup_repo.json` | 重启后 agent 模式仓库工具仍可用 |
+| `followup_repo.json` | 重启后仓库工具仍可用 |
 | `followup_repo_attach.json` | 重启后 `@项目` 附件仍可取到 |
 | `followup_tool_loop.json` | 模型只检索不输出正文时仍须给出回答 |
 | `followup_converge_fallback.json` | 模型连收敛都不配合时的兜底回复 |

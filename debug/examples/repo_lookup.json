@@ -1,6 +1,6 @@
 {
-  "name": "项目代码参考 — 仓库检索注入验证",
-  "description": "验证开启 repo 后，Bot 会从日志摘要提取标识符、检索项目代码，并把节点定义注入提示词；关闭时不注入。",
+  "name": "项目代码参考 — 工具检索验证",
+  "description": "验证开启 repo 后，Bot 只准备仓库并把只读工具交给 AI，不再把代码片段注入提示词；关闭仓库或路径无效时分析照常完成。",
   "setup": {
     "mock_repo": {
       "assets/resource/pipeline/StartUp.json": {
@@ -64,11 +64,7 @@
           "send_progress_message": false
         },
         "project": {
-          "repo": {
-            "enabled": true,
-            "max_files": 4,
-            "max_chars": 20000
-          },
+          "repo": {},
           "name": "MaaXXX"
         }
       },
@@ -81,9 +77,7 @@
           "send_progress_message": false
         },
         "project": {
-          "repo": {
-            "enabled": false
-          },
+          "repo": {},
           "name": "MaaXXX"
         }
       },
@@ -97,7 +91,6 @@
         },
         "project": {
           "repo": {
-            "enabled": true,
             "path": "Z:/definitely/not/a/real/repo/path"
           },
           "name": "MaaXXX"
@@ -113,8 +106,6 @@
         },
         "project": {
           "repo": {
-            "enabled": true,
-            "mode": "agent",
             "max_tool_rounds": 3,
             "max_tool_calls_per_round": 2
           },
@@ -159,7 +150,7 @@
   },
   "scenarios": [
     {
-      "name": "开启仓库 — 提示词包含项目代码参考段落",
+      "name": "开启仓库 — 只提供工具，提示词不含代码片段",
       "event": {
         "post_type": "notice",
         "notice_type": "group_upload",
@@ -174,11 +165,17 @@
       "assert": {
         "no_error": true,
         "reply_contains": "MaaXXX 日志分析结果",
-        "prompt_contains": "项目代码参考"
+        "prompt_not_contains": "项目代码参考",
+        "system_prompt_contains": "工具模式补充说明",
+        "tools_include": [
+          "search_repo",
+          "read_file",
+          "log_search"
+        ]
       }
     },
     {
-      "name": "开启仓库 — 注入命中节点定义（含阈值与模板）",
+      "name": "开启仓库 — 不再预检索注入节点定义",
       "event": {
         "post_type": "notice",
         "notice_type": "group_upload",
@@ -192,12 +189,15 @@
       },
       "assert": {
         "no_error": true,
-        "prompt_contains": "assets/resource/pipeline/StartUp.json",
-        "prompt_not_contains": "Some_Other_Node"
+        "prompt_not_contains": [
+          "assets/resource/pipeline/StartUp.json",
+          "已命中标识符",
+          "Some_Other_Node"
+        ]
       }
     },
     {
-      "name": "关闭仓库 — 提示词不含项目代码参考段落",
+      "name": "关闭仓库 — 提示词不含代码参考，日志工具仍可用",
       "event": {
         "post_type": "notice",
         "notice_type": "group_upload",
@@ -216,7 +216,7 @@
       }
     },
     {
-      "name": "仓库路径无效 — 跳过代码参考但分析正常完成",
+      "name": "仓库路径无效 — 跳过仓库工具但分析正常完成",
       "event": {
         "post_type": "notice",
         "notice_type": "group_upload",
@@ -236,7 +236,7 @@
       }
     },
     {
-      "name": "agent 模式 — AI 自主调用仓库工具",
+      "name": "工具模式 — AI 调用仓库工具检索",
       "event": {
         "post_type": "notice",
         "notice_type": "group_upload",
@@ -256,7 +256,7 @@
       }
     },
     {
-      "name": "agent 模式 — 不注入预检索片段（由 AI 自主检索）",
+      "name": "工具模式 — 不注入预检索片段（由 AI 自主检索）",
       "event": {
         "post_type": "notice",
         "notice_type": "group_upload",

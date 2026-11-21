@@ -2,7 +2,7 @@
 
 基于 **[OneBot v11 标准协议](https://github.com/botuniverse/onebot-11)** 的 MaaXXX 日志分析 Bot。同一套分析、LLM、配置、历史、追问与报告内核支持两种部署形态：裸 OneBot 进程，或 AstrBot 的 AIOCQHTTP 插件。
 
-监听群内上传的日志压缩包，自动下载并提取错误片段、配置摘要与错误截图列表，再用专用的日志诊断提示词调用 AI 分析，把结论与相关图片发回群内。
+监听群内上传的日志压缩包，自动下载并识别其结构（UI 布局、版本、错误截图与配置清单），再由 AI 用只读工具自行检索日志与项目代码，把结论与相关图片发回群内。
 
 支持 **MXU**（`*-logs-<版本>-<时间戳>.zip`）、**MFAAvalonia**（`log_<时间戳>.zip`）、**MaaFwApp**（`maafw_logs_<时间戳>.zip`）、**MaaTauriAndroid**（`maa_tauri_android-logs-*.zip`）、**MWU**（`mwu-logs.zip`）、**MFW-PyQt6**（`*-<版本>-<时间戳>.zip`）等 UI 的日志包，并自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版本；分卷包 `*-partNN.zip` 会自动合并分析。
 
@@ -13,13 +13,13 @@
 - **双入口部署** — `python main.py` 可继续作为裸 OneBot Bot 运行；也可安装为 AstrBot 插件，由 AstrBot 的 AIOCQHTTP 适配器收发消息，不需要再启动一个裸 Bot 进程
 - **自动分析** — 匹配到日志包立即下载分析，无需任何人操作
 - **多 UI 适配** — 自动识别 MXU / MFAAvalonia / MaaFwApp / MaaTauriAndroid / MWU / MFW-PyQt6 日志包布局与命名，解析 UI 类型、软件版本、资源版本、MaaFramework 版本；**无需配置文件名前缀**，下载后校验布局避免误判；自动合并分卷包
-- **智能摘要** — 按 UI 布局选择框架日志 / UI 日志 / 运行记录，提取错误/警告/失败/异常/OCR 识别失败片段与配置摘要；大日志流式扫描，按签名去重只保留关键片段
-- **AI 可读原始文件** — 摘要之外，AI 可用工具自主检索**日志压缩包**与**项目代码仓库**内的原始内容（只读；压缩包按需解压：历史开启时随记录保留供追问复用，关闭时落临时目录、分析结束即删）
+- **日志包结构说明** — 按自动识别出的 UI 布局（MXU / MFAAvalonia / MaaFwApp / MaaTauriAndroid / MWU / MFW）生成固定格式说明：目录与文件的作用、版本信息、错误截图与配置清单
+- **AI 自行读日志** — 不把日志摘要塞进提示词；AI 用工具自主检索**日志压缩包**与**项目代码仓库**的原始内容（只读；压缩包按需解压：历史开启时随记录保留供追问复用，关闭时落临时目录、分析结束即删）
 - **图片化报告** — 报告正文、截图与文件卡片由无头浏览器渲染成图片发送，取消单条 3500 字限制；浏览器缺失时自动回退纯文本
 - **多模态看图** — 错误截图可自动注入视觉模型；AI 也可用 `[看图@日志: xxx.png]` 主动请求查看（不发送给用户）
 - **模型自主附件** — AI 用 `[附件@日志: xxx.png]` / `[附件@项目: yyy.json]` 声明，Bot 按来源与相对路径取出；图片内联、文件上传群文件
 - **引用式追问答疑** — **引用 Bot 的分析结果消息**即可继续提问，普通发言不会触发；分析历史归档使追问可**跨越数天**
-- **项目代码参考** — 可选配置 MaaFW 项目仓库，按日志包文件名中的版本号自动切到对应 tag，让 AI 对照源码确认问题；支持 **inject**（预检索注入，快）与 **agent**（AI 自主检索，深）两种模式
+- **项目代码参考** — 可选配置 MaaFW 项目仓库，按解析出的版本号自动切到对应 tag，AI 用只读工具（`search_repo` / `read_file` 等）对照源码确认问题
 - **QQ 指令** — `/maa` 系列指令查看/修改配置，带三级权限控制，可整体关闭
 - **多群配置** — 每个配置独立管理监听群、通知群、分析设置与任务记录
 - **调试模式** — 无需真实 OneBot 服务端即可注入模拟事件，CLI REPL + HTTP 端点 + JSON 批量测试
@@ -87,9 +87,9 @@ python main.py               # 首次运行生成 config.json
       "archive_match_mode": "auto",
       // 未知 UI 的日志包开关；六种已知 UI 始终启用
       "ui": { "auto": { "enabled": true } },
-      "repo": { "mode": "agent", "url": "https://github.com/..." }
+      "repo": { "url": "https://github.com/..." }
     },
-    "settings": { "max_log_files": 6 }
+    "settings": { "max_log_file_read_kb": 512 }
   }
 }
 ```
@@ -100,7 +100,7 @@ python main.py               # 首次运行生成 config.json
 [群员] 上传 MaaXXX-logs-20260907-033044.zip
 [Bot]  检测到日志包：MaaXXX-logs-20260907-033044.zip
        正在下载并分析，请稍等。
-[Bot]  摘要完成，提取到 5 个日志文件、2 张错误截图，正在调用 AI。
+[Bot]  格式识别完成（5 个日志文件、2 张错误截图），正在调用 AI 检索日志。
 [Bot]  MaaXXX 日志分析结果
        运行环境：MFAAvalonia
        软件版本：v2.16.2
@@ -166,12 +166,12 @@ MaaFwApp 取 `device_info.txt` 的 `Version` / `MaaFwApp` / `Framework`；MaaTau
 | 文档 | 内容 |
 | --- | --- |
 | [配置](docs/configuration.md) | `config.json` 全部字段、多群配置、通信模式、模型选择建议 |
-| [分析设置](docs/settings.md) | 全部设置项（触发 / 附件 / 追问 / 历史 / 摘要 / 并发 / 模型） |
+| [分析设置](docs/settings.md) | 全部设置项（触发 / 附件 / 追问 / 历史 / 压缩包 / 并发 / 模型） |
 | [QQ 指令](docs/commands.md) | `/maa` 指令清单与三级权限控制 |
 | [结果附件](docs/attachments.md) | 来源限定、相对路径沙箱、敏感文件保护、图文混排 |
 | [追问答疑](docs/followup.md) | 引用式追问的触发规则与会话上下文 |
 | [分析历史](docs/history.md) | 日志包归档、周期保留策略、手动管理 |
-| [项目代码参考](docs/repo.md) | inject / agent 两种模式与全部设置项 |
+| [项目代码参考](docs/repo.md) | 只读工具检索与全部设置项 |
 | [AI 工具](docs/tools.md) | 日志包工具与仓库工具、沙箱安全、调用限制 |
 | [上下文与缓存](docs/context.md) | 提示词前缀缓存、自动压缩、命中率观测 |
 | [调试](docs/debugging.md) | CLI REPL、HTTP 端点、JSON 批量测试与断言 |

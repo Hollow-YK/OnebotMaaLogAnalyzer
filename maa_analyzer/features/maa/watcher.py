@@ -664,7 +664,7 @@ class LogWatcher:
                 report=outcome.response_text,
                 message_ids=message_ids or [],
                 history_id=getattr(outcome, "history_id", ""),
-                digest=getattr(outcome, "digest", None),
+                archive=getattr(outcome, "archive", None),
                 session_id=getattr(outcome, "session_id", ""),
             )
         except Exception as exc:

@@ -13,7 +13,7 @@ data/<配置名>/history/
   ├── .staging/             # 分析进行中的解压暂存区（崩溃残留由清理周期扫掉）
   └── <记录ID>/
       ├── source.zip        # 日志压缩包原文
-      ├── context.txt       # 追问上下文（日志摘要 + 代码参考）
+      ├── context.txt       # 追问上下文（日志包结构说明 + 报告）
       └── extracted/        # 解压后的日志内容（日志工具直接读这里）
           └── .maa-extracted.json   # 复用标记：压缩包 size+mtime 指纹与成员列表
 ```

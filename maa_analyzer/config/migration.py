@@ -72,6 +72,8 @@ def migrate_config(data: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
     while version < CONFIG_VERSION:
         if version == 1:
             _migrate_v1_to_v2(cfg)
+        elif version == 2:
+            _migrate_v2_to_v3(cfg)
         else:
             raise ConfigVersionError(f"缺少配置版本 {version} 的迁移规则。")
         version += 1
@@ -167,6 +169,33 @@ def _migrate_v1_to_v2(cfg: dict[str, Any]) -> None:
         _ensure_profile_model_refs(cfg, provider_name, model_names)
 
     _prune_v2_sections(cfg)
+
+
+def _migrate_v2_to_v3(cfg: dict[str, Any]) -> None:
+    """
+    v3：移除摘要相关设置与 `repo.mode`（分析一律走工具），并清掉遗留字段。
+
+    未知字段由 pydantic 模型白名单裁剪掉。同时把端点模型的
+    `supports.tools` 显式写为 true：v3 的分析恒走工具模式，旧配置里
+    `tools: false` 在 v2 实际上就被忽略，这里保持同样的有效行为。
+    """
+    _prune_v2_sections(cfg)
+    llm = cfg.get("llm")
+    providers = llm.get("providers") if isinstance(llm, dict) else None
+    if not isinstance(providers, list):
+        return
+    for provider in providers:
+        models = provider.get("models") if isinstance(provider, dict) else None
+        if not isinstance(models, list):
+            continue
+        for spec in models:
+            if not isinstance(spec, dict):
+                continue
+            supports = spec.get("supports")
+            if not isinstance(supports, dict):
+                supports = {}
+                spec["supports"] = supports
+            supports["tools"] = True
 
 
 def _prune_v2_sections(cfg: dict[str, Any]) -> None:

@@ -45,7 +45,7 @@ AstrBot WebUI 会把面板字段按基础与群组、指令权限、项目识别
 | `project_name` / `file_prefix` | 项目显示名、日志包文件名前缀 | 清空配置；空项目名允许从日志识别，prefix 模式需填写前缀 |
 | `archive_match_mode` / `require_log_layout_mode` / `ui_*_mode` | 日志包识别、布局校验、UI 自动识别开关 | 使用面板固定默认值 |
 | `report_*` | 报告模式、模板、尺寸、浏览器与渲染选项 | 固定值恢复面板默认；空字体和浏览器路径使用程序自动选择 |
-| `repo_search_mode` / `repo_*` | 所选档案的仓库设置 | 可选文本留空清空；镜像、扩展名空列表清空；固定值恢复面板默认 |
+| `repo_*` | 所选档案的仓库设置 | 可选文本留空清空；镜像、扩展名空列表清空；固定值恢复面板默认 |
 | `llm_endpoints` | LLM 端点列表；每项设置端点名称、协议、地址、密钥和超时 | 空列表保留 JSON 中的端点；同名端点以面板填写的值覆盖，JSON 中未列出的端点保留 |
 | `llm_models` | 所选档案的模型列表，按数组顺序回退 | 每项设置端点名、模型名、模型能力和 token 限制；空列表保留 JSON 候选 |
 | `llm_profile_max_tokens` | 所选档案的输出 token 上限 | `-1` 清除档案参数，使用模型或全局参数 |
@@ -97,7 +97,6 @@ JSON 中的端点和模型声明仍用于选择器定位；所选档案的备用
           "archive_match_mode": "auto",
           "require_log_layout": true,
           "repo": {
-            "mode": "inject",
             "path": "",
             "url": "https://github.com/MAAXYZ/MaaXXX",
             "mirrors": [],
@@ -379,7 +378,7 @@ data/
 | `require_log_layout` | `bool` / `true` | **仅 `prefix` 模式**：是否额外做内容特征识别；`false` = 只信前缀 | `"require_log_layout": true` |
 | `ui` | `object` / `{}` | 未知 UI 的开关；已知 UI 始终启用，旧配置中的对应开关不再生效 | `"ui": { "auto": { "enabled": false } }` |
 | `ui.<名称>.enabled` | `bool` / `true` | 控制未知 UI 的日志包；`false` 会跳过，不调用 AI | `"enabled": false` |
-| `repo` | `object` / — | 项目代码仓库，见 [repo](#repo项目代码仓库) | `"repo": { "mode": "inject" }` |
+| `repo` | `object` / — | 项目代码仓库，见 [repo](#repo项目代码仓库) | `"repo": { "path": "E:/Code/MAA/MaaXXX" }` |
 
 #### repo：项目代码仓库
 
@@ -387,7 +386,6 @@ data/
 
 ```jsonc
 "repo": {
-  "mode": "inject",
   "path": "E:/Code/MAA/MaaXXX",
   "url": "https://github.com/MAAXYZ/MaaXXX",
   "mirrors": ["https://mirror.example/MaaXXX.git"],
@@ -401,7 +399,6 @@ data/
 
 | 字段 | 类型 / 默认 | 说明 | 示例 |
 | --- | --- | --- | --- |
-| `mode` | `string` / `"inject"` | 检索模式：`inject`（预检索后把命中片段拼进提示词，快、省 token）/ `agent`（把仓库读写工具交给 AI，深、耗 token）；其它值按 `inject` | `"mode": "agent"` |
 | `path` | `string` / `""` | 本地仓库目录，**优先于 `url`**，不需要网络与 git，也不会执行仓库代码 | `"path": "E:/Code/MAA/MaaXXX"` |
 | `url` | `string` / `"https://github.com/MAAXYZ/MaaXXX"` | 主 git 地址（GitHub / Gitee / 自建镜像 / `file://` 均可） | `"url": "https://github.com/MAAXYZ/MaaXXX"` |
 | `mirrors` | `string[]` / `[]` | 备用地址，按顺序依次尝试，直到一个来源成功 | `"mirrors": ["https://gitee.com/xx/MaaXXX.git"]` |
@@ -416,23 +413,18 @@ data/
 | `max_tag_switch_rounds` | `int` / `2` | AI 切换 tag 的最大轮次；`0` = 不开放该工具 | `"max_tag_switch_rounds": 0` |
 | `restore_latest_after_analyze` | `bool` / `true` | 分析结束后还原到分析前的位置；关闭后仓库停在分析用的 tag（detached HEAD） | `"restore_latest_after_analyze": false` |
 | `refuse_dirty_worktree` | `bool` / `true` | 工作区有未提交改动时拒绝切换（保护本地开发） | `"refuse_dirty_worktree": true` |
-| `max_tool_rounds` | `int` / `8` | **agent** 工具调用最大轮次 | `"max_tool_rounds": 6` |
-| `max_tool_calls_per_round` | `int` / `6` | **agent** 单轮最多执行的工具数 | `"max_tool_calls_per_round": 4` |
-| `max_tool_result_chars` | `int` / `30000` | **agent** 单次工具结果字符上限 | `"max_tool_result_chars": 12000` |
-| `max_tool_result_tokens` | `int` / `0` | **agent** 单次工具结果 token 上限；`0` = 由 `max_tool_result_chars` 估算，非 0 时最小 64 | `"max_tool_result_tokens": 4000` |
+| `max_tool_rounds` | `int` / `8` | 工具调用最大轮次 | `"max_tool_rounds": 6` |
+| `max_tool_calls_per_round` | `int` / `6` | 单轮最多执行的工具数 | `"max_tool_calls_per_round": 4` |
+| `max_tool_result_chars` | `int` / `30000` | 单次工具结果字符上限 | `"max_tool_result_chars": 12000` |
+| `max_tool_result_tokens` | `int` / `0` | 单次工具结果 token 上限；`0` = 由 `max_tool_result_chars` 估算，非 0 时最小 64 | `"max_tool_result_tokens": 4000` |
 | `max_tool_context_tokens` | `int` / `0` | 工具结果累计 token 预算；`0` = 不超过本次上下文预算的 50% | `"max_tool_context_tokens": 16000` |
-| `agent_deadline_seconds` | `int` / `600` | **agent** 循环总时长上限 | `"agent_deadline_seconds": 900` |
+| `agent_deadline_seconds` | `int` / `600` | 工具循环总时长上限 | `"agent_deadline_seconds": 900` |
 | `shallow_clone_timeout_seconds` | `int` / `600` | 分析/追问现场**浅克隆**的单次上限（秒）；`0` = 内置 600 | `"shallow_clone_timeout_seconds": 300` |
 | `preload_timeout_seconds` | `int` / `1800` | 后台预下载一次**完整克隆**（含子模块）的总上限（秒）；`0` = 内置 1800 | `"preload_timeout_seconds": 900` |
 | `update_timeout_seconds` | `int` / `600` | 分析/追问里「更新默认分支」的总预算（探测 + fetch，秒）；`0` = 内置 | `"update_timeout_seconds": 120` |
 | `extensions` | `string[]` / `json/jsonc/yaml/yml/toml/md/txt` | 参与扫描的文件扩展名 | `"extensions": [".json", ".yaml"]` |
 | `max_file_kb` | `int` / `256` | 跳过大于该值的文件（KB） | `"max_file_kb": 512` |
 | `max_scan_files` | `int` / `20000` | 单次扫描文件数上限 | `"max_scan_files": 5000` |
-| `max_files` | `int` / `12` | **inject** 注入提示词的文件数上限 | `"max_files": 8` |
-| `max_identifiers` | `int` / `24` | **inject** 从日志中提取的标识符上限 | `"max_identifiers": 12` |
-| `context_lines` | `int` / `2` | **inject** 普通命中行的上下文行数 | `"context_lines": 4` |
-| `max_block_lines` | `int` / `150` | **inject** 命中节点定义时展开的 JSON 对象最大行数 | `"max_block_lines": 80` |
-| `max_chars` | `int` / `60000` | **inject** 代码片段段落字符上限 | `"max_chars": 30000` |
 
 完整的检索行为、版本切换细节与镜像策略见 [项目代码参考](repo.md)。
 
@@ -494,7 +486,7 @@ MXU、MFAAvalonia、MaaFwApp、MaaTauriAndroid、MWU 和 MFW-PyQt6 始终启用�
 | MWU | `mwu-logs.zip` | `mwu` |
 | MFW-PyQt6 | `Demo-1.2.3-20261114_101010.zip` | `mfw` |
 
-Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版本，并写入摘要和报告头；分卷包 `*-partNN.zip` 会先等待上传（连续 `archive_part_settle_seconds` 秒无新分卷），再自动下载并合并分析。合并后按「编号连续 + 内容特征」判断是否齐全：不完整时最多额外等 `archive_part_wait_extra_rounds` 轮，仍不完整则按 `archive_part_incomplete_action` 处理（照常分析并标注缺失，或取消并提示补齐后重传）。
+Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版本，并写入结构说明和报告头；分卷包 `*-partNN.zip` 会先等待上传（连续 `archive_part_settle_seconds` 秒无新分卷），再自动下载并合并分析。合并后按「编号连续 + 内容特征」判断是否齐全：不完整时最多额外等 `archive_part_wait_extra_rounds` 轮，仍不完整则按 `archive_part_incomplete_action` 处理（照常分析并标注缺失，或取消并提示补齐后重传）。
 
 > 旧字段 `settings.file_prefix` / `extra_file_prefixes` / `auto_detect_archive` / `display_name` / `archive_match_mode` / `require_log_layout` / `repo` 已移除，写在 `settings` 里会被静默忽略；日志包匹配、UI 开关、项目名、项目仓库只在 `project` 中生效。
 
@@ -640,7 +632,6 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `history_max_total_mb` | `int` / `4096` | 历史目录总大小上限 MB；按记录目录实际占用现算（含追问阶段补解压的 `extracted/`）；`0` = 不限 | `"history_max_total_mb": 2048` |
 | `download_concurrency` | `int` / `2` | 同一配置内同时进行的下载数（分卷并行下载） | `"download_concurrency": 4` |
 | `download_timeout_seconds` | `int` / `120` | 下载超时秒数 | `"download_timeout_seconds": 300` |
-| `digest_timeout_seconds` | `int` / `0` | 摘要提取超时；`0` = 不限制 | `"digest_timeout_seconds": 120` |
 | `ai_stage_timeout_seconds` | `int` / `300` | 整个 AI 阶段（含工具循环与收敛）总时长上限 | `"ai_stage_timeout_seconds": 600` |
 | `max_context_tokens` | `int` / `0` | 上下文窗口；`0` = 候选模型优先，再回退 `llm.defaults.max_context_tokens` | `"max_context_tokens": 128000` |
 | `context_compact_enabled` | `bool` / `true` | 估算输入超阈值时压缩历史；端点返回超限时也会强制压缩重试 | `"context_compact_enabled": false` |
@@ -651,34 +642,15 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `analysis_cache_hours` | `int` / `0` | 分析结果进程内缓存小时数（按 file_id，重载即清空）；`0` = 关闭 | `"analysis_cache_hours": 6` |
 | `circuit_breaker_enabled` | `bool` / `true` | 连续失败时熔断端点并降级为模板报告（冷却时长见 `llm.circuit_breaker`） | `"circuit_breaker_enabled": false` |
 | `system_prompt` | `string` / `""` | 自定义系统提示词；空 = 按项目名生成默认人设。**不允许通过指令修改** | `"system_prompt": "你是日志分析助手"` |
-| `log_tools_enabled` | `bool` / `true` | 允许 AI 用工具直接读日志包原始文件（不依赖 `repo`） | `"log_tools_enabled": false` |
 | `cleanup_after_done` | `bool` / `true` | 分析完成后清理临时文件 | `"cleanup_after_done": false` |
-| `save_digest_debug` | `bool` / `false` | 把实际发送给 AI 的摘要保存到 `data/debug_digests` | `"save_digest_debug": true` |
 | `max_zip_size_mb` | `int` / `100` | zip 下载大小上限 MB | `"max_zip_size_mb": 200` |
 | `max_total_uncompressed_mb` | `int` / `1024` | **解压后总大小上限 MB**：下载后只读 zip 目录求和，超限直接跳过整次分析；通过后下游不再比对总量 | `"max_total_uncompressed_mb": 2048` |
-| `max_prompt_chars` | `int` / `200000` | 摘要字符上限（token 预算的兜底，按优先级裁剪） | `"max_prompt_chars": 150000` |
-| `max_zip_members` | `int` / `300` | 压缩包内成员数上限 | `"max_zip_members": 500` |
-| `max_log_files` | `int` / `6` | 最多处理日志文件数（按 UI 布局优先选框架日志 / UI 日志 / 运行记录） | `"max_log_files": 8` |
-| `max_maafw_bak_files` | `int` / `1` | 纳入摘要的 `maafw.bak.*` 轮转备份数；`0` = 不纳入 | `"max_maafw_bak_files": 2` |
-| `max_maafw_bak_mb` | `int` / `64` | 单个 `maafw.bak` 大小上限 MB；`0` = 不限制 | `"max_maafw_bak_mb": 32` |
 | `merge_archive_parts` | `bool` / `true` | 自动合并 `*-partNN.zip` 分卷日志包 | `"merge_archive_parts": false` |
 | `archive_part_settle_seconds` | `float` / `30` | 分卷静默期：连续该秒数无新分卷才开始分析；`0` = 首个分卷立即分析 | `"archive_part_settle_seconds": 60` |
 | `archive_part_require_content` | `bool` / `true` | 分卷齐全性是否要求内容特征（至少一卷含日志正文/配置）；`false` = 只按编号连续判定 | `"archive_part_require_content": false` |
 | `archive_part_wait_extra_rounds` | `int` / `1` | 判定不完整时额外等待的轮数（每轮再等 `archive_part_settle_seconds` 秒） | `"archive_part_wait_extra_rounds": 2` |
 | `archive_part_incomplete_action` | `str` / `analyze` | 仍不完整时：`analyze`（照常分析并标注缺失）或 `cancel`（取消并提示重传） | `"archive_part_incomplete_action": "cancel"` |
 | `max_log_file_read_kb` | `int` / `512` | 日志包单文件读取/工具返回窗口上限 KB（`log_search` 流式全量扫描，不受此限） | `"max_log_file_read_kb": 1024` |
-| `small_log_full_read_mb` | `int` / `5` | 小于该值完整读取（MB） | `"small_log_full_read_mb": 3` |
-| `stream_medium_logs` | `bool` / `true` | 流式扫描中等日志 | `"stream_medium_logs": false` |
-| `large_log_threshold_mb` | `int` / `50` | 巨型日志判定阈值 MB | `"large_log_threshold_mb": 100` |
-| `max_large_log_read_kb` | `int` / `256` | 仅前缀模式读取上限 KB | `"max_large_log_read_kb": 512` |
-| `stream_large_logs` | `bool` / `true` | 流式深扫巨型日志 | `"stream_large_logs": false` |
-| `max_stream_log_mb` | `int` / `0` | 单个巨型日志流式扫描上限 MB；`0` = 不限制 | `"max_stream_log_mb": 100` |
-| `max_sections_per_log` | `int` / `60` | 单个日志最多提取的小节数 | `"max_sections_per_log": 40` |
-| `max_log_chars` | `int` / `120000` | 单个日志摘要字符上限 | `"max_log_chars": 60000` |
-| `compress_context_noise` | `bool` / `true` | 折叠低价值 TRACE / DEBUG 行 | `"compress_context_noise": false` |
-| `max_recognition_evidence_lines` | `int` / `60` | OCR 重点证据行数上限 | `"max_recognition_evidence_lines": 30` |
-| `max_recognition_evidence_chars` | `int` / `35000` | OCR 重点证据块字符上限 | `"max_recognition_evidence_chars": 20000` |
-| `log_head_lines` | `int` / `16` | 每个日志小节额外保留的开头行数（版本、路径、控制器等环境信息） | `"log_head_lines": 24` |
 
 > 模型选择与采样参数不在 `settings` 中，而在 `bot.configs.<名称>.llm`（见 [llm](#llm候选模型)）。
 > 上下文压缩与提示词缓存的组织方式见 [上下文与缓存](context.md)。
@@ -731,7 +703,7 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
       "listen_groups": ["111111111", "222222222"],
       "notify_group": "111111111",
       "project": { "name": "MAK", "archive_match_mode": "auto" },
-      "settings": { "max_log_files": 8 }
+      "settings": { "max_log_file_read_kb": 1024 }
     },
     "测试服": {
       "listen_groups": ["333333333"],
@@ -902,7 +874,7 @@ max_tokens：         llm.defaults → providers[].models[] → bot.configs.<名
 - 系统提示词、工具定义、历史消息在会话内保持不变，新内容只追加在末尾
 - 输入预算 = 上下文窗口 − 本次最大输出 − 安全余量，避免「刚好塞满」被 400 拒绝
 - 估算输入超过 `输入预算 × context_compact_ratio` 或端点返回超限时自动压缩：
-  裁剪历史工具结果 → 摘要中间区段 → 必要时整轮丢弃；首条日志摘要始终保留
+  裁剪历史工具结果 → 摘要中间区段 → 必要时整轮丢弃；首条结构说明始终保留
 - 用量文件 `data/ai_usage.jsonl` 记录 `uncached_prompt_tokens` / `cache_read_tokens` / `cache_write_tokens`
 
 原理、阈值与调优见 [上下文与提示词缓存](context.md)。

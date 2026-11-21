@@ -1,7 +1,7 @@
 """Shared configuration constants."""
 from __future__ import annotations
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 CONFIG_VERSION_FIELD = "version"
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s]%(config_prefix)s %(name)s: %(message)s"

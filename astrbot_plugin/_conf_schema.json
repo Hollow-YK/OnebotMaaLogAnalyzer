@@ -828,11 +828,6 @@
         "type": "int",
         "default": 120
       },
-      "settings_digest_timeout_seconds": {
-        "description": "摘要提取超时秒数",
-        "type": "int",
-        "default": 0
-      },
       "settings_ai_stage_timeout_seconds": {
         "description": "AI 阶段超时秒数",
         "type": "int",
@@ -849,7 +844,7 @@
         "default": 512
       },
       "settings_context_summary_tokens": {
-        "description": "压缩摘要 token 上限",
+        "description": "上下文压缩摘要 token 上限",
         "type": "int",
         "default": 1500
       },
@@ -881,35 +876,8 @@
           "disabled"
         ]
       },
-      "settings_log_tools_enabled_mode": {
-        "description": "允许 AI 直读日志包",
-        "type": "string",
-        "default": "enabled",
-        "options": [
-          "enabled",
-          "disabled"
-        ]
-      },
       "settings_cleanup_after_done_mode": {
         "description": "完成后清理临时文件",
-        "type": "string",
-        "default": "enabled",
-        "options": [
-          "enabled",
-          "disabled"
-        ]
-      },
-      "settings_save_digest_debug_mode": {
-        "description": "保存发送摘要调试文件",
-        "type": "string",
-        "default": "disabled",
-        "options": [
-          "enabled",
-          "disabled"
-        ]
-      },
-      "settings_compress_context_noise_mode": {
-        "description": "折叠低价值日志行",
         "type": "string",
         "default": "enabled",
         "options": [
@@ -953,31 +921,6 @@
         "type": "int",
         "default": 1024
       },
-      "settings_max_prompt_chars": {
-        "description": "摘要字符上限",
-        "type": "int",
-        "default": 200000
-      },
-      "settings_max_zip_members": {
-        "description": "zip 成员数上限",
-        "type": "int",
-        "default": 300
-      },
-      "settings_max_log_files": {
-        "description": "最多处理日志文件数",
-        "type": "int",
-        "default": 6
-      },
-      "settings_max_maafw_bak_files": {
-        "description": "最多处理 maafw.bak 数",
-        "type": "int",
-        "default": 1
-      },
-      "settings_max_maafw_bak_mb": {
-        "description": "单个 maafw.bak 上限 MB",
-        "type": "int",
-        "default": 64
-      },
       "settings_merge_archive_parts_mode": {
         "description": "自动合并分卷包",
         "type": "string",
@@ -996,69 +939,6 @@
         "description": "普通日志读取上限 KB",
         "type": "int",
         "default": 512
-      },
-      "settings_small_log_full_read_mb": {
-        "description": "小日志完整读取阈值 MB",
-        "type": "int",
-        "default": 5
-      },
-      "settings_stream_medium_logs_mode": {
-        "description": "流式扫描中等日志",
-        "type": "string",
-        "default": "enabled",
-        "options": [
-          "enabled",
-          "disabled"
-        ]
-      },
-      "settings_large_log_threshold_mb": {
-        "description": "巨型日志阈值 MB",
-        "type": "int",
-        "default": 50
-      },
-      "settings_max_large_log_read_kb": {
-        "description": "巨型日志前缀读取 KB",
-        "type": "int",
-        "default": 256
-      },
-      "settings_stream_large_logs_mode": {
-        "description": "流式深扫巨型日志",
-        "type": "string",
-        "default": "enabled",
-        "options": [
-          "enabled",
-          "disabled"
-        ]
-      },
-      "settings_max_stream_log_mb": {
-        "description": "巨型日志流式扫描上限 MB",
-        "type": "int",
-        "default": 0
-      },
-      "settings_max_sections_per_log": {
-        "description": "单日志小节数上限",
-        "type": "int",
-        "default": 60
-      },
-      "settings_max_log_chars": {
-        "description": "单日志摘要字符上限",
-        "type": "int",
-        "default": 120000
-      },
-      "settings_max_recognition_evidence_lines": {
-        "description": "OCR 证据行数上限",
-        "type": "int",
-        "default": 60
-      },
-      "settings_max_recognition_evidence_chars": {
-        "description": "OCR 证据字符上限",
-        "type": "int",
-        "default": 35000
-      },
-      "settings_log_head_lines": {
-        "description": "日志小节保留开头行数",
-        "type": "int",
-        "default": 16
       }
     }
   },
@@ -1066,16 +946,6 @@
     "description": "项目仓库与检索",
     "type": "object",
     "items": {
-      "repo_search_mode": {
-        "description": "仓库检索模式",
-        "type": "string",
-        "default": "inject",
-        "options": [
-          "",
-          "inject",
-          "agent"
-        ]
-      },
       "repo_path": {
         "description": "本地仓库目录；留空清除此项，使用程序的自动选择或默认行为",
         "type": "string",
@@ -1188,22 +1058,22 @@
         "default": 6
       },
       "repo_max_tool_result_chars": {
-        "description": "agent 单次结果字符数",
+        "description": "单次工具结果字符上限",
         "type": "int",
         "default": 30000
       },
       "repo_max_tool_result_tokens": {
-        "description": "agent 单次结果 token",
+        "description": "单次工具结果 token 上限（0=按字符估算）",
         "type": "int",
         "default": 0
       },
       "repo_max_tool_context_tokens": {
-        "description": "agent 工具上下文 token",
+        "description": "工具上下文 token 预算（0=预算的 50%）",
         "type": "int",
         "default": 0
       },
       "repo_agent_deadline_seconds": {
-        "description": "agent 循环超时秒数",
+        "description": "工具循环总时长上限（秒）",
         "type": "int",
         "default": 600
       },
@@ -1232,31 +1102,6 @@
         "description": "仓库扫描文件数上限",
         "type": "int",
         "default": 20000
-      },
-      "repo_max_files": {
-        "description": "注入文件数上限",
-        "type": "int",
-        "default": 12
-      },
-      "repo_max_identifiers": {
-        "description": "注入标识符数上限",
-        "type": "int",
-        "default": 24
-      },
-      "repo_context_lines": {
-        "description": "普通命中上下文行数",
-        "type": "int",
-        "default": 2
-      },
-      "repo_max_block_lines": {
-        "description": "JSON 块最大展开行数",
-        "type": "int",
-        "default": 150
-      },
-      "repo_max_chars": {
-        "description": "代码片段字符上限",
-        "type": "int",
-        "default": 60000
       }
     }
   },

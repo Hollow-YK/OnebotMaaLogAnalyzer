@@ -15,15 +15,13 @@
   - 分析结束后还原到分析前所在的分支 / tag / 提交
 
 检索策略:
-  1. 从日志摘要中提取高价值标识符（Maa 节点名、name=/entry= 字段、expected 文本）
-  2. 单遍扫描仓库文本文件，用合并正则快速定位命中行
-  3. 按「命中节点定义行数」「命中标识符数量」排序，取前 N 个文件
-  4. 渲染为带行号的代码片段，受 max_chars 限制
+  - 代码检索由 AI 通过只读工具（list_dir / search_repo / read_file / list_tags）
+    自主完成；本模块只负责准备仓库、对齐版本与提供安全的文件访问。
 
 安全性:
   - 只读取仓库内的文本文件，不执行任何仓库代码
   - git 操作限定为 clone / fetch / checkout / pull / tag / rev-parse
-  - 扫描受文件大小、文件数量、字符总量三重限制
+  - 文件访问受大小与路径校验限制
   - 所有路径读取前都会校验是否位于仓库根目录内
 """
 from __future__ import annotations
@@ -42,7 +40,7 @@ from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from ...core.models import RepoConfig
-from ...features.maa.log_digest import IMAGE_SUFFIXES
+from ...features.maa.archive_index import IMAGE_SUFFIXES
 from ...features.maa.safety import normalize_relative_input, resolve_repo_path
 
 logger = logging.getLogger("Maa.Repo")
@@ -84,36 +82,6 @@ _SKIP_DIRS = {
     ".idea", ".vscode", "dist", "build", "target", ".mypy_cache",
     ".pytest_cache", ".ruff_cache", ".tox", ".eggs",
 }
-
-# 从日志中提取标识符的模式（按可信度从高到低）
-_IDENT_PATTERNS: list[tuple[re.Pattern, int]] = [
-    # 日志字段：name=XXX / entry=XXX（Maa 节点或任务名）
-    (re.compile(r"\b(?:name|entry)=([A-Za-z][A-Za-z0-9_.\-]{2,80})"), 3),
-    # JSON 字段："name":"XXX" / "taskName":"XXX"
-    (re.compile(r'"(?:name|entry|taskName|nodeName|resourceName|controllerName)"\s*:\s*'
-                r'"([A-Za-z][A-Za-z0-9_.\-]{2,80})"'), 3),
-    # Maa 节点名（含冒号，如 PVP_Click:StartBattle）
-    (re.compile(r"\b([A-Z][A-Za-z0-9_]*(?::[A-Za-z0-9_]+)+)\b"), 4),
-    # 识别期望文本：expected="中文"
-    (re.compile(r'expected="([^"\n]{2,60})"'), 5),
-]
-
-# 日志中高频出现但不值得检索的 C++ 符号 / 模块名
-_NOISE_IDENTIFIERS = {
-    "Logger", "Tasker", "Controller", "Resource", "Recognizer", "TemplateMatcher",
-    "OCRer", "OptionMgr", "MaaFramework", "AgentClient", "PipelineTask",
-    "EventDispatcher", "MaaTasker", "PipelineParser", "Adb", "Agent", "Vision",
-    "CustomRecognizer", "CustomAction", "MaaGlobalSetOption", "MaaTaskerPostTask",
-    "MaaTaskerPostStop", "MaaTaskerPost", "MaaResource", "MaaController",
-    "handle_controller_wait", "handle_tasker_stopping", "handle_event_response",
-}
-
-# 形如源码文件名的标识符（多半是日志里的路径，不是节点名）
-_SOURCE_SUFFIX = re.compile(
-    r"\.(?:log|json|jsonc|py|pyc|yaml|yml|ts|js|tsx|jsx|cpp|hpp|h|c|cc|cs|java|kt|go|rs|toml|ini|cfg|md|txt|png|jpg|jpeg|webp|bmp)$",
-    re.IGNORECASE,
-)
-
 
 # 日志包文件名中的版本号与时间戳
 # 例：MaaXXX-logs-1.0.0-alpha.9-20260907-033044.zip → 1.0.0-alpha.9
@@ -275,44 +243,6 @@ def redact_remote_text(text: str, sources: list[str]) -> str:
                                  reverse=True):
         result = result.replace(variant, f"<{label}>")
     return result
-
-
-def extract_identifiers(digest_prompt: str, limit: int = 24) -> list[str]:
-    """
-    从日志摘要中提取值得检索的标识符，按可信度与出现频次排序。
-
-    返回去重后的标识符列表，最多 limit 个。
-    """
-    if not digest_prompt or limit <= 0:
-        return []
-
-    scores: dict[str, int] = {}
-    for pattern, weight in _IDENT_PATTERNS:
-        for match in pattern.finditer(digest_prompt):
-            ident = match.group(1).strip()
-            if not _is_useful_identifier(ident):
-                continue
-            scores[ident] = scores.get(ident, 0) + weight
-
-    # 按权重降序、同权重按名称升序，保证结果稳定
-    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
-    return [ident for ident, _ in ranked[:limit]]
-
-
-def _is_useful_identifier(ident: str) -> bool:
-    """过滤掉明显无检索价值的标识符。"""
-    if len(ident) < 3:
-        return False
-    if ident in _NOISE_IDENTIFIERS:
-        return False
-    if _SOURCE_SUFFIX.search(ident):
-        return False
-    if "/" in ident or "\\" in ident:
-        return False
-    # 纯数字或纯符号
-    if not any(ch.isalpha() for ch in ident):
-        return False
-    return True
 
 
 class RepoProvider:
@@ -1280,216 +1210,6 @@ class RepoProvider:
         except Exception:
             return ""
 
-    # ════════════════════════════════════════════════════════════
-    # 检索
-    # ════════════════════════════════════════════════════════════
-
-    async def collect_references(self, identifiers: list[str]) -> str:
-        """
-        在仓库中检索标识符，返回可直接拼入提示词的代码片段段落。
-
-        未找到任何命中时返回空字符串。
-        """
-        if not identifiers:
-            return ""
-        root = self.root
-        if root is None or not root.is_dir():
-            return ""
-
-        try:
-            return await asyncio.to_thread(self._scan, root, identifiers)
-        except Exception as exc:
-            logger.warning(f"[仓库] 检索失败：{exc}", exc_info=True)
-            return ""
-
-    def _scan(self, root: Path, identifiers: list[str]) -> str:
-        """同步扫描仓库（在线程池中执行）。"""
-        exts = {e.lower() if e.startswith(".") else f".{e.lower()}"
-                for e in (self.cfg.extensions or [])}
-        max_file_bytes = max(16, int(self.cfg.max_file_kb or 256)) * 1024
-        max_scan_files = max(100, int(self.cfg.max_scan_files or 20000))
-
-        pattern = re.compile("|".join(re.escape(i) for i in identifiers))
-        definition_patterns = {
-            ident: re.compile(r"""["']""" + re.escape(ident) + r"""["']\s*:""")
-            for ident in identifiers
-        }
-
-        # rel_path → {行号: 行内容}
-        file_hits: dict[str, dict[int, str]] = {}
-        # rel_path → 定义行号集合
-        file_defs: dict[str, set[int]] = {}
-        file_idents: dict[str, set[str]] = {}
-        # rel_path → 完整行列表（仅命中文件，用于块展开）
-        file_lines: dict[str, list[str]] = {}
-        found: set[str] = set()
-        scanned = 0
-        truncated = False
-
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [
-                d for d in dirnames if d not in _SKIP_DIRS
-                and resolve_repo_path(
-                    root, (Path(dirpath) / d).relative_to(root).as_posix()
-                )[0] is not None
-            ]
-            for filename in filenames:
-                ext = os.path.splitext(filename)[1].lower()
-                if exts and ext not in exts:
-                    continue
-
-                requested = Path(dirpath) / filename
-                path, _ = resolve_repo_path(root, requested.relative_to(root).as_posix())
-                if path is None:
-                    continue
-                try:
-                    if path.stat().st_size > max_file_bytes:
-                        continue
-                    text = path.read_text(encoding="utf-8", errors="ignore")
-                except (OSError, ValueError):
-                    continue
-
-                scanned += 1
-                if scanned > max_scan_files:
-                    truncated = True
-                    break
-
-                lines = text.splitlines()
-                rel = requested.relative_to(root).as_posix()
-                hits: dict[int, str] = {}
-                defs: set[int] = set()
-                idents_here: set[str] = set()
-
-                for lineno, line in enumerate(lines, 1):
-                    if not pattern.search(line):
-                        continue
-                    for ident in identifiers:
-                        if ident not in line:
-                            continue
-                        hits[lineno] = line
-                        idents_here.add(ident)
-                        found.add(ident)
-                        if definition_patterns[ident].search(line):
-                            defs.add(lineno)
-
-                if hits:
-                    file_hits[rel] = hits
-                    file_idents[rel] = idents_here
-                    if defs:
-                        file_defs[rel] = defs
-                        file_lines[rel] = lines
-
-            if truncated:
-                break
-
-        if not file_hits:
-            logger.info(f"[仓库] 未找到任何命中（扫描 {scanned} 个文件）")
-            return ""
-
-        # 排序：先按命中定义行数，再按命中标识符种类数，最后按命中行数
-        ranked = sorted(
-            file_hits.items(),
-            key=lambda kv: (
-                -len(file_defs.get(kv[0], ())),
-                -len(file_idents.get(kv[0], ())),
-                -len(kv[1]),
-            ),
-        )[: max(1, int(self.cfg.max_files or 12))]
-
-        logger.info(
-            f"[仓库] 扫描 {scanned} 个文件，命中 {len(file_hits)} 个文件"
-            f"（注入前 {len(ranked)} 个），标识符 {len(found)}/{len(identifiers)}"
-        )
-
-        return self._render(ranked, identifiers, found, truncated, file_lines, file_defs)
-
-    def _render(self, ranked: list[tuple[str, dict[int, str]]],
-                identifiers: list[str], found: set[str],
-                truncated: bool, file_lines: dict[str, list[str]],
-                file_defs: dict[str, set[int]]) -> str:
-        """渲染代码片段段落，受 max_chars 限制。"""
-        context = max(0, int(self.cfg.context_lines or 0))
-        max_chars = max(2000, int(self.cfg.max_chars or 60000))
-        max_block_lines = max(20, int(self.cfg.max_block_lines or 150))
-        root = self.root
-
-        parts: list[str] = [
-            f"项目代码参考（来源：{self.describe_version()}）：",
-            f"已命中标识符：{', '.join(sorted(found))}",
-            "",
-        ]
-
-        for rel, hits in ranked:
-            lines = file_lines.get(rel)
-            ranges = self._hit_ranges(
-                hits, context, lines, max_block_lines, file_defs.get(rel, set())
-            )
-
-            block = [f"### {rel}"]
-            for start, end in ranges:
-                block.append(f"-- 行 {start}-{end} --")
-                for lineno in range(start, end + 1):
-                    text = hits.get(lineno)
-                    if text is None:
-                        if lines is not None and 1 <= lineno <= len(lines):
-                            text = lines[lineno - 1]
-                        else:
-                            text = self._read_line(root, rel, lineno)
-                        if text is None:
-                            continue
-                    block.append(f"[行 {lineno}] {_clip(text)}")
-
-            parts.extend(block)
-            parts.append("")
-
-            if sum(len(p) + 1 for p in parts) > max_chars:
-                parts.append("...[代码片段达到 max_chars 上限，后续已省略]")
-                break
-
-        if truncated:
-            parts.append("[仓库文件数超过 max_scan_files，扫描提前结束]")
-
-        missing = [i for i in identifiers if i not in found]
-        if missing:
-            parts.append(f"（未在项目代码中找到：{', '.join(missing)}）")
-
-        return "\n".join(parts).strip()
-
-    @staticmethod
-    def _hit_ranges(hits: dict[int, str], context: int,
-                    lines: Optional[list[str]], max_block_lines: int,
-                    definition_lines: set[int]) -> list[list[int]]:
-        """
-        把命中行转换为待渲染的行区间。
-
-        - 命中 JSON 对象定义行（如 `"PVP_Click:StartBattle": {`）时，
-          展开为整个对象块，确保 recognition / threshold / template / roi 一并呈现。
-        - 其余命中行按 context 前后扩展。
-        """
-        ranges: list[list[int]] = []
-
-        def add(start: int, end: int):
-            start = max(1, start)
-            if ranges and start <= ranges[-1][1] + 1:
-                ranges[-1][1] = max(ranges[-1][1], end)
-            else:
-                ranges.append([start, end])
-
-        for lineno in sorted(hits):
-            block_end = None
-            if lines is not None and lineno in definition_lines and _is_object_start(hits[lineno]):
-                block_end = _json_block_end(lines, lineno - 1, max_block_lines)
-            if block_end is not None:
-                add(lineno, block_end + 1)
-            else:
-                add(lineno - context, lineno + context)
-
-        return ranges
-
-    # ════════════════════════════════════════════════════════════
-    # 模板图片查找（供分析结果附图）
-    # ════════════════════════════════════════════════════════════
-
     def find_files(self, names: list[str], limit: int = 6,
                    *, images_only: bool = False) -> list[tuple[str, bytes]]:
         """
@@ -1559,56 +1279,6 @@ class RepoProvider:
         except (OSError, ValueError):
             return None
         return None
-
-
-def _clip(line: str, limit: int = 500) -> str:
-    """截断过长行，避免单行占满预算。"""
-    text = line.rstrip("\r\n")
-    if len(text) <= limit:
-        return text
-    half = max(80, (limit - 20) // 2)
-    return f"{text[:half]} ... {text[-half:]}"
-
-
-_OBJECT_START = re.compile(r"""^\s*(?:"[^"]+"|'[^']+')\s*:\s*\{\s*$""")
-
-
-def _is_object_start(line: str) -> bool:
-    """判断该行是否为 `"key": {` 形式的 JSON 对象起始行。"""
-    return bool(_OBJECT_START.match(line))
-
-
-def _json_block_end(lines: list[str], start: int, max_lines: int) -> Optional[int]:
-    """
-    从 start（0 基）的 `"key": {` 行出发，找到对应 `}` 的 0 基行号。
-
-    使用花括号计数并跳过字符串字面量，避免 `"}"` 之类的干扰。
-    超过 max_lines 或未闭合时返回 None。
-    """
-    depth = 0
-    limit = min(len(lines), start + max_lines)
-    for index in range(start, limit):
-        line = lines[index]
-        in_string = False
-        escaped = False
-        for ch in line:
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif ch == "\\":
-                    escaped = True
-                elif ch == '"':
-                    in_string = False
-                continue
-            if ch == '"':
-                in_string = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return index
-    return None
 
 
 async def _terminate_git_process(proc: asyncio.subprocess.Process) -> None:
