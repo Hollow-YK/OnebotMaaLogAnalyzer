@@ -179,7 +179,6 @@ class AnalysisPanel(PanelSection):
 
     settings_download_concurrency: int = 2
     settings_download_timeout_seconds: int = 120
-    settings_digest_timeout_seconds: int = 0
     settings_ai_stage_timeout_seconds: int = 300
     settings_max_context_tokens: int = 0
     settings_context_prune_tool_result_tokens: int = 512
@@ -188,10 +187,7 @@ class AnalysisPanel(PanelSection):
     settings_duplicate_window_seconds: int = 120
     settings_context_compact_enabled_mode: str = "enabled"
     settings_circuit_breaker_enabled_mode: str = "enabled"
-    settings_log_tools_enabled_mode: str = "enabled"
     settings_cleanup_after_done_mode: str = "enabled"
-    settings_save_digest_debug_mode: str = "disabled"
-    settings_compress_context_noise_mode: str = "enabled"
     settings_file_list_delay_seconds: str = "0.0"
     settings_context_compact_ratio: str = "0.8"
     settings_context_retain_ratio: str = "0.25"
@@ -205,25 +201,9 @@ class ProcessingPanel(PanelSection):
 
     settings_max_zip_size_mb: int = 100
     settings_max_total_uncompressed_mb: int = 1024
-    settings_max_prompt_chars: int = 200000
-    settings_max_zip_members: int = 300
-    settings_max_log_files: int = 6
-    settings_max_maafw_bak_files: int = 1
-    settings_max_maafw_bak_mb: int = 64
     settings_merge_archive_parts_mode: str = "enabled"
     settings_archive_part_settle_seconds: str = "30.0"
     settings_max_log_file_read_kb: int = 512
-    settings_small_log_full_read_mb: int = 5
-    settings_stream_medium_logs_mode: str = "enabled"
-    settings_large_log_threshold_mb: int = 50
-    settings_max_large_log_read_kb: int = 256
-    settings_stream_large_logs_mode: str = "enabled"
-    settings_max_stream_log_mb: int = 0
-    settings_max_sections_per_log: int = 60
-    settings_max_log_chars: int = 120000
-    settings_max_recognition_evidence_lines: int = 60
-    settings_max_recognition_evidence_chars: int = 35000
-    settings_log_head_lines: int = 16
 
 
 class RepoPanel(PanelSection):
@@ -231,7 +211,6 @@ class RepoPanel(PanelSection):
 
     panel_title: ClassVar[str] = "项目仓库与检索"
 
-    repo_search_mode: str = "inject"
     repo_path: str = ""
     repo_url: str = "https://github.com/MAAXYZ/MaaXXX"
     repo_mirrors: list[str] = Field(default_factory=list)
@@ -265,11 +244,6 @@ class RepoPanel(PanelSection):
     )
     repo_max_file_kb: int = 256
     repo_max_scan_files: int = 20000
-    repo_max_files: int = 12
-    repo_max_identifiers: int = 24
-    repo_context_lines: int = 2
-    repo_max_block_lines: int = 150
-    repo_max_chars: int = 60000
 
 
 class LoggingPanel(PanelSection):

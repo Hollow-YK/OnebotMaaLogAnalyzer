@@ -92,7 +92,7 @@ class PanelLLMModelsTests(unittest.TestCase):
             self.assertEqual(endpoint["api_key"], "secret")
             self.assertTrue(old["llm"]["llm_endpoints_migration_pending"])
             effective, _, _ = load_effective_config(runtime, plugin_data_dir=tmp)
-            persisted = json.loads(path.read_text())
+            persisted = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(persisted["llm"]["providers"][0]["base_url"], "https://example.test/v1")
             self.assertEqual(persisted["llm"]["providers"][0], effective["llm"]["providers"][0])
             self.assertTrue((Path(tmp) / "config.json.panel-migration.bak").exists())
@@ -130,7 +130,7 @@ class PanelLLMModelsTests(unittest.TestCase):
         ])
 
     def test_upgrade_reconciliation_migration_and_effective_load(self):
-        schema = json.loads((Path(__file__).resolve().parents[1] / "astrbot_plugin/_conf_schema.json").read_text())
+        schema = json.loads((Path(__file__).resolve().parents[1] / "astrbot_plugin/_conf_schema.json").read_text(encoding="utf-8"))
         # Model AstrBot's documented recursive schema reconciliation.
         def reconcile(nodes, saved):
             return {key: (reconcile(node["items"], saved.get(key, {}))
@@ -158,7 +158,7 @@ class PanelLLMModelsTests(unittest.TestCase):
                 ])
                 self.assertTrue({"deepseek-flash", "deepseek-v4-pro"}.issubset(
                     {m["model"] for m in cfg["llm"]["providers"][0]["models"]}))
-                persisted = json.loads((Path(tmp) / "config.json").read_text())
+                persisted = json.loads((Path(tmp) / "config.json").read_text(encoding="utf-8"))
                 self.assertEqual(persisted["bot"]["configs"]["默认"]["llm"]["models"],
                                  cfg["bot"]["configs"]["默认"]["llm"]["models"])
 
@@ -170,13 +170,13 @@ class PanelLLMModelsTests(unittest.TestCase):
             path.write_text(json.dumps(old), encoding="utf-8")
             panel, _ = synchronize_panel_config({"llm": {"llm_model": "new-model"}})
             load_effective_config(panel, plugin_data_dir=tmp)
-            saved = json.loads(path.read_text())
-            backup = json.loads((Path(tmp) / "config.json.panel-migration.bak").read_text())
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            backup = json.loads((Path(tmp) / "config.json.panel-migration.bak").read_text(encoding="utf-8"))
             self.assertEqual(backup, old)
             self.assertEqual(saved["bot"]["configs"]["other"], old["bot"]["configs"]["other"])
             self.assertEqual(saved["bot"]["configs"]["默认"]["llm"]["models"][0]["model"], "new-model")
             load_effective_config(panel, plugin_data_dir=tmp)
-            self.assertEqual(json.loads((Path(tmp) / "config.json.panel-migration.bak").read_text()), old)
+            self.assertEqual(json.loads((Path(tmp) / "config.json.panel-migration.bak").read_text(encoding="utf-8")), old)
 
     def test_failed_validation_keeps_both_migration_state_and_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -187,7 +187,7 @@ class PanelLLMModelsTests(unittest.TestCase):
             runtime, _ = synchronize_panel_config(panel_config)
             with self.assertRaisesRegex(ValueError, "不存在的端点"):
                 load_effective_config(runtime, plugin_data_dir=tmp)
-            self.assertEqual(json.loads(path.read_text()), old)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), old)
             self.assertTrue(panel_config["llm"]["llm_migration_pending"])
             self.assertTrue(synchronize_panel_config(panel_config)[0]["_persist_llm_migration"])
 

@@ -66,14 +66,14 @@ class FollowupSession:
     created_at: float
     # 本次分析 Bot 发出的全部 message_id（引用任意一条都算）
     message_ids: set[str] = field(default_factory=set)
-    # 送给模型的对话历史（含首轮摘要上下文与报告）
+    # 送给模型的对话历史（含首轮日志包格式说明与报告）
     messages: list[dict] = field(default_factory=list)
     # 关联的历史记录 ID（用于从历史归档重载上下文，支持跨天追问）
     history_id: str = ""
     # 本次分析 + 追问共用的会话 ID（用量聚合与报告页脚统计）
     session_id: str = ""
-    # 本次分析的日志摘要（供追问时按名取出附件）
-    digest: Any = None
+    # 本次分析的日志包索引（供追问时按名取出附件）
+    archive: Any = None
     turns: int = 0
     last_active: float = 0.0
     # 是否已结束（达到轮数上限或用户主动关闭）：结束后不再响应引用
@@ -225,14 +225,14 @@ class FollowupStore:
     def start(self, *, group_id: str, config_name: str, file_name: str,
               system_context: str, report: str,
               message_ids: Optional[list] = None,
-              history_id: str = "", digest: Any = None,
+              history_id: str = "", archive: Any = None,
               session_id: str = "") -> FollowupSession:
         """
         分析成功后创建会话。
 
         message_ids: 本次分析 Bot 发出的消息 ID 列表（引用它们即可追问）。
         history_id:  对应的历史记录 ID，内存会话过期后可据此恢复。
-        digest:      本次分析的日志摘要，供追问时取出日志包内的附件。
+        archive:      本次分析的日志包索引，供追问时取出日志包内的附件。
         session_id:  本次分析与追问共用的会话 ID（用量按会话聚合）。
         """
         self._prune()
@@ -252,7 +252,7 @@ class FollowupStore:
             ],
             history_id=str(history_id or ""),
             session_id=str(session_id or ""),
-            digest=digest,
+            archive=archive,
             last_active=time.time(),
         )
         self._sessions[key] = session
@@ -332,7 +332,7 @@ class FollowupStore:
 
         除首轮上下文（context.txt）与报告外，还会还原：
           - 已追问的轮数与问答历史（followups.json）
-          - 日志摘要索引（由归档 zip 重建），使 `@日志` 附件与日志工具可用
+          - 日志包索引（由归档 zip 重建），使 `@日志` 附件与日志工具可用
         """
         if self.history is None:
             return None
@@ -364,7 +364,7 @@ class FollowupStore:
                     {"role": "assistant", "content": record.report},
                 ],
                 history_id=record.id,
-                digest=self._restore_digest(name, record),
+                archive=self._restore_index(name, record),
                 last_active=time.time(),
             )
             # 还原追问轮数与问答历史
@@ -438,11 +438,11 @@ class FollowupStore:
         if saved > 0:
             session.last_active = saved
 
-    def _restore_digest(self, name: str, record) -> Any:
+    def _restore_index(self, name: str, record) -> Any:
         """
-        由归档 zip 重建一个「仅索引」的摘要结果。
+        由归档 zip 重建一个「仅索引」的日志包结构结果。
 
-        重启后没有原始 DigestResult，但附件与日志工具只需要 zip 路径
+        重启后没有原始 ArchiveInfo，但附件与日志工具只需要 zip 路径
         和成员列表，因此这里重新扫描归档包即可。
         """
         if self.history is None:
@@ -455,22 +455,22 @@ class FollowupStore:
         if zip_path is None:
             return None
         try:
-            from ...features.maa.log_digest import describe_zip
+            from ...features.maa.archive_index import describe_zip
 
-            digest = describe_zip(str(zip_path))
+            archive = describe_zip(str(zip_path))
         except Exception as exc:
             logger.warning(f"[追问] 重建日志索引失败：{exc}")
             return None
-        if digest is not None:
+        if archive is not None:
             # 归档目录里的解压结果：存在时日志工具直接复用，不必再解压
             extract_dir = self.history.extracted_dir(name, record.id)
             if extract_dir.is_dir():
-                digest.extract_dir = str(extract_dir)
+                archive.extract_dir = str(extract_dir)
             logger.info(
-                f"[追问] 已由归档日志包重建索引（{len(digest.all_members)} 个成员"
-                + ("，复用已解压目录）" if digest.extract_dir else "）")
+                f"[追问] 已由归档日志包重建索引（{len(archive.all_members)} 个成员"
+                + ("，复用已解压目录）" if archive.extract_dir else "）")
             )
-        return digest
+        return archive
 
     def get(self, group_id: str) -> Optional[FollowupSession]:
         """取出该群未过期的会话。"""

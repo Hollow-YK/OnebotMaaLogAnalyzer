@@ -76,7 +76,7 @@
 | MFW-PyQt6 | `Demo-1.2.3-20261114_101010.zip` | `debug/gui.log`、`debug/maafw.log`、`debug/on_error/`、`live/*.png` |
 
 Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 的 `device_info.txt`
-自动解析 **UI 类型、软件版本、资源版本、MaaFramework 版本、设备与系统**，写入摘要和报告头。
+自动解析 **UI 类型、软件版本、资源版本、MaaFramework 版本、设备与系统**，写入结构说明和报告头。
 
 - MXU 的版本号来自文件名（`-logs-<版本>-<时间戳>`），属于项目/资源版本
 - MFAAvalonia 从 `程序版本`、`资源版本`、`MaaFramework 版本` 解析
@@ -146,33 +146,31 @@ Bot 会从文件名、`maafw.log` 头部、MFAA 的 `logs/log-*.log`、MaaFwApp 
 | `history_max_records` | `200` | 历史记录条数上限 |
 | `history_max_total_mb` | `4096` | 历史目录占用上限 MB（按目录实际占用现算，含追问阶段补解压的 `extracted/`） |
 
-## 摘要提取
+## 压缩包处理
 
 > **两道门槛，各自管一件事**：`max_zip_size_mb` 限制**下载体积**（协议端流量）；
-> `max_total_uncompressed_mb` 限制**解压后总大小**，在下载完成、摘要与 AI 之前
+> `max_total_uncompressed_mb` 限制**解压后总大小**，在下载完成、索引与 AI 之前
 > 只读 zip 中央目录求和判定，超限直接回「内容过多」并跳过本次分析。
-> 两者都通过之后，摘要与日志工具不再各自比对总量——解压时只按实际写出字节
-> 复核一次（防止 zip 头造假），超限即整次中止。
+> 两者都通过之后，日志工具不再比对总量——解压时只按实际写出字节复核一次
+> （防止 zip 头造假），超限即整次中止。
 
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
 | `max_zip_size_mb` | `100` | zip 下载大小上限 MB |
-| `max_total_uncompressed_mb` | `1024` | **解压后总大小上限 MB**：下载后只读 zip 目录求和，超限直接跳过整次分析（不提取摘要、不调用 AI）；通过后下游不再比对总量 |
-| `max_zip_members` | `300` | 压缩包内成员数上限 |
-| `max_prompt_chars` | `200000` | 摘要字符上限（作为 token 预算的兜底；按优先级裁剪，不会先丢关键证据） |
-| `max_log_files` | `6` | 最多处理日志文件数（按 UI 布局优先选择框架日志 / UI 日志 / 运行记录） |
-| `max_maafw_bak_files` | `1` | 最多纳入摘要的 `maafw.bak.*` 轮转备份日志数；`0` = 不纳入 |
-| `max_maafw_bak_mb` | `64` | 单个 `maafw.bak` 大小上限 MB；`0` = 不限制 |
+| `max_total_uncompressed_mb` | `1024` | **解压后总大小上限 MB**：下载后只读 zip 目录求和，超限直接跳过整次分析（不索引、不调用 AI）；通过后下游不再比对总量 |
 | `merge_archive_parts` | `true` | 自动合并 `*-partNN.zip` 分卷日志包 |
 | `archive_part_settle_seconds` | `30` | 分卷静默期：每来一个新分卷重新计时，连续该秒数无新分卷后才开始分析；`0` = 收到首个分卷立即分析 |
 | `archive_part_require_content` | `true` | 分卷齐全性是否要求"内容特征"（合并后至少一卷含日志正文/配置）；关掉则只按编号连续判定 |
 | `archive_part_wait_extra_rounds` | `1` | 判定分卷不完整时额外等待的轮数（每轮再等 `archive_part_settle_seconds` 秒）；`0` = 不额外等待 |
 | `archive_part_incomplete_action` | `analyze` | 额外等待用尽后仍不完整：`analyze` = 照常分析并在提示词/报告里标注缺失；`cancel` = 取消分析并提示补齐后重传 |
-| `max_log_chars` | `120000` | 单个日志摘要字符上限 |
-| `max_recognition_evidence_chars` | `35000` | OCR 重点证据块字符上限 |
-| `max_recognition_evidence_lines` | `60` | OCR 重点证据行数上限 |
-| `log_head_lines` | `16` | 每个日志小节额外保留开头行数（版本、路径、控制器等环境信息） |
-| `max_sections_per_log` | `60` | 单个日志最多提取的小节数 |
+| `max_log_file_read_kb` | `512` | 单次 `log_read_file` 的字节窗口上限 KB（`log_search` 流式全量扫描，不受此限） |
+
+## 日志包说明与工具
+
+**分析不再“摘要”日志内容**：Bot 只索引压缩包的中央目录（成员清单、UI 布局、
+版本信息、错误截图与配置路径），把这些组装成一份**固定格式的结构说明**发给模型；
+日志正文由模型自己用 [日志包工具](tools.md) 读取。因此这里没有任何
+“摘要字符上限 / 流式扫描 / OCR 证据 / 日志头部行数”之类的设置项。
 
 ### `maafw.bak` 是什么
 
@@ -180,29 +178,10 @@ MaaFramework 的日志按大小轮转：写满当前 `maafw.log` 后把它改名
 `maafw.bak.<时间戳>.log`，再新开一个 `maafw.log`。所以**最近的错误往往落在
 备份文件里**（当前 `maafw.log` 只保留了崩溃之后的那一小段）。
 
-- `max_maafw_bak_files`：把最新的几个备份纳入摘要，默认 `1`（只取最近一个）
-- `max_maafw_bak_mb`：单个备份的大小上限，默认 `64` MB；`0` 表示不限制
-- 备份按时间戳倒序挑选，超过上限的直接跳过，避免为了几百 MB 的备份拖慢分析
-
-> 若日志包里的 `maafw.bak` 很多且单个体积很大，调小 `max_maafw_bak_mb`
-> 比调小 `max_maafw_bak_files` 更划算：前者只丢掉过大的那个文件，
-> 后者会丢掉「最近的备份」这一最有价值的证据。
-
-## 大日志流式扫描
-
-| 设置项 | 默认 | 说明 |
-| --- | --- | --- |
-| `small_log_full_read_mb` | `5` | 小于该值完整读取 MB |
-| `max_log_file_read_kb` | `512` | 日志包单文件读取/工具返回窗口上限 KB（`log_search` 流式全量扫描，不受此限） |
-| `stream_medium_logs` | `true` | 流式扫描中等日志 |
-| `large_log_threshold_mb` | `50` | 巨型日志判定阈值 MB |
-| `max_large_log_read_kb` | `256` | 仅前缀模式读取上限 KB |
-| `stream_large_logs` | `true` | 流式深扫巨型日志 |
-| `max_stream_log_mb` | `0` | 单个巨型日志流式扫描上限 MB，`0` = 不限制 |
-| `compress_context_noise` | `true` | 折叠低价值 TRACE/DEBUG 行 |
-
-> **流式扫描默认开启**：关闭后巨型日志仅读前缀，会**完全丢失**后段的错误证据。
-> 实测 11.81 MB `maafw.log`：小日志完整读 8.4s / 流式中等 5.1s / 流式巨型 4.9s / 仅前缀 0.3s。
+- 结构说明里的“优先查看的日志”最多列 6 个，并优先列出最新的一个 `maafw.bak`
+  （超过 64 MB 的备份只跳过展示，仍可用 `log_read_file` 读取）
+- 全部成员都可通过 `log_list_files` / `log_search` 访问，上述优先级只影响
+  说明里先指向哪个文件
 
 ## 模型调用
 
@@ -216,7 +195,6 @@ MaaFramework 的日志按大小轮转：写满当前 `maafw.log` 后把它改名
 | `context_retain_ratio` | `0.25` | 压缩后保留最近对话的 token 占比（0.1–0.5） |
 | `context_prune_tool_result_tokens` | `512` | 压缩时把历史工具结果裁剪到的 token 上限；`0` = 不裁剪，非 0 时最小按 64 处理 |
 | `context_summary_tokens` | `1500` | 压缩摘要本身的目标 token 上限 |
-| `digest_timeout_seconds` | `0` | 摘要提取超时，`0` = 不限制 |
 | `analysis_cache_hours` | `0` | 分析结果缓存小时数（进程内，按 file_id 命中，重载即清空）；`0` = 关闭 |
 | `circuit_breaker_enabled` | `true` | 连续失败时熔断端点并降级为模板报告（冷却时长见 `llm.circuit_breaker`） |
 
@@ -235,17 +213,8 @@ MaaFramework 的日志按大小轮转：写满当前 `maafw.log` 后把它改名
 同一配置内的分析**恒为串行**：一份日志的分析、追问与仓库操作排队执行，不并行；
 并发只发生在配置之间，不同配置互不影响。详见[并发模型](architecture.md#并发模型)。
 
-## 日志包工具
-
-| 设置项 | 默认 | 说明 |
-| --- | --- | --- |
-| `log_tools_enabled` | `true` | 是否允许 AI 用工具自主读日志包原始文件（**不依赖 repo 是否启用**） |
-
-> 项目代码仓库不在这里配置：见 [项目代码参考](repo.md) 的 `project.repo`。
-
 ## 其他
 
 | 设置项 | 默认 | 说明 |
 | --- | --- | --- |
-| `save_digest_debug` | `false` | 保存实际发送给 AI 的摘要到 `data/debug_digests` |
 | `cleanup_after_done` | `true` | 分析完成后清理临时文件 |

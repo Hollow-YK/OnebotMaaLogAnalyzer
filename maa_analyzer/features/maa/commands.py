@@ -44,8 +44,8 @@ _FIELD_LABELS: dict[str, str] = {
     "archive_part_require_content": "分卷齐全性是否要求含日志正文",
     "archive_part_wait_extra_rounds": "分卷不完整时额外等待的轮数",
     "archive_part_incomplete_action": "仍不完整时 analyze / cancel",
-    "max_maafw_bak_files": "最多处理几个 maafw.bak",
-    "max_maafw_bak_mb": "单个 maafw.bak 大小上限 MB（0=不限）",
+
+
     "send_progress_message": "是否发送进度提示",
     "send_summary": "是否发送分析结果",
     "forward_analysis_results": "是否将分析结果以 QQ 合并转发发送",
@@ -67,8 +67,8 @@ _FIELD_LABELS: dict[str, str] = {
     "history_max_total_mb": "历史占用上限 MB",
     "max_zip_size_mb": "zip 大小上限 MB",
     "max_total_uncompressed_mb": "解压后总大小上限 MB（超限直接跳过分析）",
-    "max_log_files": "最多处理日志文件数",
-    "max_prompt_chars": "摘要字符上限（token 预算的兜底）",
+
+
     "ai_stage_timeout_seconds": "整个 AI 阶段超时（秒）",
     "max_context_tokens": "上下文 token 预算（0=用全局默认）",
     "context_compact_enabled": "上下文超限时自动压缩历史",
@@ -93,7 +93,7 @@ _UI_LABELS: dict[str, str] = {
 
 _REPO_LABELS: dict[str, str] = {
     "enabled": "是否启用项目代码参考",
-    "mode": "检索模式：inject / agent",
+
     "path": "本地仓库目录",
     "url": "git 仓库地址（支持镜像）",
     "mirrors": "备用镜像地址（按顺序尝试）",
@@ -107,8 +107,8 @@ _REPO_LABELS: dict[str, str] = {
     "restore_latest_after_analyze": "分析后还原原位置",
     "max_tool_rounds": "agent 最大工具轮次",
     "max_tool_result_chars": "单次工具结果字符上限",
-    "max_files": "注入提示词的文件数上限",
-    "max_chars": "代码片段字符上限",
+
+
 }
 
 # 布尔值的可接受写法
@@ -129,7 +129,7 @@ def _format_ui_switches(project: ProjectConfig) -> str:
 # 需要写权限的子指令（保持查看基线不变，只把这些子指令提到 write_level）
 _WRITE_SUBCOMMANDS: dict[str, set] = {
     "repo": {
-        "mode", "url", "path", "branch", "on", "enable", "开",
+        "url", "path", "branch", "on", "enable", "开",
         "off", "disable", "关", "mirror", "preload",
     },
     "history": {"clean", "clear", "清理", "purge", "清空"},
@@ -258,7 +258,7 @@ class CommandHandler:
             "ai": (commands.read_level, self._cmd_ai),
             "followup": (commands.followup_level, self._cmd_followup),
             "set": (commands.write_level, self._cmd_set),
-            "mode": (commands.write_level, self._cmd_mode),
+
             "enable": (commands.write_level, self._cmd_enable),
             "disable": (commands.write_level, self._cmd_disable),
             "reload": (commands.write_level, self._cmd_reload),
@@ -308,7 +308,7 @@ class CommandHandler:
             "修改类（需权限）：",
             f"  {prefix} set <项> <值>      修改分析设置",
             f"  {prefix} project set <项> <值>  修改项目配置",
-            f"  {prefix} repo mode <模式>   切换 inject / agent",
+
             f"  {prefix} repo url <地址>    设置仓库主地址",
             f"  {prefix} repo mirror add <地址> 添加备用镜像",
             f"  {prefix} repo path <目录>   设置本地仓库目录",
@@ -342,8 +342,7 @@ class CommandHandler:
                 if str(cfg.project.archive_match_mode).lower() == "prefix" else ""
             ),
             f"UI 开关：{_format_ui_switches(cfg.project)}",
-            f"项目代码参考：{'开启' if cfg.project.repo.enabled else '关闭'}"
-            f"（模式 {cfg.project.repo.mode}）",
+            f"项目代码参考：{'开启' if cfg.project.repo.enabled else '关闭'}",
             f"附带图片：{'开启' if settings.send_images else '关闭'}",
             f"追问答疑：{'开启' if settings.followup_enabled else '关闭'}",
             f"任务记录：{len(cfg.jobs)} 条",
@@ -479,7 +478,7 @@ class CommandHandler:
           /maa project set archive_match_mode prefix
           /maa project set file_prefix MaaXXX-logs
           /maa project set ui.auto.enabled false
-          /maa project set repo.mode agent
+          /maa repo url <地址>
         """
         sub = args[0].lower() if args else "get"
         if sub in ("set", "设置"):
@@ -513,7 +512,7 @@ class CommandHandler:
 
         lines.extend([
             "",
-            f"repo：{'开启' if project.repo.enabled else '关闭'}（{project.repo.mode}）"
+            f"repo：{'开启' if project.repo.enabled else '关闭'}"
             f"  # 用 `{cfg.commands.prefix} repo` 查看详情",
             "",
             f"修改：{cfg.commands.prefix} project set <项> <值>",
@@ -606,7 +605,7 @@ class CommandHandler:
             ])
         lines.append("")
         lines.append(
-            f"修改：{cfg.commands.prefix} repo mode agent / "
+            f"修改：{cfg.commands.prefix} repo url <地址> / "
             f"{cfg.commands.prefix} repo mirror add <地址> / "
             f"{cfg.commands.prefix} repo preload on|off"
         )
@@ -734,13 +733,6 @@ class CommandHandler:
         logger.info(f"[指令] {cfg.name}: {name} = {value!r}")
         return CommandResult(text=f"已设置 {label}（{name}）= {value}")
 
-    async def _cmd_mode(self, cfg: ConfigState, args: list[str]) -> CommandResult:
-        if not args:
-            return CommandResult(
-                text=f"当前模式：{cfg.project.repo.mode}\n"
-                     f"用法：{cfg.commands.prefix} mode inject|agent", ok=False)
-        return await self._set_repo_field(cfg, "mode", args[0])
-
     async def _cmd_enable(self, cfg: ConfigState, args: list[str]) -> CommandResult:
         self.s.set_setting_override(cfg.name, "enabled", True)
         await self.s.save_config_async(cfg.name)
@@ -767,7 +759,7 @@ class CommandHandler:
         if not args:
             return await self._cmd_repo_get(cfg, [])
         sub = args[0].lower()
-        if sub in ("mode", "url", "path", "branch"):
+        if sub in ("url", "path", "branch"):
             if len(args) < 2:
                 return CommandResult(
                     text=f"用法：{cfg.commands.prefix} repo {sub} <值>", ok=False)
@@ -831,13 +823,6 @@ class CommandHandler:
         if error:
             return CommandResult(text=f"值无效：{error}", ok=False)
 
-        # mode 只接受 inject / agent
-        if name == "mode":
-            mode = str(value).strip().lower()
-            if mode not in ("inject", "agent"):
-                return CommandResult(text="模式只能是 inject 或 agent。", ok=False)
-            value = mode
-
         self.s.set_project_override(cfg.name, name, value, nested="repo")
         await self.s.save_config_async(cfg.name)
         label = _REPO_LABELS.get(name, name)
@@ -845,10 +830,7 @@ class CommandHandler:
         logger.info(f"[指令] {cfg.name}: repo.{name} = {shown_value!r}")
 
         extra = ""
-        if name == "mode":
-            extra = ("\nagent 模式由 AI 自主调用工具检索，耗时与 token 消耗更高；"
-                     "inject 模式更快更省。")
-        elif name == "url":
+        if name == "url":
             extra = "\n下次分析时会克隆该仓库（首次较慢），请确认地址可访问。"
         elif name == "path":
             extra = "\n请确认该目录存在且是有效的项目仓库。"

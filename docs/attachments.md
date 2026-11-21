@@ -34,7 +34,7 @@
 - 只有 `supports.vision=true` 的候选模型才会收到图片。
 
 不同 UI 的日志包布局不同：MXU 的错误截图通常在根目录 `on_error/`，
-MFAAvalonia 在 `debug/on_error/`，MaaFwApp 可能没有错误截图。路径必须与摘要/工具返回的实际路径一致。
+MFAAvalonia 在 `debug/on_error/`，MaaFwApp 可能没有错误截图。路径必须与结构说明/工具返回的实际路径一致。
 
 ## 必须指定来源
 
@@ -80,7 +80,7 @@ MFAAvalonia 在 `debug/on_error/`，MaaFwApp 可能没有错误截图。路径�
 | 凭据清单 | `credentials`、`.netrc`、`.npmrc`、`.pgpass`、`.git-credentials` |
 | 私钥与证书 | `.pem`、`.key`、`.pfx`、`.p12`、`id_rsa*`、`id_ed25519*` |
 
-> 被拒绝的附件只记日志，不会发送到群里。`agent` 模式的 `read_file` 工具同样受此限制。
+> 被拒绝的附件只记日志，不会发送到群里。`read_file` 工具同样受此限制。
 
 ## 图片化报告中的呈现
 

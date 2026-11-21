@@ -50,8 +50,7 @@
         },
         "project": {
           "repo": {
-            "enabled": true,
-            "mode": "inject"
+            "enabled": true
           },
           "name": "MaaXXX"
         }

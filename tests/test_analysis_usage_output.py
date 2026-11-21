@@ -28,7 +28,7 @@ class AnalysisUsageOutputTests(unittest.IsolatedAsyncioTestCase):
                    return_value=RenderOutcome(images=images or [])) as render:
             result = await self.analyzer._prepare_output(
                 config_name="main", settings=AnalysisSettings(), raw_report="分析正文",
-                header="报告头", digest=None,
+                header="报告头", archive=None,
                 segments=[OutSegment(kind="text", text="分析正文")], notes=notes,
                 render_followup=True, session_id="analysis-session",
                 show_analysis_usage=analysis,

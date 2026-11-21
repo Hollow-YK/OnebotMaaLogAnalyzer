@@ -8,7 +8,11 @@ from unittest.mock import patch
 
 from maa_analyzer.core.models import RepoConfig
 from maa_analyzer.features.maa.attachments import normalize_rel_path, parse_attachments
-from maa_analyzer.features.maa.log_digest import build_log_digest, describe_zip, read_zip_member
+from maa_analyzer.features.maa.archive_index import (
+    build_archive_info,
+    describe_zip,
+    read_zip_member,
+)
 from maa_analyzer.features.maa.log_tools import LogArchiveTools
 from maa_analyzer.features.maa.repo import RepoProvider
 from maa_analyzer.features.maa.repo_tools import RepoTools
@@ -199,7 +203,7 @@ class SymlinkSupportTests(unittest.TestCase):
                 case.setUp()
 
 
-class DigestProfilePathTests(unittest.TestCase):
+class ArchiveProfilePathTests(unittest.TestCase):
     def test_profile_ignores_unsafe_members_with_and_without_safe_logs(self):
         with tempfile.TemporaryDirectory() as directory:
             zip_path = Path(directory) / "logs.zip"
@@ -212,14 +216,17 @@ class DigestProfilePathTests(unittest.TestCase):
                         if safe_log:
                             archive.writestr("debug/maafw.log", "Version v1.2.3\n")
                     for result in (
-                        build_log_digest(str(zip_path), original_file_name="logs.zip"),
+                        build_archive_info(str(zip_path), original_file_name="logs.zip"),
                         describe_zip(str(zip_path)),
                     ):
                         self.assertIsNotNone(result)
                         self.assertEqual(result.profile.framework_version, "v1.2.3" if safe_log else "")
                         self.assertEqual(result.profile.layout_detected, safe_log)
                         self.assertEqual(result.all_members, ["debug/maafw.log"] if safe_log else [])
-                        self.assertNotIn("v9.9.9-evil", result.prompt)
+                        self.assertNotIn(
+                            "v9.9.9-evil",
+                            result.format_prompt(original_file_name="logs.zip"),
+                        )
 
 
 class LogToolPathTests(unittest.IsolatedAsyncioTestCase):

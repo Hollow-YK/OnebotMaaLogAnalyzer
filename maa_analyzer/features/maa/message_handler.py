@@ -152,7 +152,7 @@ class MessageHandler:
                 settings=settings,
                 messages=session.messages,
                 question=question,
-                digest=getattr(session, "digest", None),
+                archive=getattr(session, "archive", None),
                 provider=provider,
                 project=cfg.project,
                 config_name=config_name,
@@ -166,7 +166,7 @@ class MessageHandler:
             reason = self.analyzer.llm_unavailable_summary(config_name)
             logger.warning(
                 f"[追问] 群 {group_id} 未获得有效回答"
-                f"（工具可用={provider is not None or getattr(session, 'digest', None) is not None}"
+                f"（工具可用={provider is not None or getattr(session, 'archive', None) is not None}"
                 f"，端点异常={reason or '无'}）"
             )
             if reason:

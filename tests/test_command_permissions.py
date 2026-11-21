@@ -22,7 +22,7 @@ class RequiredLevelTests(unittest.TestCase):
         self.commands = CommandConfig()
 
     # 与 handle() 的映射表一致：这些指令的基线取 write_level
-    _WRITE_ACTIONS = {"set", "mode", "enable", "disable", "reload"}
+    _WRITE_ACTIONS = {"set", "enable", "disable", "reload"}
 
     def _level(self, action, rest=(), base=None):
         if base is None:
@@ -42,7 +42,7 @@ class RequiredLevelTests(unittest.TestCase):
             self.assertEqual(self._level(action), 1, action)
 
     def test_write_commands_need_owner(self):
-        for action in ("set", "mode", "enable", "disable", "reload"):
+        for action in ("set", "enable", "disable", "reload"):
             self.assertEqual(self._level(action), 2, action)
 
     def test_read_commands_can_be_opened_explicitly(self):
@@ -52,7 +52,6 @@ class RequiredLevelTests(unittest.TestCase):
         )
 
     def test_write_subcommands_are_promoted(self):
-        self.assertEqual(self._level("repo", ["mode"]), 2)
         self.assertEqual(self._level("repo", ["mirror", "add"]), 2)
         self.assertEqual(self._level("repo", ["preload", "on"]), 2)
         self.assertEqual(self._level("history", ["clean"]), 2)
@@ -85,7 +84,7 @@ class RequiredLevelTests(unittest.TestCase):
 
     def test_case_insensitive_subcommand(self):
         self.assertEqual(self._level("followup", ["CLOSE"]), 1)
-        self.assertEqual(self._level("repo", ["MODE"]), 2)
+        self.assertEqual(self._level("repo", ["URL"]), 2)
 
 
 if __name__ == "__main__":

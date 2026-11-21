@@ -32,7 +32,7 @@ from maa_analyzer.features.maa.archive_extract import (
 )
 from maa_analyzer.features.maa.attachments import build_report_segments, text_segments
 from maa_analyzer.features.maa.history import HistoryStore
-from maa_analyzer.features.maa.log_digest import DigestResult
+from maa_analyzer.features.maa.archive_index import ArchiveInfo
 from maa_analyzer.features.maa.log_tools import LogArchiveTools
 from maa_analyzer.features.maa.repo_tools import RepoTools
 
@@ -135,8 +135,8 @@ class AttachmentBudgetTests(unittest.TestCase):
             archive.writestr("on_error/b.png", b"\x89PNG\r\n\x1a\n" + b"1" * 64)
             archive.writestr("config/app.json", b'{"a": 1}')
             archive.writestr("config/empty.json", b"")
-        self.digest = DigestResult(
-            prompt="x", file_count=4, total_uncompressed_size=200,
+        self.archive = ArchiveInfo(
+            file_count=4, total_uncompressed_size=200,
             all_images=["on_error/a.png", "on_error/b.png"],
             all_members=[
                 "on_error/a.png", "on_error/b.png",
@@ -154,7 +154,7 @@ class AttachmentBudgetTests(unittest.TestCase):
 
     def test_images_and_files_counted_separately(self):
         segments, notes = build_report_segments(
-            self.report, self.digest, max_images=1, max_files=2
+            self.report, self.archive, max_images=1, max_files=2
         )
         kinds = [seg.kind for seg in segments]
         self.assertEqual(kinds.count("image"), 1)
@@ -163,7 +163,7 @@ class AttachmentBudgetTests(unittest.TestCase):
 
     def test_disabled_kinds_emit_text_only(self):
         segments, notes = build_report_segments(
-            self.report, self.digest, max_images=0, max_files=0
+            self.report, self.archive, max_images=0, max_files=0
         )
         self.assertTrue(all(seg.kind == "text" for seg in segments))
         self.assertEqual(len(notes), 2)
@@ -171,7 +171,7 @@ class AttachmentBudgetTests(unittest.TestCase):
 
     def test_empty_member_never_becomes_attachment(self):
         segments, _ = build_report_segments(
-            self.report, self.digest, max_images=4, max_files=4
+            self.report, self.archive, max_images=4, max_files=4
         )
         labels = [seg.label for seg in segments if seg.kind != "text"]
         self.assertNotIn("config/empty.json", labels)
@@ -183,25 +183,24 @@ class AttachmentBudgetTests(unittest.TestCase):
 
 class FollowupBudgetTests(unittest.TestCase):
     def test_context_trimmed_to_budget_and_keeps_tail(self):
-        summary = "【日志摘要】\n" + ("ERROR 节点未识别 行号 123\n" * 3000)
-        repo = "【代码参考】\n" + ("PVP.json:12 threshold 0.9\n" * 500)
+        prompt = "【日志包格式说明】\n" + ("ERROR 节点未识别 行号 123\n" * 3000)
         context = MaaAnalyzer._build_followup_context(
-            "logs.zip", summary, repo, budget=4000
+            "logs.zip", prompt, budget=4000
         )
         self.assertLessEqual(estimate_tokens(context), 4000)
-        self.assertTrue(context.startswith("【日志摘要】"))
+        self.assertTrue(context.startswith("【日志包格式说明】"))
         self.assertIn("本次分析信息", context)
         self.assertIn("已按追问预算裁剪", context)
 
     def test_context_untouched_when_within_budget(self):
         context = MaaAnalyzer._build_followup_context(
-            "logs.zip", "短摘要", "", budget=4000
+            "logs.zip", "短说明", budget=4000
         )
         self.assertNotIn("裁剪", context)
-        self.assertIn("短摘要", context)
+        self.assertIn("短说明", context)
 
-    def test_seed_budget_prefers_summary(self):
-        summary = "【日志摘要】\n" + ("ERROR 行\n" * 4000)
+    def test_seed_budget_prefers_format_prompt(self):
+        summary = "【日志包格式说明】\n" + ("ERROR 行\n" * 4000)
         report = "【分析报告】\n" + ("结论：阈值偏低\n" * 800)
         messages = [
             {"role": "system", "content": "系统提示词" * 50},
@@ -214,7 +213,7 @@ class FollowupBudgetTests(unittest.TestCase):
         out = MaaAnalyzer._budget_followup_seed(messages, budget)
         total = sum(estimate_tokens(str(m.get("content") or "")) for m in out)
         self.assertLessEqual(total, budget)
-        self.assertIn("追问摘要已按预算裁剪", out[1]["content"])
+        self.assertIn("追问种子已按预算裁剪", out[1]["content"])
         self.assertIn("上次报告已按追问预算裁剪", out[2]["content"])
         self.assertEqual(out[3]["content"], "之前的问题")
         self.assertEqual(out[4]["content"], "之前的回答")

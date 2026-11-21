@@ -45,7 +45,6 @@
         "project": {
           "repo": {
             "enabled": true,
-            "mode": "agent",
             "max_tool_rounds": 3,
             "max_tool_calls_per_round": 2
           },

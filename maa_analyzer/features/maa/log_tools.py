@@ -36,7 +36,7 @@ from ...features.maa.archive_extract import (
     DEFAULT_TOTAL_LIMIT_MB,
     ExtractedArchive,
 )
-from ...features.maa.log_digest import IMAGE_SUFFIXES
+from ...features.maa.archive_index import IMAGE_SUFFIXES
 from ...features.maa.safety import (
     describe_rejection,
     is_sensitive_path,

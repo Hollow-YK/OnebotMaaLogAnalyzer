@@ -16,7 +16,7 @@ from maa_analyzer.features.maa.archive_profile import (
     UI_MFW,
     detect_archive_profile,
 )
-from maa_analyzer.features.maa.log_digest import build_log_digest
+from maa_analyzer.features.maa.archive_index import build_archive_info
 
 
 class MaaTauriAndroidArchiveTests(unittest.TestCase):
@@ -86,11 +86,11 @@ class MWUArchiveTests(unittest.TestCase):
             self.assertTrue(profile.layout_detected)
             self.assertEqual(profile.framework_version, "v5.3.1")
 
-            digest = build_log_digest(str(zip_path), original_file_name=self.NAME)
-        self.assertEqual(digest.profile.ui_key, "mwu")
-        self.assertTrue(digest.is_log_archive)
+            info = build_archive_info(str(zip_path), original_file_name=self.NAME)
+        self.assertEqual(info.profile.ui_key, "mwu")
+        self.assertTrue(info.is_log_archive)
         self.assertEqual(
-            [Path(name).as_posix() for name in digest.log_files],
+            [Path(name).as_posix() for name in info.log_files],
             ["debug/maafw.log", "mwu.log", "updater.log"],
         )
 
@@ -132,11 +132,11 @@ class MFWArchiveTests(unittest.TestCase):
             self.assertEqual(profile.resource_version, "9.9.9-beta")
             self.assertEqual(profile.metadata.get("working"), "/tmp/MFW-Demo")
 
-            digest = build_log_digest(str(zip_path), original_file_name=self.NAME)
-        self.assertEqual(digest.profile.ui_key, "mfw")
-        self.assertTrue(digest.is_log_archive)
+            info = build_archive_info(str(zip_path), original_file_name=self.NAME)
+        self.assertEqual(info.profile.ui_key, "mfw")
+        self.assertTrue(info.is_log_archive)
         self.assertEqual(
-            [Path(name).as_posix() for name in digest.log_files],
+            [Path(name).as_posix() for name in info.log_files],
             ["debug/maafw.log", "debug/gui.log", "debug/crash.log"],
         )
 

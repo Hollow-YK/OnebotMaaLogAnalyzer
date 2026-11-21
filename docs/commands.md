@@ -14,12 +14,12 @@
 /maa ai all            全部历史用量汇总及按群统计
 /maa followup          追问答疑会话状态
 
-/maa set <项> <值>      修改分析设置（如 /maa set max_log_files 3）
+/maa set <项> <值>      修改分析设置（如 /maa set max_report_images 3）
 /maa project set name MAK
 /maa project set archive_match_mode prefix
 /maa project set file_prefix MaaXXX-logs
 /maa project set ui.mfaa.enabled false
-/maa project set repo.mode agent
+/maa repo url https://github.com/you/repo.git
 /maa repo mode agent   切换 inject / agent
 /maa repo url <地址>   设置仓库主地址
 /maa repo path <目录>  设置本地仓库目录
