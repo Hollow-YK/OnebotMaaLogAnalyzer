@@ -95,7 +95,8 @@ OnebotMaaLogAnalyzer/
 ## 白名单与禁止项
 
 三个包在压缩前分别检查必需文件。裸模式包必须包含启动器、共享内核和
-`templates/default/page.html`；普通包还必须包含两个编辑器：
+`templates/default/page.html`（以及同样必需的 `attach-img.html` /
+`attach-file.html`）；普通包还必须包含两个编辑器：
 
 - `tools/templates/editor.py`
 - `tools/config/editor.py`

@@ -282,9 +282,17 @@ def _replace_attachments(body: str,
 
 
 def _interleave(markdown_html: str, parts: list[str]) -> str:
-    """把占位符替换为附件 HTML。"""
+    """
+    把占位符替换为附件外壳 HTML。
+
+    附件指令独占一行时，Markdown 会先把它包成 `<p>占位符</p>`；这里连外壳一起
+    去掉这层段落，让模板给的 `<figure>` / `<div>` 成为内容块的直接子元素，
+    避免浏览器隐式闭合 `<p>` 后留下空段落间距。
+    """
     for index, fragment in enumerate(parts):
-        markdown_html = markdown_html.replace(f"\x00ATTACH:{index}\x00", fragment)
+        token = f"\x00ATTACH:{index}\x00"
+        markdown_html = markdown_html.replace(f"<p>{token}</p>", fragment)
+        markdown_html = markdown_html.replace(token, fragment)
     return markdown_html
 
 

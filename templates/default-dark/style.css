@@ -155,11 +155,45 @@
 }
 
 .attach-image figcaption {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
-  color: #6b7785;
-  text-align: center;
+  color: #8b96a3;
+  text-align: left;
   word-break: break-all;
+}
+
+/* 文件名 / 相对路径 / 来源 · 大小：固定信息，由 attach-*.html 排布 */
+.attach-name {
+  display: block;
+  font-weight: 600;
+  color: #d3dce6;
+  word-break: break-all;
+}
+
+.attach-path {
+  display: block;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  color: #8b96a3;
+  word-break: break-all;
+}
+
+.attach-meta {
+  display: block;
+  font-size: 12px;
+  color: #8b96a3;
+}
+
+.attach-size:not(:empty)::before {
+  content: " · ";
+}
+
+.attach-status:not(:empty)::before {
+  content: " · ";
+}
+
+.attach-status {
+  color: #ff8f7a;
 }
 
 .attach-file {
@@ -169,19 +203,7 @@
   border: 1px dashed #4a5560;
   border-radius: 6px;
   background: #22272e;
-}
-
-.attach-name {
-  display: block;
-  font-weight: 600;
-  color: #d3dce6;
-  word-break: break-all;
-}
-
-.attach-meta {
-  display: block;
-  font-size: 12px;
-  color: #8b96a3;
+  box-sizing: border-box;
 }
 
 .attach-missing .attach-name,

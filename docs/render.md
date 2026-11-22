@@ -122,14 +122,19 @@ AI 输出 Markdown（含 section / page-break / 附件指令）
 
 ## 附件的呈现
 
-- **图片**：内联为 `<figure class="attach-image">`，按**正文宽度等比缩放**
-  （左右两端对齐）；高度超过可用正文高度时整体缩小，不会被分页裁切。
-  图片**不再有体积上限**（旧的 `max_image_mb` 已删除）——渲染时会缩放，
+- 外壳（HTML 结构与样式）由主题的 `attach-img.html` / `attach-file.html` 决定，
+  插件只提供 `{{name}}` / `{{path}}` / `{{source}}` / `{{size}}` 等取值。
+- **图片**：交 `attach-img.html` 渲染，`{{src}}` 是 data URI，默认模板按**正文宽度
+  等比缩放**（左右两端对齐）；高度超过可用正文高度时整体缩小，不会被分页裁切。
+  图片**没有体积上限**（旧的 `max_image_mb` 已删除）——渲染时会缩放，
   体积只影响生成报告图的大小。
-- **其他文件**：渲染为 `<div class="attach-file">` 卡片（文件名 + 来源 + 大小），
+- **其他文件**：交 `attach-file.html` 渲染成卡片（文件名 / 相对路径 / 来源 / 大小），
   同时照旧通过 `upload_group_file` 上传，保证可下载。
-- 同一路径在一次报告里只内联一次；已内联的图片不会再单独发一条图片消息。
-- `embed_attachments=false` 时图片不内联，改为报告后单独发送图片消息。
+- 同一路径在一次报告里只渲染一次；已内联的图片不会再单独发一条图片消息。
+- 附件指令**独占一行**时，外壳会作为内容块的独立块渲染（不再被 `<p>` 包住）；
+  写在文字中间时则跟随段落，由浏览器按块级元素处理。
+- `embed_attachments=false` 时图片不走 `attach-img.html`，改用 `attach-file.html`
+  渲染成「图片未内联」卡片（`{{status}}`），报告后单独发送图片消息。
 - `attach_markdown=true` 时额外上传 `<项目>-<时间>-report.md`，
   内容为剥离 `section` / `page-break` / 看图标记后的原始 Markdown。
 
@@ -194,11 +199,15 @@ AI 输出 Markdown（含 section / page-break / 附件指令）
 templates/
   default/            # 内置（随发布包分发）
     page.html         # 必需
+    attach-img.html   # 必需：内联图片的外壳
+    attach-file.html  # 必需：文件卡片的外壳
     header.html       # 可选
     footer.html       # 可选
     style.css         # 可选
   dark/               # 你自己放的深色模板
     page.html
+    attach-img.html
+    attach-file.html
     style.css
 ```
 
@@ -209,6 +218,8 @@ templates/
 - `template` 为空 → `default`；指向不存在的目录 → 记 warning 并回退 `default`。
 - 目录名只允许 `[A-Za-z0-9_-]`；`..`、路径分隔符、绝对路径一律拒绝。
 - **没有主题配置、没有 `style.dark.css`**：深浅色由模板自己决定，需要深色就整套复制一份。
+- 三个文件（`page.html` / `attach-img.html` / `attach-file.html`）缺任意一个，
+  模板视为不完整：记 warning 并整体回退 `default`。
 
 ### page.html
 
@@ -257,6 +268,55 @@ templates/
 `{{usage}}` 为空时 `.footer-usage:empty { display: none }` 会让整行不占位，
 因此没有调用记录时页脚不会多出空白（`header.html` 里也可以套用同样的 CSS）。
 
+### attach-img.html / attach-file.html
+
+附件的外壳也归主题所有：模型在报告里写一条 `[附件@日志: …]`，插件解析出
+文件名、相对路径、来源、大小之后交给模板，**不生成任何固定结构的 HTML**。
+两个文件都是**必需**的，缺一个模板即视为不完整（回退 `default`）：
+
+```html
+<!-- templates/default/attach-img.html -->
+<figure class="{{class}}">
+  <img src="{{src}}" alt="{{name}}">
+  <figcaption>
+    <span class="attach-name">{{name}}</span>
+    <span class="attach-path">{{path}}</span>
+    <span class="attach-meta">{{source}}<span class="attach-size">{{size}}</span></span>
+  </figcaption>
+</figure>
+```
+
+```html
+<!-- templates/default/attach-file.html：文件 / 未找到 / 未内联 -->
+<div class="{{class}}">
+  <span class="attach-name">{{name}}</span>
+  <span class="attach-path">{{path}}</span>
+  <span class="attach-meta">{{source}}<span class="attach-size">{{size}}</span><span class="attach-status">{{status}}</span></span>
+</div>
+```
+
+| 占位符 | 含义 | 转义 |
+| --- | --- | --- |
+| `{{name}}` | 文件名（`debug/20261122.png` → `20261122.png`） | 是 |
+| `{{path}}` | 来源内相对路径（`debug/20261122.png`） | 是 |
+| `{{source}}` | 来源：`日志包` / `仓库` | 是 |
+| `{{size}}` | 大小（`1.2 MB`）；找不到附件时为空 | 是 |
+| `{{status}}` | 状态说明：`未找到附件` / `图片未内联`，正常附件为空 | 是 |
+| `{{kind}}` | `image` / `file` / `missing` / `skipped` | 是 |
+| `{{class}}` | 推荐容器类名：`attach-image`；`attach-file`（可叠 `attach-missing` / `attach-image-skipped`） | 是 |
+| `{{src}}` | 图片的 data URI（只有 `attach-img.html` 有意义） | 否 |
+
+用法约定：
+
+1. `attach-img.html` 渲染**内联图片**；`attach-file.html` 渲染普通文件、
+   未找到的附件，以及 `embed_attachments=false` 时未内联的图片
+   （此时带 `{{status}}`=`图片未内联`）。
+2. 同一路径在一次报告里只渲染一次。
+3. 图片尺寸不归模板强制：建议容器使用 `{{class}}`（默认类名带渲染器注入的
+   `width:100%` / 等比缩放 / `max-height` 规则），或自行在 `style.css` 里约束。
+4. `{{size}}` / `{{status}}` 为空时不会显示任何内容，默认模板用
+   `:empty` + `::before` 控制分隔符，你也可以整段省略。
+
 ### 占位符
 
 替换是**单趟**的：插入的内容（包括正文 HTML）不会被再次解析。
@@ -292,14 +352,16 @@ templates/
 规则：
 
 1. 多个 `{{content}}` → 只填充第一处，其余留空并记 warning。
-2. `{{content}}` 写在 `header.html` / `footer.html` 中无效：会被忽略并记 warning
-   （正文只能出现在 `page.html`）。
+2. `{{content}}` 写在 `header.html` / `footer.html` / 附件外壳中无效：会被忽略并记
+   warning（正文只能出现在 `page.html`）。
 3. 未识别的占位符**原样保留**并记 debug 日志（不报错，便于逐步调试）。
 4. 模板按 `mtime` 缓存，避免每份报告重复读盘。
 5. 模板内的 `<script>` / `<iframe>` 与外部 URL 引用会被剥离。
 6. 模板只描述「单页长什么样」；分页发生在正文内部，**模板里不要写分页逻辑**。
 7. 模板作者可以使用任意 CSS（渲染环境是真实浏览器）。
 8. 内置 `default` 只用块级流式布局，不依赖 flex / grid / JS 框架。
+9. 附件占位符（`{{name}}` / `{{path}}` / `{{source}}` / `{{size}}` 等）只在两个
+   附件外壳里生效；`{{src}}` 只在内联图片的 `attach-img.html` 里有值。
 
 ### 可用的结构类名
 
@@ -314,8 +376,9 @@ templates/
 | `.block` | 一个内容块（`<section>`） |
 | `.block-title` | 内容块标题（`<h2>`） |
 | `.block-lead` | 「概览」块的额外类（模板可单独定制） |
-| `.attach-image` / `.attach-image img` / `figcaption` | 内联图片 |
-| `.attach-file` / `.attach-name` / `.attach-meta` | 文件卡片 |
+| `.attach-image` / `.attach-image img` / `figcaption` | 内联图片（`{{class}}` 的默认值之一） |
+| `.attach-file` / `.attach-name` / `.attach-path` / `.attach-meta` / `.attach-size` / `.attach-status` | 文件卡片与图片信息行 |
+| `.attach-missing` / `.attach-image-skipped` | 未找到 / 未内联的附加类（由 `{{class}}` 带出） |
 | `.page-footer` | 页脚容器（默认模板的 `footer.html` 放这里） |
 | `.footer-line` / `.footer-note` / `.pager` | 页脚第一行：左署名、右页码 |
 | `.footer-usage` | 页脚第二行：会话 token 与模型用量（为空时整行隐藏） |
@@ -353,6 +416,25 @@ CSS 变量 `--maa-content-max-height` 由渲染器按 `max_height_px` 计算后�
 .attach-file { background: #1c2229; border-color: #2b323b; }
 ```
 
+附件外壳同样按目录放置（示例里只显示一行信息，尺寸交给渲染器的默认规则）：
+
+```html
+<!-- templates/dark/attach-img.html -->
+<figure class="{{class}}">
+  <img src="{{src}}" alt="{{name}}">
+  <figcaption>{{name}} · {{path}} · {{source}}</figcaption>
+</figure>
+```
+
+```html
+<!-- templates/dark/attach-file.html -->
+<div class="{{class}}">
+  <span class="attach-name">{{name}}</span>
+  <span class="attach-path">{{path}}</span>
+  <span class="attach-meta">{{source}} · {{size}}{{status}}</span>
+</div>
+```
+
 然后把配置改成 `"template": "dark"` 即可，无需重启（模板按 mtime 重新加载）。
 
 ## 安全约束
@@ -363,7 +445,7 @@ AI 输出与模板都属于不可信输入：
 2. 白名单只作用于 AI 文本产出的标签：`h1-h3` / `p` / `ul` / `ol` / `li` /
    `strong` / `em` / `del` / `code` / `pre` / `blockquote` / `hr` / `table` /
    `thead` / `tbody` / `tr` / `th` / `td` / `a` / `img` / `br` / `span`。
-   `section` / `figure` / `div.attach-file` 等结构标签由插件自身生成。
+   `section` 与附件外壳等结构标签由模板 / 插件自身生成，不经过 AI 文本清洗。
 3. `img` 只接受 `data:image/...`；`a` 只保留 `http(s)` 链接；其余属性丢弃。
 4. 页面 CSP：`default-src 'none'; img-src data:; style-src 'unsafe-inline'`。
 5. 浏览器加 `--host-resolver-rules="MAP * 0.0.0.0"`，即使出现远程 `img` 也无法外联。
@@ -375,7 +457,7 @@ AI 输出与模板都属于不可信输入：
 | --- | --- |
 | 报告变成纯文本 | 浏览器未找到 / 渲染失败。查看日志中的 `[渲染]` 行与通知群提示；装 Edge/Chrome/Chromium 或设 `browser_path` |
 | 日志出现「调试端口未就绪 … exit=1」 | 浏览器启动即退出。看 `data/_browser_stderr.log`：root 用户需 `--no-sandbox`（本程序已自动追加）；其余多为缺依赖库（`apt install -y libnss3 libatk-bridge2.0-0 libgbm1 libasound2`） |
-| 日志出现「模板 X 缺少 page.html」 | 模板目录缺文件，已回退 `default` |
+| 日志出现「模板 X 缺少 page.html / attach-img.html / attach-file.html」 | 模板目录缺必需文件，已回退 `default` |
 | 图片里出现 `{{content}}` 字样 | `page.html` 用了不支持的写法（例如全角括号），改用 `{{content}}` 或 `<内容>` |
 | 中文显示为方块 | 系统缺 CJK 字体；在 `report.font_family` 指定已安装字体 |
 | 报告被截断 | 页数超过 `max_pages`，调大该值或让 AI 用 `<!-- page-break -->` 主动分页 |
