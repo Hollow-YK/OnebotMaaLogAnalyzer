@@ -27,11 +27,11 @@ logger = logging.getLogger("Maa.Render.Markdown")
 
 _SECTION_RE = re.compile(
     r"^\s*<!--\s*(?:section|小节)\s*[:：]\s*(?P<title>.*?)\s*-->\s*$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 _PAGE_BREAK_RE = re.compile(
     r"^\s*<!--\s*(?:page-break|分页)\s*-->\s*$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 _LEGACY_STRIP = re.compile(
     r"[\[【]\s*(?:附图|图片|image)\s*(?:[@＠][^:：\]]*)?[：:][^\]】\n]*[\]】]",
@@ -222,6 +222,9 @@ def parse_report(report: str,
     解析报告为内容块。
 
     attachment_html: 把附件指令转成 HTML 的回调；None 时指令被忽略。
+
+    报告头不在这里插入：它由主题的 `{{information}}` 插槽负责
+    （`parse_report` 只处理 AI 正文与附件）。
     """
     parsed = ParsedReport()
     engine = _markdown_engine()
@@ -282,9 +285,17 @@ def _replace_attachments(body: str,
 
 
 def _interleave(markdown_html: str, parts: list[str]) -> str:
-    """把占位符替换为附件 HTML。"""
+    """
+    把占位符替换为附件外壳 HTML。
+
+    附件指令独占一行时，Markdown 会先把它包成 `<p>占位符</p>`；这里连外壳一起
+    去掉这层段落，让模板给的 `<figure>` / `<div>` 成为内容块的直接子元素，
+    避免浏览器隐式闭合 `<p>` 后留下空段落间距。
+    """
     for index, fragment in enumerate(parts):
-        markdown_html = markdown_html.replace(f"\x00ATTACH:{index}\x00", fragment)
+        token = f"\x00ATTACH:{index}\x00"
+        markdown_html = markdown_html.replace(f"<p>{token}</p>", fragment)
+        markdown_html = markdown_html.replace(token, fragment)
     return markdown_html
 
 

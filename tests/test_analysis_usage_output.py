@@ -28,7 +28,7 @@ class AnalysisUsageOutputTests(unittest.IsolatedAsyncioTestCase):
                    return_value=RenderOutcome(images=images or [])) as render:
             result = await self.analyzer._prepare_output(
                 config_name="main", settings=AnalysisSettings(), raw_report="分析正文",
-                header="报告头", archive=None,
+                information={"project": "MAN", "file": "demo.zip"}, archive=None,
                 segments=[OutSegment(kind="text", text="分析正文")], notes=notes,
                 render_followup=True, session_id="analysis-session",
                 show_analysis_usage=analysis,
@@ -52,6 +52,13 @@ class AnalysisUsageOutputTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(rendered, bool(images))
                 if not rendered:
                     self.assertIn("本次分析 Token 用量：输入 12,000 · 输出 345 · 合计 12,345 tokens · 缓存命中率：80.0%", segments[-1].text)
+
+    async def test_report_head_is_not_injected_into_markdown(self):
+        (_, _, _, _), render = await self.prepare("image", images=[b"png"])
+        markdown = render.call_args.args[0]
+        self.assertNotIn("<!-- information -->", markdown)
+        self.assertNotIn("<!-- section: 概览 -->", markdown)
+        self.assertIn("分析正文", markdown)
 
     async def test_followup_does_not_append_usage_line(self):
         for mode in ("text", "image"):

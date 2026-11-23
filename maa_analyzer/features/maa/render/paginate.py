@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Optional
 
 logger = logging.getLogger("Maa.Render.Paginate")
 
@@ -22,26 +23,39 @@ class BlockMetrics:
 
 
 def pack_blocks(blocks: list[BlockMetrics],
-                available_height: float) -> tuple[list[list[int]], list[str]]:
+                available_height: float,
+                first_available_height: Optional[float] = None,
+                ) -> tuple[list[list[int]], list[str]]:
     """
     把内容块装箱为每页的块索引列表。
 
     - `force_break_after` 一定在块后换页
     - 单块高于整页时单独成页并允许内部溢出（记录警告）
+    - `first_available_height` 可单独指定第 1 页的可用高度（报告头只在首屏
+      占位时会出现差异）；缺省与其余页一致
     """
     warnings: list[str] = []
     pages: list[list[int]] = []
     current: list[int] = []
     used = 0.0
     available = max(120.0, float(available_height or 0))
+    first_available = (
+        available if first_available_height is None
+        else max(120.0, float(first_available_height or 0))
+    )
+
+    def budget() -> float:
+        return first_available if not pages else available
 
     for block in blocks:
         height = max(0.0, float(block.height or 0))
-        if current and used + height > available:
+        limit = budget()
+        if current and used + height > limit:
             pages.append(current)
             current = []
             used = 0.0
-        if height > available and not current:
+            limit = budget()
+        if height > limit and not current:
             warnings.append(
                 f"内容块 #{block.index} 高于单页可用高度（{int(height)}px），已单独成页"
             )

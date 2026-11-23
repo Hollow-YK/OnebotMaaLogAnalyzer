@@ -50,6 +50,62 @@
   border-left-color: #e08a1e;
 }
 
+/* 报告头（information.html）：项目名 + 运行环境 + 文件信息 */
+.report-info {
+  margin: 0 0 14px;
+  break-inside: avoid;
+}
+
+.info-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #1f2a37;
+}
+
+.info-line {
+  margin: 0 0 2px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #6b7785;
+}
+
+.info-item {
+  display: inline-block;
+  margin-right: 14px;
+  word-break: break-all;
+}
+
+.info-item:empty {
+  display: none;
+}
+
+.info-ui {
+  font-weight: 600;
+  color: #2b3a4a;
+}
+
+/* 标签由模板 CSS 控制：值为空时整项隐藏（.info-item:empty） */
+.info-ui-version:not(:empty)::before { content: "软件版本 "; }
+.info-module-version:not(:empty)::before { content: "MaaFwApp "; }
+.info-resource-version:not(:empty)::before { content: "资源 "; }
+.info-framework-version:not(:empty)::before { content: "MaaFramework "; }
+.info-device:not(:empty)::before { content: "设备 "; }
+.info-os:not(:empty)::before { content: "系统 "; }
+.info-file:not(:empty)::before { content: "文件 "; }
+.info-size:not(:empty)::before { content: "大小 "; }
+
+.info-note {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #b24a3a;
+}
+
+.info-note:empty {
+  display: none;
+}
+
 .block p {
   margin: 0 0 10px;
 }
@@ -155,11 +211,45 @@
 }
 
 .attach-image figcaption {
-  margin-top: 6px;
+  margin-top: 8px;
   font-size: 12px;
   color: #6b7785;
-  text-align: center;
+  text-align: left;
   word-break: break-all;
+}
+
+/* 文件名 / 相对路径 / 来源 · 大小：固定信息，由 attach-*.html 排布 */
+.attach-name {
+  display: block;
+  font-weight: 600;
+  color: #2b3a4a;
+  word-break: break-all;
+}
+
+.attach-path {
+  display: block;
+  font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+  font-size: 12px;
+  color: #6b7785;
+  word-break: break-all;
+}
+
+.attach-meta {
+  display: block;
+  font-size: 12px;
+  color: #6b7785;
+}
+
+.attach-size:not(:empty)::before {
+  content: " · ";
+}
+
+.attach-status:not(:empty)::before {
+  content: " · ";
+}
+
+.attach-status {
+  color: #b24a3a;
 }
 
 .attach-file {
@@ -169,19 +259,7 @@
   border: 1px dashed #c5ced9;
   border-radius: 6px;
   background: #fafbfc;
-}
-
-.attach-name {
-  display: block;
-  font-weight: 600;
-  color: #2b3a4a;
-  word-break: break-all;
-}
-
-.attach-meta {
-  display: block;
-  font-size: 12px;
-  color: #6b7785;
+  box-sizing: border-box;
 }
 
 .attach-missing .attach-name,

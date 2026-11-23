@@ -3,10 +3,13 @@
 模板编辑器 — 单文件独立工具：`python tools/templates/editor.py`
 
 功能
-  - 直接读写工程根目录 `templates/` 下的模板文件（page.html / header.html /
-    footer.html / style.css 以及目录内其它 .css / .html）
+  - 直接读写工程根目录 `templates/` 下的模板文件（page.html / attach-img.html /
+    attach-file.html / information.html / header.html / footer.html / style.css
+    以及目录内其它 .css / .html / .txt / .json / .svg / .md）
   - 左侧模板与文件管理，中间代码编辑（行号 / Tab 缩进 / Ctrl+S 保存），
     右侧实时渲染预览
+  - 预览自带示例附件（图片 + 文件 + 缺失），可同时查看 attach-img.html /
+    attach-file.html 两种外壳；填「附件目录」可换成真实文件
   - 保存后自动重渲染；外部改动会被探测并提示
   - 新建 / 复制 / 删除模板；上次保存内容自动备份，可一键撤销
   - 预览走的是线上同一套 `features.maa.render` 管线，不是另写一套排版
@@ -34,12 +37,14 @@ import logging
 import os
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import threading
 import time
 import traceback
 import webbrowser
+import zlib
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -54,6 +59,7 @@ try:
     from maa_analyzer.core.models import ReportConfig
     from maa_analyzer.features.maa.render import RenderAttachment
     from maa_analyzer.features.maa.render import _attachment_html as production_attachment_html
+    from maa_analyzer.features.maa.render import _fallback_information as production_information_html
     from maa_analyzer.features.maa.render.browser import (
         BrowserRenderer,
         BrowserUnavailable,
@@ -82,7 +88,8 @@ MAX_WRITE_BYTES = 1024 * 1024
 MAX_BODY_BYTES = 2 * 1024 * 1024
 
 # 模板目录内可编辑的文件（其余扩展名一律拒绝）
-KNOWN_FILES = ("page.html", "header.html", "footer.html", "style.css")
+KNOWN_FILES = ("page.html", "attach-img.html", "attach-file.html",
+               "information.html", "header.html", "footer.html", "style.css")
 _SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.(html|css|txt|json|svg|md)$")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")
 
@@ -121,8 +128,53 @@ PLACEHOLDERS = (
     ("pages", "总页数"),
     ("header", "页眉内容（仅 page.html）"),
     ("footer", "页脚内容（仅 page.html）"),
+    ("information", "报告头（自定义区域，仅第 1 页）"),
     ("content", "正文内容（仅 page.html）"),
 )
+
+# 附件外壳专用占位符（attach-img.html / attach-file.html）
+ATTACH_PLACEHOLDERS = (
+    ("name", "文件名"),
+    ("path", "来源内相对路径"),
+    ("source", "来源（日志包 / 仓库）"),
+    ("size", "大小（未知时为空）"),
+    ("status", "状态说明（未找到 / 未内联）"),
+    ("kind", "image / file / missing / skipped"),
+    ("class", "推荐容器类名"),
+    ("src", "图片 data URI（仅 attach-img.html）"),
+)
+
+# 报告头外壳专用占位符（information.html）
+INFO_PLACEHOLDERS = (
+    ("project", "项目名"),
+    ("ui", "UI 名称（MXU / MFAAvalonia / …）"),
+    ("ui_version", "软件版本"),
+    ("module_version", "MaaFwApp 模块版本"),
+    ("resource_version", "资源 / 项目版本"),
+    ("framework_version", "MaaFramework 版本"),
+    ("device", "设备"),
+    ("os", "系统"),
+    ("file", "日志包文件名"),
+    ("size", "压缩包大小"),
+    ("log_count", "日志文件数"),
+    ("image_count", "错误截图数"),
+    ("part_note", "分卷提示（无则空）"),
+)
+
+# 预览用的示例运行环境（真实取值来自本次分析的日志包）
+DEMO_INFORMATION = {
+    "ui": "MFAAvalonia",
+    "ui_version": "1.2.3",
+    "module_version": "",
+    "resource_version": "1.0.0-alpha.9",
+    "framework_version": "v5.3.1",
+    "device": "Pixel 7",
+    "os": "Android 13",
+    "size": "12.3 MB",
+    "log_count": "4",
+    "image_count": "2",
+    "part_note": "",
+}
 
 SAMPLE_MARKDOWN = """<!-- section: 结论 -->
 本次日志显示 **模板匹配失败**：`PVP_Click:StartBattle` 的匹配分数为 0.62，低于配置阈值 0.70，
@@ -163,9 +215,15 @@ SAMPLE_MARKDOWN = """<!-- section: 结论 -->
 <!-- page-break -->
 
 <!-- section: 附件与图文混排 -->
-填了「附件目录」后，下面的指令会内联渲染成图片或文件块；没填时显示「未找到附件」占位。
+内置示例附件始终可用，用来同时预览 `attach-img.html`（图片）与 `attach-file.html`
+（文件卡片）；填「附件目录」后，同路径的文件会替换示例。最后一条故意找不到，
+用于预览「未找到附件」占位。
 
 [附件@日志: on_error/on_error_20260101_120002.png]
+
+[附件@项目: assets/resource/pipeline/PVP.json]
+
+[附件@日志: on_error/on_error_demo_missing.png]
 
 <!-- section: 需要补充 -->
 - 若仍失败，请上传 `debug/on_error/` 目录下的完整截图。
@@ -206,6 +264,14 @@ def default_meta() -> dict[str, str]:
         "model": "deepseek-v4.1-flash",
         "usage": "输入 18.4k · 输出 5.2k · 合计 23.6k tokens · main/deepseek-v4.1-flash ×4",
     }
+
+
+def preview_information(meta: dict) -> dict[str, str]:
+    """预览用的报告头取值：项目名 / 文件名跟随元信息，其余用示例值。"""
+    values = dict(DEMO_INFORMATION)
+    values["project"] = str(meta.get("project") or "") or "MAA"
+    values["file"] = str(meta.get("file") or "")
+    return values
 
 
 class _EditorError(ValueError):
@@ -263,7 +329,8 @@ def list_templates() -> list[dict]:
         items.append({
             "name": entry.name,
             "files": files,
-            "ok": (entry / "page.html").is_file(),
+            "ok": all((entry / name).is_file() for name in (
+                "page.html", "attach-img.html", "attach-file.html")),
         })
     return items
 
@@ -378,6 +445,68 @@ def delete_template(name: Any) -> dict:
 
 # ── 附件索引与渲染 ──
 
+# 内置示例附件：没填「附件目录」时也能同时预览图片外壳与文件外壳
+DEMO_IMAGE_PATH = "on_error/on_error_20260101_120002.png"
+DEMO_FILE_PATH = "assets/resource/pipeline/PVP.json"
+DEMO_FILE_BODY = (
+    b'"PVP_Click:StartBattle": {\n'
+    b'  "recognition": "TemplateMatch",\n'
+    b'  "template": "PVP/StartBattle.png",\n'
+    b'  "threshold": 0.70,\n'
+    b'  "roi": [820, 640, 240, 90]\n'
+    b'}\n'
+)
+
+_DEMO_IMAGE_CACHE: Optional[bytes] = None
+
+
+def _demo_png(width: int = 480, height: int = 240) -> bytes:
+    """生成一张「错误截图」样子的 PNG（不依赖 Pillow）。"""
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)                      # PNG 每行的 filter 字节
+        for x in range(width):
+            if y < 34:
+                color = (42, 48, 56)        # 顶部工具栏
+            elif 64 <= y < 88 and 40 <= x < width - 40:
+                color = (176, 62, 52)       # 「识别失败」红条
+            elif 116 <= y < 200 and 120 <= x < 360:
+                color = (58, 66, 78)        # ROI 框
+            else:
+                color = (28, 32, 38)
+            rows += bytes(color)
+    raw = bytes(rows)
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9))
+            + chunk(b"IEND", b""))
+
+
+def demo_attachments() -> dict[str, RenderAttachment]:
+    """内置示例附件（图片 + 文件），两种外壳在预览里都能看到。"""
+    global _DEMO_IMAGE_CACHE
+    if _DEMO_IMAGE_CACHE is None:
+        _DEMO_IMAGE_CACHE = _demo_png()
+    image = RenderAttachment(
+        path=DEMO_IMAGE_PATH, kind="image", data=_DEMO_IMAGE_CACHE,
+        origin=f"日志包 {DEMO_IMAGE_PATH}",
+    )
+    file_item = RenderAttachment(
+        path=DEMO_FILE_PATH, kind="file", data=DEMO_FILE_BODY,
+        origin=f"项目 {DEMO_FILE_PATH}",
+    )
+    indexed: dict[str, RenderAttachment] = {}
+    for alias in ("zip", "repo"):
+        indexed[f"{alias}:{DEMO_IMAGE_PATH.lower()}"] = image
+        indexed[f"{alias}:{DEMO_FILE_PATH.lower()}"] = file_item
+    return indexed
+
+
 def index_attachments(raw_dir: Any) -> dict[str, RenderAttachment]:
     """
     把「附件目录」里的文件索引成与线上一致的 key。
@@ -385,8 +514,11 @@ def index_attachments(raw_dir: Any) -> dict[str, RenderAttachment]:
     两种摆放都支持（相对路径按工程根目录解析）：
         <目录>/debug/a.png       → zip:debug/a.png / repo:debug/a.png
         <目录>/zip/debug/a.png   → 同上（首段只用来区分来源，不进 key）
+
+    始终先放入内置示例附件（图片 + 文件），目录里的同路径文件会覆盖它们，
+    因此预览任何时候都同时有图片与文件两种外壳。
     """
-    indexed: dict[str, RenderAttachment] = {}
+    indexed = demo_attachments()
     text = str(raw_dir or "").strip()
     if not text:
         return indexed
@@ -495,14 +627,21 @@ def run_render(payload: dict) -> dict:
             render_timeout_ms=_int(payload.get("timeoutMs"), 20000, 2000, 120000),
         )
         attachments = index_attachments(payload.get("attachDir"))
+        information = preview_information(meta)
+        information_html = (
+            template.render_information(information)
+            if template.information
+            else production_information_html(information)
+        )
 
         with _LOCK:
             renderer = _get_renderer()
             images = renderer.render(
                 markdown, report, template, meta,
                 attachment_html=lambda item: production_attachment_html(
-                    item, attachments, True,
+                    template, item, attachments, True,
                 ),
+                information_html=information_html,
             )
 
         return {
@@ -541,6 +680,12 @@ def collect_state() -> dict:
         "knownFiles": list(KNOWN_FILES),
         "metaLabels": [{"key": key, "label": label} for key, label in META_LABELS],
         "placeholders": [{"key": key, "label": label} for key, label in PLACEHOLDERS],
+        "attachPlaceholders": [
+            {"key": key, "label": label} for key, label in ATTACH_PLACEHOLDERS
+        ],
+        "infoPlaceholders": [
+            {"key": key, "label": label} for key, label in INFO_PLACEHOLDERS
+        ],
         "defaults": {"width": 1080, "maxHeight": 2000, "maxPages": 8, "scale": 1.0},
         "browser": find_browser(BROWSER_PATH) or "",
         "revision": templates_revision(),
@@ -654,6 +799,12 @@ def index_html() -> str:
             ensure_ascii=False))
         .replace("__PLACEHOLDERS__", json.dumps(
             [{"key": key, "label": label} for key, label in PLACEHOLDERS],
+            ensure_ascii=False))
+        .replace("__ATTACH_PLACEHOLDERS__", json.dumps(
+            [{"key": key, "label": label} for key, label in ATTACH_PLACEHOLDERS],
+            ensure_ascii=False))
+        .replace("__INFO_PLACEHOLDERS__", json.dumps(
+            [{"key": key, "label": label} for key, label in INFO_PLACEHOLDERS],
             ensure_ascii=False))
         .replace("__KNOWN_FILES__", json.dumps(list(KNOWN_FILES)))
     )
@@ -1026,8 +1177,11 @@ _PAGE = r"""<!DOCTYPE html>
         </div>
         <div class="section">
           <h3>附件目录（可选）</h3>
-          <input id="attachDir" type="text" placeholder="留空 = 不内联附件" style="width:100%">
-          <div class="hint" style="margin-top:4px">用于验证 <code>[附件@日志: ...]</code> 的图文混排</div>
+          <input id="attachDir" type="text" placeholder="留空 = 用内置示例附件（图片 + 文件）" style="width:100%">
+          <div class="hint" style="margin-top:4px">
+            预览始终包含内置示例：一张图片、一个文件卡片，外加一条「未找到附件」；
+            填目录后同路径的文件会替换示例。
+          </div>
         </div>
         <div class="section">
           <h3>Markdown 内容</h3>
@@ -1045,6 +1199,22 @@ _PAGE = r"""<!DOCTYPE html>
           <h3>可用的占位符</h3>
           <div class="hint" style="margin-bottom:6px">点击插入到光标处（代码或 Markdown）</div>
           <div id="phList"></div>
+        </div>
+        <div class="section">
+          <h3>附件占位符</h3>
+          <div class="hint" style="margin-bottom:6px">
+            只用于 <code>attach-img.html</code> / <code>attach-file.html</code>：
+            插件为每条附件提供一组取值，外壳结构由主题决定。
+          </div>
+          <div id="attachPhList"></div>
+        </div>
+        <div class="section">
+          <h3>报告头占位符</h3>
+          <div class="hint" style="margin-bottom:6px">
+            只用于 <code>information.html</code>（可选文件）：预览里是示例运行环境，
+            运行环境各字段为空时整项隐藏（默认模板用 <code>:empty</code> 控制）。
+          </div>
+          <div id="infoPhList"></div>
         </div>
       </div>
     </div>
@@ -1105,6 +1275,8 @@ _PAGE = r"""<!DOCTYPE html>
 <script>
 const META_LABELS = __META_LABELS__;
 const PLACEHOLDERS = __PLACEHOLDERS__;
+const ATTACH_PLACEHOLDERS = __ATTACH_PLACEHOLDERS__;
+const INFO_PLACEHOLDERS = __INFO_PLACEHOLDERS__;
 const KNOWN_FILES = __KNOWN_FILES__;
 
 const $ = (id) => document.getElementById(id);
@@ -1701,9 +1873,14 @@ function buildMetaForm() {
 }
 
 function buildPlaceholderList() {
-  const host = $('phList');
+  fillPlaceholderList($('phList'), PLACEHOLDERS);
+  fillPlaceholderList($('attachPhList'), ATTACH_PLACEHOLDERS);
+  fillPlaceholderList($('infoPhList'), INFO_PLACEHOLDERS);
+}
+
+function fillPlaceholderList(host, items) {
   host.innerHTML = '';
-  for (const item of PLACEHOLDERS) {
+  for (const item of items) {
     const row = document.createElement('div');
     row.className = 'ph-item';
     const code = document.createElement('code');

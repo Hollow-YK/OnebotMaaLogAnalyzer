@@ -583,8 +583,11 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
 | `render_followup` | `bool` / `true` | 追问回答是否也渲染成图片 | `"render_followup": false` |
 
 - 渲染引擎为**无头 Edge / Chrome / Chromium + CDP**
-- 模板固定放在工程根目录 `templates/<目录名>/`（`page.html` 必需，可含 `header.html` / `footer.html` / `style.css`）
+- 模板固定放在工程根目录 `templates/<目录名>/`（`page.html` / `attach-img.html` /
+  `attach-file.html` 必需，可含 `information.html`（报告头，可选）/ `header.html` /
+  `footer.html` / `style.css`）
 - 报告正文按 `<!-- section: 标题 -->` 分块顺序拼接；`<!-- page-break -->` 强制换页
+- 报告头不进正文：由主题的 `{{information}}` 插槽渲染（仅第 1 页），主题决定位置
 - 内联图片按正文宽度等比缩放，**没有单张体积上限**（旧的 `settings.max_image_mb` 已删除）
 
 完整的渲染管线、分页算法、浏览器探测顺序与模板编写指南见 [图片化报告与模板](render.md)。

@@ -15,7 +15,7 @@ import html
 import logging
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from ....core.concurrency import KeyedLocks, KeyedThreadLocks
@@ -62,6 +62,10 @@ def _key(source: str, path: str) -> str:
     return f"{source}:{str(path or '').replace(chr(92), '/').lower()}"
 
 
+# 附件来源 → 展示用的中文标签（模板 `{{source}}` 直接使用）
+_SOURCE_LABELS = {"zip": "日志包", "repo": "仓库"}
+
+
 def _format_size(size: int) -> str:
     value = float(size or 0)
     for unit in ("B", "KB", "MB", "GB"):
@@ -71,35 +75,89 @@ def _format_size(size: int) -> str:
     return f"{value:.1f} GB"
 
 
-def _attachment_html(attachment, attachments: dict[str, RenderAttachment],
+def _attachment_html(template: TemplateSet, attachment,
+                     attachments: dict[str, RenderAttachment],
                      embed_images: bool) -> str:
-    """把一条附件指令转成模板可定制的 HTML 外壳。"""
+    """
+    把一条附件指令交给模板的 `attach-img.html` / `attach-file.html` 渲染。
+
+    插件只提供取值（文件名 / 相对路径 / 来源 / 大小 / 状态），
+    外壳结构与样式完全由主题决定。
+    """
     item = attachments.get(_key(attachment.source, attachment.path))
-    path = html.escape(attachment.path)
+    path = str(attachment.path or (item.path if item else "")).replace("\\", "/")
+    values = {
+        "name": PurePosixPath(path).name or path,
+        "path": path,
+        "source": _SOURCE_LABELS.get(str(attachment.source or ""), "附件"),
+        "size": "",
+        "status": "",
+        "kind": "missing",
+        "class": "attach-file attach-missing",
+        "src": "",
+    }
     if item is None or not item.data:
-        return (
-            '<div class="attach-file attach-missing">'
-            f'<span class="attach-name">未找到附件：{path}</span></div>'
-        )
-    origin = html.escape(item.origin or attachment.path)
+        values["status"] = "未找到附件"
+        return template.render_attach(values)
+
+    values["size"] = _format_size(len(item.data))
+    values["kind"] = item.kind
+    values["class"] = "attach-file"
     if item.kind == "image":
         if not embed_images:
-            return (
-                '<div class="attach-file attach-image-skipped">'
-                f'<span class="attach-name">图片未内联：{path}</span></div>'
-            )
+            values["kind"] = "skipped"
+            values["status"] = "图片未内联"
+            values["class"] = "attach-file attach-image-skipped"
+            return template.render_attach(values)
         from ....core.vision import mime_for
 
         encoded = base64.b64encode(item.data).decode("ascii")
-        return (
-            '<figure class="attach-image">'
-            f'<img src="data:{mime_for(item.path)};base64,{encoded}" alt="{path}">'
-            f'<figcaption>{origin}</figcaption></figure>'
-        )
+        values["class"] = "attach-image"
+        values["src"] = f"data:{mime_for(item.path)};base64,{encoded}"
+        return template.render_attach(values, image=True)
+    return template.render_attach(values)
+
+
+def _fallback_information(values: dict[str, str]) -> str:
+    """
+    主题没提供 information.html 时的内置报告头外壳。
+
+    只保证信息齐全、可读（轻量内联样式），配色与排版交给主题的
+    information.html + style.css。
+    """
+    def text(key: str) -> str:
+        return html.escape(str(values.get(key) or "").strip())
+
+    environment = " · ".join(
+        item for item in (
+            text("ui"), text("ui_version"), text("module_version"),
+            text("resource_version"), text("framework_version"),
+            text("device"), text("os"),
+        ) if item
+    ) or "未能识别 UI 与版本信息"
+    meta = " · ".join(
+        item for item in (
+            text("file"), text("size"),
+            f"日志 {text('log_count')} 个" if text("log_count") else "",
+            f"错误截图 {text('image_count')} 张" if text("image_count") else "",
+        ) if item
+    )
+    part_note = text("part_note")
+    note = (
+        '<div class="info-note" style="font-size:12px;color:#666;'
+        'line-height:1.6;">'
+        f"{part_note}</div>"
+    ) if part_note else ""
     return (
-        '<div class="attach-file">'
-        f'<span class="attach-name">{html.escape(Path(item.path).name)}</span>'
-        f'<span class="attach-meta">{origin} · {_format_size(len(item.data))}</span>'
+        '<div class="report-info" style="margin:0 0 12px;">'
+        '<div class="info-title" style="font-size:18px;font-weight:600;'
+        'margin:0 0 6px;">'
+        f"{text('project') or 'MaaXXX'} 日志分析结果</div>"
+        '<div class="info-env" style="font-size:12px;color:#666;line-height:1.6;">'
+        f"运行环境：{environment}</div>"
+        '<div class="info-meta" style="font-size:12px;color:#666;line-height:1.6;">'
+        f"{meta}</div>"
+        f"{note}"
         "</div>"
     )
 
@@ -142,6 +200,7 @@ def render_sync(
     *,
     meta: dict,
     attachments: Optional[dict[str, RenderAttachment]] = None,
+    information: Optional[dict[str, str]] = None,
     data_dir: str | Path = "data",
     template_root: str | Path = "templates",
 ) -> RenderOutcome:
@@ -169,6 +228,12 @@ def render_sync(
     queue_key = _render_queue_key(data_dir)
     embed = bool(report.embed_attachments)
     attachments = attachments or {}
+    information_html = ""
+    if information is not None:
+        information_html = (
+            template.render_information(information)
+            if template.information else _fallback_information(information)
+        )
     # 同一 data_dir 下所有配置共用一个浏览器配置文件：渲染、失败重启、
     # 关闭都在同一把队列锁内完成，避免并发分析互相切页面 / 串图 / 关掉对方的连接。
     with _RENDER_SYNC_LOCKS.get(queue_key):
@@ -179,7 +244,10 @@ def render_sync(
                 report,
                 template,
                 meta,
-                attachment_html=lambda item: _attachment_html(item, attachments, embed),
+                attachment_html=lambda item: _attachment_html(
+                    template, item, attachments, embed,
+                ),
+                information_html=information_html,
             )
         except BrowserUnavailable as exc:
             outcome.reason = str(exc)
@@ -208,6 +276,7 @@ async def render_report(
     *,
     meta: dict,
     attachments: Optional[dict[str, RenderAttachment]] = None,
+    information: Optional[dict[str, str]] = None,
     data_dir: str | Path = "data",
     template_root: str | Path = "templates",
 ) -> RenderOutcome:
@@ -222,8 +291,8 @@ async def render_report(
     async with _RENDER_ASYNC_QUEUE.get(_render_queue_key(data_dir)):
         return await asyncio.to_thread(
             render_sync, markdown, report,
-            meta=meta, attachments=attachments, data_dir=data_dir,
-            template_root=template_root,
+            meta=meta, attachments=attachments, information=information,
+            data_dir=data_dir, template_root=template_root,
         )
 
 
