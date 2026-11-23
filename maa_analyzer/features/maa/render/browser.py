@@ -28,6 +28,7 @@ from ....core.models import ReportConfig
 from ....features.maa.render.paginate import (
     MEASURE_BLOCKS_JS,
     MEASURE_CHROME_JS,
+    MEASURE_DOCUMENT_HEIGHT_JS,
     MEASURE_PAGE_BOX_JS,
     BlockMetrics,
     pack_blocks,
@@ -410,6 +411,18 @@ class BrowserRenderer:
         value = self._eval(script, deadline)
         return value if isinstance(value, dict) else {}
 
+    def _page_available(self, max_height: int, deadline: float) -> float:
+        """空正文页面高度 = 模板框架占用；返回该页可用的正文高度。
+
+        报告头插槽可能出现在页眉、页脚或正文框之间的任意位置，逐项累加容易漏算，
+        直接用整页高度更稳。
+        """
+        box = self._measure(MEASURE_DOCUMENT_HEIGHT_JS, deadline)
+        height = float(box.get("height") or 0)
+        if height <= 0:
+            return float(max_height) * 0.8
+        return max(120.0, float(max_height) - height)
+
     def _capture(self, box: dict, max_height: int,
                  deadline: float) -> bytes:
         assert self._cdp is not None
@@ -451,11 +464,14 @@ class BrowserRenderer:
         meta: dict,
         *,
         attachment_html,
+        information_html: str = "",
     ) -> list[bytes]:
         """把报告渲染为若干 PNG/JPEG 字节（串行）。"""
         from ....features.maa.render.markdown import parse_report
 
         timeout = max(1.0, float(report.render_timeout_ms or 8000) / 1000.0)
+        # 报告头不参与正文解析：它由主题的 {{information}} 插槽渲染
+        # （page.html / header.html / footer.html），只在第 1 页有值。
         parsed = parse_report(markdown, attachment_html)
         if not parsed.blocks:
             raise BrowserUnavailable("报告没有可渲染的内容")
@@ -465,7 +481,7 @@ class BrowserRenderer:
 
         try:
             return self._render_once(parsed, report, template, meta, width,
-                                     max_height, timeout)
+                                     max_height, timeout, information_html)
         except Exception as exc:
             # 进程 / 连接异常或超时：重启一次后重试
             logger.warning(f"[渲染] 首次渲染失败，尝试重启浏览器：{exc}")
@@ -475,11 +491,11 @@ class BrowserRenderer:
             except Exception as restart_exc:
                 raise BrowserUnavailable(str(restart_exc)) from restart_exc
             return self._render_once(parsed, report, template, meta, width,
-                                     max_height, timeout)
+                                     max_height, timeout, information_html)
 
     def _render_once(self, parsed, report: ReportConfig, template: TemplateSet,
                      meta: dict, width: int, max_height: int,
-                     timeout: float) -> list[bytes]:
+                     timeout: float, information_html: str = "") -> list[bytes]:
         self.start()
         assert self._cdp is not None
         deadline = time.monotonic() + timeout
@@ -497,14 +513,32 @@ class BrowserRenderer:
         )
         self._eval(f"window.__MAA_MAX_PAGE_HEIGHT__ = {max_height};", deadline)
 
-        # ① 空正文测模板自身占用
+        # ① 空正文测模板自身占用（报告头只占首屏：首屏与后续页分别量）
         empty_doc = template.document(
-            template.render_page(content="", meta=meta, page=1, pages=1),
+            template.render_page(content="", meta=meta, page=1, pages=1,
+                                 information=information_html),
             width=width, max_height=max_height, font_family=report.font_family,
         )
         self._set_html(empty_doc, deadline)
-        chrome = self._measure(MEASURE_CHROME_JS, deadline)
-        available = float(chrome.get("available") or (max_height * 0.8))
+        if template.information_slot:
+            # 报告头插槽可能放在页面框架任意位置：空正文时的页面高度即框架占用
+            first_available = self._page_available(max_height, deadline)
+        else:
+            chrome = self._measure(MEASURE_CHROME_JS, deadline)
+            first_available = float(
+                chrome.get("available") or (max_height * 0.8)
+            )
+        rest_available = first_available
+        if template.information_slot:
+            # 第 2 页起没有报告头，单独量一次（卡片/信息块消失后的骨架）
+            rest_doc = template.document(
+                template.render_page(content="", meta=meta, page=2, pages=2,
+                                     information=information_html),
+                width=width, max_height=max_height,
+                font_family=report.font_family,
+            )
+            self._set_html(rest_doc, deadline)
+            rest_available = self._page_available(max_height, deadline)
 
         # ② 全部内容块测高度
         all_content = "".join(block.html for block in parsed.blocks)
@@ -523,7 +557,9 @@ class BrowserRenderer:
                          force_break_after=block.force_break_after)
             for index, block in enumerate(parsed.blocks)
         ]
-        pages, pack_warnings = pack_blocks(metrics, available)
+        pages, pack_warnings = pack_blocks(
+            metrics, rest_available, first_available_height=first_available,
+        )
         pages, truncated = truncate_pages(pages, int(report.max_pages or 6))
         for warning in pack_warnings:
             logger.warning(f"[渲染] {warning}")
@@ -539,7 +575,8 @@ class BrowserRenderer:
                 )
             document = template.document(
                 template.render_page(
-                    content=content, meta=meta, page=page_index, pages=total
+                    content=content, meta=meta, page=page_index, pages=total,
+                    information=information_html,
                 ),
                 width=width, max_height=max_height,
                 font_family=report.font_family,

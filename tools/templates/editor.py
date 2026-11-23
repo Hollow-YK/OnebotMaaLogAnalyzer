@@ -4,8 +4,8 @@
 
 功能
   - 直接读写工程根目录 `templates/` 下的模板文件（page.html / attach-img.html /
-    attach-file.html / header.html / footer.html / style.css 以及目录内其它
-    .css / .html / .txt / .json / .svg / .md）
+    attach-file.html / information.html / header.html / footer.html / style.css
+    以及目录内其它 .css / .html / .txt / .json / .svg / .md）
   - 左侧模板与文件管理，中间代码编辑（行号 / Tab 缩进 / Ctrl+S 保存），
     右侧实时渲染预览
   - 预览自带示例附件（图片 + 文件 + 缺失），可同时查看 attach-img.html /
@@ -59,6 +59,7 @@ try:
     from maa_analyzer.core.models import ReportConfig
     from maa_analyzer.features.maa.render import RenderAttachment
     from maa_analyzer.features.maa.render import _attachment_html as production_attachment_html
+    from maa_analyzer.features.maa.render import _fallback_information as production_information_html
     from maa_analyzer.features.maa.render.browser import (
         BrowserRenderer,
         BrowserUnavailable,
@@ -88,7 +89,7 @@ MAX_BODY_BYTES = 2 * 1024 * 1024
 
 # 模板目录内可编辑的文件（其余扩展名一律拒绝）
 KNOWN_FILES = ("page.html", "attach-img.html", "attach-file.html",
-               "header.html", "footer.html", "style.css")
+               "information.html", "header.html", "footer.html", "style.css")
 _SAFE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*\.(html|css|txt|json|svg|md)$")
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")
 
@@ -127,6 +128,7 @@ PLACEHOLDERS = (
     ("pages", "总页数"),
     ("header", "页眉内容（仅 page.html）"),
     ("footer", "页脚内容（仅 page.html）"),
+    ("information", "报告头（自定义区域，仅第 1 页）"),
     ("content", "正文内容（仅 page.html）"),
 )
 
@@ -141,6 +143,38 @@ ATTACH_PLACEHOLDERS = (
     ("class", "推荐容器类名"),
     ("src", "图片 data URI（仅 attach-img.html）"),
 )
+
+# 报告头外壳专用占位符（information.html）
+INFO_PLACEHOLDERS = (
+    ("project", "项目名"),
+    ("ui", "UI 名称（MXU / MFAAvalonia / …）"),
+    ("ui_version", "软件版本"),
+    ("module_version", "MaaFwApp 模块版本"),
+    ("resource_version", "资源 / 项目版本"),
+    ("framework_version", "MaaFramework 版本"),
+    ("device", "设备"),
+    ("os", "系统"),
+    ("file", "日志包文件名"),
+    ("size", "压缩包大小"),
+    ("log_count", "日志文件数"),
+    ("image_count", "错误截图数"),
+    ("part_note", "分卷提示（无则空）"),
+)
+
+# 预览用的示例运行环境（真实取值来自本次分析的日志包）
+DEMO_INFORMATION = {
+    "ui": "MFAAvalonia",
+    "ui_version": "1.2.3",
+    "module_version": "",
+    "resource_version": "1.0.0-alpha.9",
+    "framework_version": "v5.3.1",
+    "device": "Pixel 7",
+    "os": "Android 13",
+    "size": "12.3 MB",
+    "log_count": "4",
+    "image_count": "2",
+    "part_note": "",
+}
 
 SAMPLE_MARKDOWN = """<!-- section: 结论 -->
 本次日志显示 **模板匹配失败**：`PVP_Click:StartBattle` 的匹配分数为 0.62，低于配置阈值 0.70，
@@ -230,6 +264,14 @@ def default_meta() -> dict[str, str]:
         "model": "deepseek-v4.1-flash",
         "usage": "输入 18.4k · 输出 5.2k · 合计 23.6k tokens · main/deepseek-v4.1-flash ×4",
     }
+
+
+def preview_information(meta: dict) -> dict[str, str]:
+    """预览用的报告头取值：项目名 / 文件名跟随元信息，其余用示例值。"""
+    values = dict(DEMO_INFORMATION)
+    values["project"] = str(meta.get("project") or "") or "MAA"
+    values["file"] = str(meta.get("file") or "")
+    return values
 
 
 class _EditorError(ValueError):
@@ -585,6 +627,12 @@ def run_render(payload: dict) -> dict:
             render_timeout_ms=_int(payload.get("timeoutMs"), 20000, 2000, 120000),
         )
         attachments = index_attachments(payload.get("attachDir"))
+        information = preview_information(meta)
+        information_html = (
+            template.render_information(information)
+            if template.information
+            else production_information_html(information)
+        )
 
         with _LOCK:
             renderer = _get_renderer()
@@ -593,6 +641,7 @@ def run_render(payload: dict) -> dict:
                 attachment_html=lambda item: production_attachment_html(
                     template, item, attachments, True,
                 ),
+                information_html=information_html,
             )
 
         return {
@@ -633,6 +682,9 @@ def collect_state() -> dict:
         "placeholders": [{"key": key, "label": label} for key, label in PLACEHOLDERS],
         "attachPlaceholders": [
             {"key": key, "label": label} for key, label in ATTACH_PLACEHOLDERS
+        ],
+        "infoPlaceholders": [
+            {"key": key, "label": label} for key, label in INFO_PLACEHOLDERS
         ],
         "defaults": {"width": 1080, "maxHeight": 2000, "maxPages": 8, "scale": 1.0},
         "browser": find_browser(BROWSER_PATH) or "",
@@ -750,6 +802,9 @@ def index_html() -> str:
             ensure_ascii=False))
         .replace("__ATTACH_PLACEHOLDERS__", json.dumps(
             [{"key": key, "label": label} for key, label in ATTACH_PLACEHOLDERS],
+            ensure_ascii=False))
+        .replace("__INFO_PLACEHOLDERS__", json.dumps(
+            [{"key": key, "label": label} for key, label in INFO_PLACEHOLDERS],
             ensure_ascii=False))
         .replace("__KNOWN_FILES__", json.dumps(list(KNOWN_FILES)))
     )
@@ -1153,6 +1208,14 @@ _PAGE = r"""<!DOCTYPE html>
           </div>
           <div id="attachPhList"></div>
         </div>
+        <div class="section">
+          <h3>报告头占位符</h3>
+          <div class="hint" style="margin-bottom:6px">
+            只用于 <code>information.html</code>（可选文件）：预览里是示例运行环境，
+            运行环境各字段为空时整项隐藏（默认模板用 <code>:empty</code> 控制）。
+          </div>
+          <div id="infoPhList"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -1213,6 +1276,7 @@ _PAGE = r"""<!DOCTYPE html>
 const META_LABELS = __META_LABELS__;
 const PLACEHOLDERS = __PLACEHOLDERS__;
 const ATTACH_PLACEHOLDERS = __ATTACH_PLACEHOLDERS__;
+const INFO_PLACEHOLDERS = __INFO_PLACEHOLDERS__;
 const KNOWN_FILES = __KNOWN_FILES__;
 
 const $ = (id) => document.getElementById(id);
@@ -1811,6 +1875,7 @@ function buildMetaForm() {
 function buildPlaceholderList() {
   fillPlaceholderList($('phList'), PLACEHOLDERS);
   fillPlaceholderList($('attachPhList'), ATTACH_PLACEHOLDERS);
+  fillPlaceholderList($('infoPhList'), INFO_PLACEHOLDERS);
 }
 
 function fillPlaceholderList(host, items) {

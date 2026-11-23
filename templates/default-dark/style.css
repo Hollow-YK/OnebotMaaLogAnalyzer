@@ -50,6 +50,62 @@
   border-left-color: #e5a144;
 }
 
+/* 报告头（information.html）：项目名 + 运行环境 + 文件信息 */
+.report-info {
+  margin: 0 0 14px;
+  break-inside: avoid;
+}
+
+.info-title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: #eef2f7;
+}
+
+.info-line {
+  margin: 0 0 2px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #8b96a3;
+}
+
+.info-item {
+  display: inline-block;
+  margin-right: 14px;
+  word-break: break-all;
+}
+
+.info-item:empty {
+  display: none;
+}
+
+.info-ui {
+  font-weight: 600;
+  color: #d3dce6;
+}
+
+/* 标签由模板 CSS 控制：值为空时整项隐藏（.info-item:empty） */
+.info-ui-version:not(:empty)::before { content: "软件版本 "; }
+.info-module-version:not(:empty)::before { content: "MaaFwApp "; }
+.info-resource-version:not(:empty)::before { content: "资源 "; }
+.info-framework-version:not(:empty)::before { content: "MaaFramework "; }
+.info-device:not(:empty)::before { content: "设备 "; }
+.info-os:not(:empty)::before { content: "系统 "; }
+.info-file:not(:empty)::before { content: "文件 "; }
+.info-size:not(:empty)::before { content: "大小 "; }
+
+.info-note {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #ff8f7a;
+}
+
+.info-note:empty {
+  display: none;
+}
+
 .block p {
   margin: 0 0 10px;
 }

@@ -973,7 +973,7 @@ class MaaAnalyzer:
             if vision_note:
                 attach_notes.append(vision_note)
 
-            header = self._report_header_text(
+            information = self._report_info_values(
                 archive=archive, file_name=file_name, downloaded=downloaded,
                 project=project, log_count=len(archive.log_files),
                 image_count=len(archive.error_images),
@@ -982,7 +982,7 @@ class MaaAnalyzer:
                 config_name=config_name,
                 settings=settings,
                 raw_report=raw_report,
-                header=header,
+                information=information,
                 archive=archive,
                 segments=segments,
                 notes=attach_notes,
@@ -1343,31 +1343,45 @@ class MaaAnalyzer:
     # ════════════════════════════════════════════════════════════
 
     @staticmethod
-    def _report_header_text(*, archive, file_name: str, downloaded: int,
+    def _report_info_values(*, archive, file_name: str, downloaded: int,
                             project: ProjectConfig, log_count: int,
-                            image_count: int) -> str:
-        """渲染进图片的报告头（项目名 / 运行环境 / 文件信息）。"""
-        project_label = (
-            (archive.project_name if archive is not None else "")
-            or project.name or "MaaXXX"
-        )
-        lines = [f"{project_label} 日志分析结果"]
-        if archive is not None and archive.profile is not None:
-            lines.append(f"运行环境：{archive.profile.version_summary()}")
+                            image_count: int) -> dict[str, str]:
+        """
+        图片化报告头（概览）的取值，交给主题的 information.html。
+
+        运行环境逐项给出，模板自己拼行；缺失的项为空串。
+        """
+        profile = archive.profile if archive is not None else None
         part_note = next(
             (note for note in (archive.notes if archive is not None else [])
              if str(note).startswith("检测到分卷")),
             "",
         )
-        if part_note:
-            lines.append(part_note)
-        lines.extend([
-            f"文件：{file_name}",
-            f"大小：{format_bytes(downloaded)}",
-            f"日志文件：{log_count} 个",
-            f"错误截图：{image_count} 张",
-        ])
-        return "\n".join(lines)
+        project_label = (
+            (archive.project_name if archive is not None else "")
+            or project.name or "MaaXXX"
+        )
+        return {
+            "project": project_label,
+            "ui": profile.ui_name if profile is not None else "",
+            "ui_version": profile.ui_version if profile is not None else "",
+            "module_version": (
+                profile.module_version if profile is not None else ""
+            ),
+            "resource_version": (
+                profile.resource_version if profile is not None else ""
+            ),
+            "framework_version": (
+                profile.framework_version if profile is not None else ""
+            ),
+            "device": profile.device if profile is not None else "",
+            "os": profile.os_version if profile is not None else "",
+            "file": file_name,
+            "size": format_bytes(downloaded),
+            "log_count": str(log_count),
+            "image_count": str(image_count),
+            "part_note": part_note,
+        }
 
     @staticmethod
     def _content_has_image(content: Any) -> bool:
@@ -1490,7 +1504,7 @@ class MaaAnalyzer:
         config_name: str,
         settings: AnalysisSettings,
         raw_report: str,
-        header: str,
+        information: Optional[dict[str, str]] = None,
         archive: Optional[ArchiveInfo],
         segments: list[OutSegment],
         notes: list[str],
@@ -1539,7 +1553,9 @@ class MaaAnalyzer:
                 path=path, kind=seg.kind, data=seg.data, origin=seg.origin,
             )
 
-        markdown = "<!-- section: 概览 -->\n" + header + "\n\n" + raw_report
+        # 报告头不在正文里：它由主题的 {{information}} 插槽渲染（仅首页）。
+        # 纯文本路径不受影响（文本头由 AnalysisOutcome.header_text 提供）。
+        markdown = raw_report
         if notes:
             markdown += "\n\n" + "\n".join(f"- {note}" for note in notes)
 
@@ -1575,6 +1591,7 @@ class MaaAnalyzer:
             report_cfg,
             meta=meta,
             attachments=attachments,
+            information=information,
             data_dir=self._data_dir,
             template_root=self._template_root,
         )
@@ -2247,7 +2264,6 @@ class MaaAnalyzer:
             config_name=config_name,
             settings=settings,
             raw_report=raw,
-            header="",
             archive=archive,
             segments=segments,
             notes=notes,

@@ -105,6 +105,9 @@ AI 输出 Markdown（含 section / page-break / 附件指令）
    AI 从第一个 `section` 开始，因此正常不会触发）。
 5. `<!-- page-break -->` 一定换页；与自动装箱混用时以强制分页优先。
 
+> 报告头**不是** markdown 标记：它由主题的 `{{information}}` 插槽渲染
+> （见下文），AI 正文里不出现任何报告头相关的内容。
+
 ## 支持的 Markdown 子集
 
 | 元素 | 支持 | 说明 |
@@ -201,6 +204,7 @@ templates/
     page.html         # 必需
     attach-img.html   # 必需：内联图片的外壳
     attach-file.html  # 必需：文件卡片的外壳
+    information.html  # 可选：报告头（概览）外壳
     header.html       # 可选
     footer.html       # 可选
     style.css         # 可选
@@ -208,6 +212,7 @@ templates/
     page.html
     attach-img.html
     attach-file.html
+    information.html
     style.css
 ```
 
@@ -220,6 +225,8 @@ templates/
 - **没有主题配置、没有 `style.dark.css`**：深浅色由模板自己决定，需要深色就整套复制一份。
 - 三个文件（`page.html` / `attach-img.html` / `attach-file.html`）缺任意一个，
   模板视为不完整：记 warning 并整体回退 `default`。
+- `information.html` 是**可选**的：缺省时用内置默认外壳（信息齐全，但样式不受
+  主题控制），旧模板无需改动也能继续用。
 
 ### page.html
 
@@ -317,6 +324,89 @@ templates/
 4. `{{size}}` / `{{status}}` 为空时不会显示任何内容，默认模板用
    `:empty` + `::before` 控制分隔符，你也可以整段省略。
 
+### information.html（报告头，可选）
+
+报告头**不进入 AI 正文**：渲染器把 `information.html` 的渲染结果交给主题的
+`{{information}}` 插槽，位置与外观完全由主题决定，且只在第 1 页出现。
+纯文本模式仍走原来的纯文本报告头，不受模板影响。
+
+缺 `information.html` 时使用内置默认外壳（信息齐全、带轻量内联样式），不会报错；
+四套内置主题都提供了自己的版本。主题里没有 `{{information}}` 插槽时，报告头
+不会显示（加载时会记 warning），旧模板需要补一个插槽。
+
+| 占位符 | 含义 | 为空时 |
+| --- | --- | --- |
+| `{{project}}` | 项目名（`project.name` > 包内解析 > `MaaXXX`） | 内置外壳显示 `MaaXXX` |
+| `{{ui}}` | UI 名称（MXU / MFAAvalonia / MaaFwApp / …） | 空 |
+| `{{ui_version}}` | UI 软件版本 | 空 |
+| `{{module_version}}` | MaaFwApp 模块版本 | 空 |
+| `{{resource_version}}` | 资源 / 项目版本 | 空 |
+| `{{framework_version}}` | MaaFramework 版本 | 空 |
+| `{{device}}` / `{{os}}` | 设备 / 系统 | 空 |
+| `{{file}}` | 日志包文件名 | 空 |
+| `{{size}}` | 压缩包大小（`12.3 MB`） | 空 |
+| `{{log_count}}` / `{{image_count}}` | 日志文件数 / 错误截图数 | `0` |
+| `{{part_note}}` | 分卷提示（「检测到分卷…」，无分卷时为空） | 空 |
+
+默认写法（四套内置主题结构一致，只是配色 / 字号不同）：
+
+```html
+<!-- templates/default/information.html -->
+<div class="report-info">
+  <div class="info-title">{{project}} 日志分析结果</div>
+  <div class="info-line">
+    <span class="info-item info-ui">{{ui}}</span>
+    <span class="info-item info-ui-version">{{ui_version}}</span>
+    <span class="info-item info-resource-version">{{resource_version}}</span>
+    <span class="info-item info-framework-version">{{framework_version}}</span>
+    <span class="info-item info-device">{{device}}</span>
+    <span class="info-item info-os">{{os}}</span>
+  </div>
+  <div class="info-line">
+    <span class="info-item info-file">{{file}}</span>
+    <span class="info-item info-size">{{size}}</span>
+    <span class="info-item info-logs">日志 {{log_count}} 个</span>
+    <span class="info-item info-images">错误截图 {{image_count}} 张</span>
+  </div>
+  <div class="info-note">{{part_note}}</div>
+</div>
+```
+
+- 没有 `{{environment}}`：运行环境各字段单独给，行由模板自己拼。默认模板用
+  `.info-item:empty { display: none }` + 各字段的 `::before` 标签，让空字段
+  （例如非 MaaFwApp 的 `{{module_version}}`）整项消失。
+- 报告头不落在内容块里，模板里不要再写「概览」之类的标题。
+- 追问不带报告头（渲染时没有报告头取值），会话用量仍在页眉 / 页脚。
+
+#### 报告头位置（`{{information}}`）
+
+报告头只能通过主题的 `{{information}}` 插槽显示：在 `page.html` /
+`header.html` / `footer.html` 里写 `{{information}}`，它是**原始 HTML**，
+**只在第 1 页填充**，后续页为空：
+
+```html
+<!-- templates/dark/page.html -->
+<div class="page">
+  <div class="hero">{{information}}</div>
+  {{header}}
+  <main class="content">{{content}}</main>
+  {{footer}}
+</div>
+```
+
+- 第 2 页起 `{{information}}` 为空，外层容器可用 `:empty`（或 `:has()`）隐藏，
+  不会留下空卡片 / 空白带；
+- 追问 / 非分析场景同样为空；
+- 首屏可用高度会扣掉报告头占位，后续页按「没有报告头」的骨架单独测量，
+  分页不会因为报告头而少装内容。
+
+四套内置主题的用法：
+
+| 模板 | 位置 |
+| --- | --- |
+| `default` / `default-dark` / `mobile` | `page.html` 里，页眉与正文之间 |
+| `gh` | `page.html` 里独立的信息卡片（灰底框头 + 两列 key/value），与正文卡片分开 |
+
 ### 占位符
 
 替换是**单趟**的：插入的内容（包括正文 HTML）不会被再次解析。
@@ -328,6 +418,7 @@ templates/
 | --- | --- | --- | --- |
 | `{{content}}` | **AI 内容块**，按顺序拼接（每块自带 `<h2>` 标题） | 否 | 仅 `page.html` |
 | `{{header}}` / `{{footer}}` | 该页的页眉 / 页脚内容（来自 `header.html` / `footer.html`） | 否 | 仅 `page.html` |
+| `{{information}}` | **报告头**（`information.html` 渲染结果），主题自定义位置，仅第 1 页有值 | 否 | 三个文件 |
 | `{{page}}` / `{{pages}}` | 当前页 / 总页数 | 是 | 三个文件 |
 | `{{title}}` / `{{project}}` / `{{file}}` / `{{generated_at}}` | 报告元信息 | 是 | 三个文件 |
 | `{{tokens_input}}` | 本次会话输入 token（如 `12.3k`） | 是 | 三个文件 |
@@ -352,8 +443,8 @@ templates/
 规则：
 
 1. 多个 `{{content}}` → 只填充第一处，其余留空并记 warning。
-2. `{{content}}` 写在 `header.html` / `footer.html` / 附件外壳中无效：会被忽略并记
-   warning（正文只能出现在 `page.html`）。
+2. `{{content}}` 写在 `header.html` / `footer.html` / 附件与报告头外壳中无效：
+   会被忽略并记 warning（正文只能出现在 `page.html`）。
 3. 未识别的占位符**原样保留**并记 debug 日志（不报错，便于逐步调试）。
 4. 模板按 `mtime` 缓存，避免每份报告重复读盘。
 5. 模板内的 `<script>` / `<iframe>` 与外部 URL 引用会被剥离。
@@ -362,6 +453,8 @@ templates/
 8. 内置 `default` 只用块级流式布局，不依赖 flex / grid / JS 框架。
 9. 附件占位符（`{{name}}` / `{{path}}` / `{{source}}` / `{{size}}` 等）只在两个
    附件外壳里生效；`{{src}}` 只在内联图片的 `attach-img.html` 里有值。
+10. `{{information}}` 可写在 `page.html` / `header.html` / `footer.html`，**仅第 1 页**填充；
+    没有它的模板不会显示报告头（内置主题都已提供）。
 
 ### 可用的结构类名
 
@@ -376,6 +469,7 @@ templates/
 | `.block` | 一个内容块（`<section>`） |
 | `.block-title` | 内容块标题（`<h2>`） |
 | `.block-lead` | 「概览」块的额外类（模板可单独定制） |
+| `.report-info` / `.info-title` / `.info-line` / `.info-item` / `.info-note` | 报告头（`information.html`） |
 | `.attach-image` / `.attach-image img` / `figcaption` | 内联图片（`{{class}}` 的默认值之一） |
 | `.attach-file` / `.attach-name` / `.attach-path` / `.attach-meta` / `.attach-size` / `.attach-status` | 文件卡片与图片信息行 |
 | `.attach-missing` / `.attach-image-skipped` | 未找到 / 未内联的附加类（由 `{{class}}` 带出） |
@@ -459,6 +553,8 @@ AI 输出与模板都属于不可信输入：
 | 日志出现「调试端口未就绪 … exit=1」 | 浏览器启动即退出。看 `data/_browser_stderr.log`：root 用户需 `--no-sandbox`（本程序已自动追加）；其余多为缺依赖库（`apt install -y libnss3 libatk-bridge2.0-0 libgbm1 libasound2`） |
 | 日志出现「模板 X 缺少 page.html / attach-img.html / attach-file.html」 | 模板目录缺必需文件，已回退 `default` |
 | 图片里出现 `{{content}}` 字样 | `page.html` 用了不支持的写法（例如全角括号），改用 `{{content}}` 或 `<内容>` |
+| 报告头完全没有出现 | 模板里没有 `{{information}}` 插槽（日志会有「没有 {{information}} 插槽」warning），补一个即可；有插槽但字段为空时检查 `information.html` 的占位符 |
+| 第 2 页起报告头消失 | 正常行为：`{{information}}` 只在第 1 页有值，容器用 `:empty` / `:has()` 隐藏 |
 | 中文显示为方块 | 系统缺 CJK 字体；在 `report.font_family` 指定已安装字体 |
 | 报告被截断 | 页数超过 `max_pages`，调大该值或让 AI 用 `<!-- page-break -->` 主动分页 |
 | 页面空白 / 高度 0 | 渲染超时或模板 CSS 把 `.page` 撑成 0 宽高；检查模板 |

@@ -46,3 +46,30 @@ class EditorPreviewTests(unittest.TestCase):
         self.assertIn("data:image/png;base64,", html)
         self.assertIn("PVP.json", html)
         self.assertNotIn("{{", html)
+        # 报告头走主题插槽，不在正文块里
+        self.assertNotIn("report-info", html)
+
+    def test_preview_page_renders_information_slot(self):
+        template = load_template(ROOT / "templates", "default")
+        meta = editor.default_meta()
+        info_html = template.render_information(editor.preview_information(meta))
+        page = template.render_page(
+            content="正文", meta=meta, page=1, pages=1, information=info_html,
+        )
+        self.assertIn("report-info", page)
+        self.assertIn("MFAAvalonia", page)
+        later = template.render_page(
+            content="正文", meta=meta, page=2, pages=2, information=info_html,
+        )
+        self.assertNotIn("report-info", later)
+
+    def test_preview_information_uses_meta_project_and_file(self):
+        meta = editor.default_meta()
+        values = editor.preview_information(meta)
+        self.assertEqual(values["project"], meta["project"])
+        self.assertEqual(values["file"], meta["file"])
+        self.assertEqual(values["ui"], "MFAAvalonia")
+        template = load_template(ROOT / "templates", "default")
+        html = template.render_information(values)
+        self.assertIn(meta["file"], html)
+        self.assertNotIn("{{", html)

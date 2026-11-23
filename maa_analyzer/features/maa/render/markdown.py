@@ -27,11 +27,11 @@ logger = logging.getLogger("Maa.Render.Markdown")
 
 _SECTION_RE = re.compile(
     r"^\s*<!--\s*(?:section|小节)\s*[:：]\s*(?P<title>.*?)\s*-->\s*$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 _PAGE_BREAK_RE = re.compile(
     r"^\s*<!--\s*(?:page-break|分页)\s*-->\s*$",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 _LEGACY_STRIP = re.compile(
     r"[\[【]\s*(?:附图|图片|image)\s*(?:[@＠][^:：\]]*)?[：:][^\]】\n]*[\]】]",
@@ -222,6 +222,9 @@ def parse_report(report: str,
     解析报告为内容块。
 
     attachment_html: 把附件指令转成 HTML 的回调；None 时指令被忽略。
+
+    报告头不在这里插入：它由主题的 `{{information}}` 插槽负责
+    （`parse_report` 只处理 AI 正文与附件）。
     """
     parsed = ParsedReport()
     engine = _markdown_engine()
