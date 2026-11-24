@@ -9,6 +9,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from maa_analyzer.update.github import ReleaseAsset, ReleaseInfo
 from maa_analyzer.update.install import asset_names, detect_install
@@ -22,6 +23,19 @@ from maa_analyzer.update.net import HttpError
 from maa_analyzer.update.versioning import parse_version
 
 BASE = Path("_tmp_update_tests")
+REPO = Path(__file__).resolve().parents[1]
+
+# 与真实入口同构：main.py 只做表态，--launcher-check 时立即退出。
+LAUNCHER_V1 = (
+    b"import sys\n"
+    b"from maa_bootstrap import run_bare_launcher\n"
+    b"if '--launcher-check' in sys.argv:\n"
+    b"    sys.exit(0)\n"
+    b"raise SystemExit(run_bare_launcher())\n"
+)
+LAUNCHER_V2 = LAUNCHER_V1 + b"# launcher v2\n"
+BOOTSTRAP_V1 = b"def run_bare_launcher():\n    return 0\n"
+BOOTSTRAP_V2 = BOOTSTRAP_V1 + b"# bootstrap v2\n"
 
 
 def _clean(path: Path) -> None:
@@ -449,6 +463,85 @@ class InstallerTests(unittest.IsolatedAsyncioTestCase):
         templates = self.root / "templates"
         self.assertFalse((templates / "default/style.css").exists())
         self.assertTrue((templates / "default/page.html").is_file())
+
+    # ── 引导器成对替换 ──────────────────────────────────────────
+
+    def _launcher_install(self) -> None:
+        """当前安装使用真实的“入口 + 引导器”结构。"""
+        self._install_current(
+            extra={"main.py": LAUNCHER_V1, "maa_bootstrap.py": BOOTSTRAP_V1}
+        )
+
+    async def test_launcher_pair_crash_states_are_validated(self):
+        """两次 rename 之间的中间态也必须先跑通。"""
+        self._launcher_install()
+        seen: list[tuple[bytes, bytes]] = []
+        original = VersionInstaller._check_launcher_pair
+
+        def spy(installer, stage):
+            seen.append(
+                (
+                    (stage / "main.py").read_bytes(),
+                    (stage / "maa_bootstrap.py").read_bytes(),
+                )
+            )
+            return original(installer, stage)
+
+        files = dict(_package_files("0.2.0"))
+        files.update({"main.py": LAUNCHER_V2, "maa_bootstrap.py": BOOTSTRAP_V2})
+        with patch.object(VersionInstaller, "_check_launcher_pair", spy):
+            await self._prepare_and_activate(files)
+        self.assertIn((LAUNCHER_V1, BOOTSTRAP_V2), seen)  # 崩溃窗口
+        self.assertIn((LAUNCHER_V2, BOOTSTRAP_V2), seen)  # 最终态
+
+    async def test_broken_launcher_pair_leaves_install_root_untouched(self):
+        self._launcher_install()
+        files = dict(_package_files("0.2.0"))
+        files.update(
+            {
+                "main.py": LAUNCHER_V2,
+                "maa_bootstrap.py": b"raise ImportError('broken bootstrap')\n",
+            }
+        )
+        with self.assertRaises(Exception):
+            await self._prepare_and_activate(files)
+        self.assertEqual((self.root / "main.py").read_bytes(), LAUNCHER_V1)
+        self.assertEqual(
+            (self.root / "maa_bootstrap.py").read_bytes(), BOOTSTRAP_V1
+        )
+        self.assertFalse((self.root / "current.json").exists())
+        updates = self.root / ".updates"
+        if updates.is_dir():
+            self.assertFalse(
+                any(p.name.startswith("launcher-") for p in updates.iterdir())
+            )
+
+    async def test_replaced_launchers_keep_prev_copies(self):
+        self._launcher_install()
+        files = dict(_package_files("0.2.0"))
+        files.update({"main.py": LAUNCHER_V2, "maa_bootstrap.py": BOOTSTRAP_V2})
+        await self._prepare_and_activate(files)
+        self.assertEqual((self.root / "main.py").read_bytes(), LAUNCHER_V2)
+        self.assertEqual(
+            (self.root / "maa_bootstrap.py").read_bytes(), BOOTSTRAP_V2
+        )
+        self.assertEqual((self.root / "main.py.prev").read_bytes(), LAUNCHER_V1)
+        self.assertEqual(
+            (self.root / "maa_bootstrap.py.prev").read_bytes(), BOOTSTRAP_V1
+        )
+
+    async def test_real_launcher_pair_passes_staging_check(self):
+        """仓库里的真实入口/引导器在暂存目录里也能对着安装根自检。"""
+        launcher = (REPO / "main.py").read_bytes()
+        bootstrap = (REPO / "maa_bootstrap.py").read_bytes()
+        self._install_current(
+            extra={"main.py": launcher, "maa_bootstrap.py": bootstrap}
+        )
+        files = dict(_package_files("0.2.0"))
+        files.update({"main.py": launcher, "maa_bootstrap.py": bootstrap})
+        await self._prepare_and_activate(files)
+        self.assertTrue((self.root / "current.json").is_file())
+        self.assertEqual((self.root / "main.py").read_bytes(), launcher)
 
 
 if __name__ == "__main__":

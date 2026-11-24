@@ -106,6 +106,33 @@ class BootstrapTests(unittest.TestCase):
         _version(self.root, "0.1.0")
         self.assertEqual(maa_bootstrap.launcher_check(), 0)
 
+    def test_astrbot_check_requires_a_candidate(self):
+        self.assertEqual(maa_bootstrap.astrbot_check(), 1)
+        _version(self.root, "0.1.0", kind="astrbot")
+        self.assertEqual(maa_bootstrap.astrbot_check(), 0)
+
+    def test_install_root_comes_from_environment(self):
+        """暂存自检靠 MAA_INSTALL_ROOT 指向真实安装根。"""
+        import importlib
+        import os
+
+        key = "MAA_INSTALL_ROOT"
+        previous = os.environ.get(key)
+        os.environ[key] = str(self.root)
+        try:
+            importlib.reload(maa_bootstrap)
+            self.assertEqual(maa_bootstrap.ROOT, self.root.resolve())
+        finally:
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+            importlib.reload(maa_bootstrap)
+        self.assertEqual(
+            maa_bootstrap.ROOT,
+            Path(maa_bootstrap.__file__).resolve().parent,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

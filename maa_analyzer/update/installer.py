@@ -63,6 +63,12 @@ def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def _is_launcher_source(data: bytes) -> bool:
+    """Whether a ``main.py`` payload is the stable launcher, not the app itself."""
+    text = data.decode("utf-8", "ignore")
+    return "run_bare_launcher" in text or "load_astrbot_main" in text
+
+
 @dataclass(slots=True)
 class PreparedUpdate:
     release: ReleaseInfo
@@ -744,75 +750,154 @@ class VersionInstaller:
     def _install_bootstrap(
         self, version_dir: Path, backup_dir: Path, restore: list[dict[str, str]]
     ) -> None:
+        """Install the launcher pair (``main.py`` + ``maa_bootstrap.py``).
+
+        ``main.py`` imports ``maa_bootstrap``, and no filesystem rename is atomic
+        across two files.  Every reachable state is therefore pre-validated in a
+        staging directory — including the intermediate state a crash between the
+        two renames would leave behind — and only bytes that already booted once
+        are committed to the install root.  ``*.prev`` keeps the replaced file
+        for manual recovery.
+        """
         root = self.install.root
         bootstrap_source = version_dir / "maa_bootstrap.py"
         launcher_source = version_dir / "main.py"
-        if bootstrap_source.is_file():
-            target = root / "maa_bootstrap.py"
-            if not target.is_file() or file_sha256(target) != file_sha256(bootstrap_source):
-                if target.is_file():
-                    backup = backup_dir / "maa_bootstrap.py"
-                    shutil.copy2(target, backup)
-                    restore.append({"target": str(target), "backup": str(backup)})
-                new_file = root / "maa_bootstrap.py.new"
-                shutil.copy2(bootstrap_source, new_file)
-                self._check_bootstrap(new_file)
-                os.replace(new_file, target)
-        if not launcher_source.is_file():
+        if not bootstrap_source.is_file() and not launcher_source.is_file():
             return
-        target_main = root / "main.py"
+
+        main_path = root / "main.py"
+        bootstrap_path = root / "maa_bootstrap.py"
         legacy = root / "main.py.legacy"
-        if target_main.is_file() and not legacy.exists():
-            try:
-                existing = target_main.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                existing = ""
-            if "run_bare_launcher" not in existing and "load_astrbot_main" not in existing:
-                shutil.copy2(target_main, legacy)
-        if target_main.is_file() and file_sha256(target_main) == file_sha256(launcher_source):
-            return
-        new_main = root / "main.py.new"
-        shutil.copy2(launcher_source, new_main)
-        self._check_launcher(new_main)
-        os.replace(new_main, target_main)
 
-    def _check_bootstrap(self, path: Path) -> None:
-        script = (
-            "import importlib.util, sys; "
-            f"spec = importlib.util.spec_from_file_location('_maa_bootstrap_check', {str(path)!r}); "
-            "module = importlib.util.module_from_spec(spec); "
-            "spec.loader.exec_module(module)"
+        current_main = main_path.read_bytes() if main_path.is_file() else None
+        current_bootstrap = (
+            bootstrap_path.read_bytes() if bootstrap_path.is_file() else None
         )
-        completed = subprocess.run(
-            [sys.executable, "-c", script],
-            cwd=str(self.install.root),
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if completed.returncode != 0:
-            tail = (completed.stderr or completed.stdout or "").strip()[-800:]
-            raise InstallError(f"引导器模块自检失败：{tail or completed.returncode}")
+        main_is_launcher = current_main is None or _is_launcher_source(current_main)
+        if current_main is not None and not main_is_launcher and not legacy.exists():
+            # Legacy flat install: the old ``main.py`` is the application itself.
+            shutil.copy2(main_path, legacy)
 
-    def _check_launcher(self, path: Path) -> None:
+        target_main = (
+            launcher_source.read_bytes()
+            if launcher_source.is_file()
+            else current_main
+        )
+        target_bootstrap = (
+            bootstrap_source.read_bytes()
+            if bootstrap_source.is_file()
+            else current_bootstrap
+        )
+
+        pairs: list[tuple[bytes, bytes]] = []
+        if target_main is not None and target_bootstrap is None:
+            raise InstallError("发布包缺少 maa_bootstrap.py，无法安装引导器")
+        if main_is_launcher and current_main is not None and target_bootstrap:
+            # State left behind if the process dies after the first rename.
+            pairs.append((current_main, target_bootstrap))
+        if target_main is not None and target_bootstrap is not None:
+            pairs.append((target_main, target_bootstrap))
+        self._validate_launcher_pairs(pairs)
+
+        if target_bootstrap is not None and target_bootstrap != current_bootstrap:
+            self._backup_for_restore(bootstrap_path, backup_dir, restore)
+            self._replace_launcher(bootstrap_path, target_bootstrap)
+        if target_main is not None and target_main != current_main:
+            self._backup_for_restore(main_path, backup_dir, restore)
+            self._replace_launcher(main_path, target_main)
+
+    def _validate_launcher_pairs(self, pairs: list[tuple[bytes, bytes]]) -> None:
+        """Run each ``(main.py, maa_bootstrap.py)`` pair once in a staging dir."""
+        seen: set[tuple[bytes, bytes]] = set()
+        stage = self.install.root / ".updates" / f"launcher-{uuid.uuid4().hex}"
+        try:
+            for main_bytes, bootstrap_bytes in pairs:
+                if (main_bytes, bootstrap_bytes) in seen:
+                    continue
+                seen.add((main_bytes, bootstrap_bytes))
+                shutil.rmtree(stage, ignore_errors=True)
+                stage.mkdir(parents=True, exist_ok=True)
+                (stage / "main.py").write_bytes(main_bytes)
+                (stage / "maa_bootstrap.py").write_bytes(bootstrap_bytes)
+                ok, detail = self._check_launcher_pair(stage)
+                if not ok:
+                    raise InstallError(f"引导器成对自检失败：{detail}")
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+
+    def _check_launcher_pair(self, stage: Path) -> tuple[bool, str]:
+        """Execute one staged launcher pair against the real install root."""
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(self.install.root) + os.pathsep + env.get("PYTHONPATH", "")
+        # The staged copy must inspect the real ``versions/``/``current.json``.
+        env["MAA_INSTALL_ROOT"] = str(self.install.root)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        main_file = stage / "main.py"
+        bootstrap_file = stage / "maa_bootstrap.py"
         if self.install.kind == "astrbot":
-            command = [sys.executable, "-m", "py_compile", str(path)]
+            # The plugin shim needs AstrBot at import time, so compile it and
+            # exercise the bootstrap module instead of importing the shim.
+            script = (
+                "import importlib.util, py_compile, sys\n"
+                f"sys.path.insert(0, {str(stage)!r})\n"
+                f"py_compile.compile({str(main_file)!r}, doraise=True)\n"
+                "spec = importlib.util.spec_from_file_location("
+                f"'_maa_bootstrap_pair', {str(bootstrap_file)!r})\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(module)\n"
+                "if not callable(getattr(module, 'load_astrbot_main', None)):\n"
+                "    raise SystemExit('maa_bootstrap 缺少 load_astrbot_main')\n"
+                "sys.exit(module.astrbot_check())\n"
+            )
+            command = [sys.executable, "-c", script]
         else:
-            command = [sys.executable, str(path), "--launcher-check"]
-        completed = subprocess.run(
-            command,
-            cwd=str(self.install.root),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+            command = [sys.executable, str(main_file), "--launcher-check"]
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(self.install.root),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"无法执行：{exc}"
         if completed.returncode != 0:
             tail = (completed.stderr or completed.stdout or "").strip()[-800:]
-            raise InstallError(f"引导器自检失败：{tail or completed.returncode}")
+            return False, tail or f"退出码 {completed.returncode}"
+        return True, ""
+
+    @staticmethod
+    def _replace_launcher(path: Path, data: bytes) -> None:
+        """Atomically replace one launcher file, keeping ``<name>.prev``."""
+        if path.is_file():
+            try:
+                shutil.copy2(path, path.with_name(path.name + ".prev"))
+            except OSError as exc:
+                logger.warning("[更新] 备份 %s.prev 失败：%s", path.name, exc)
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temp.write_bytes(data)
+            os.replace(temp, path)
+        except BaseException:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _backup_for_restore(
+        self,
+        path: Path,
+        backup_dir: Path,
+        restore: list[dict[str, str]],
+    ) -> None:
+        if not path.is_file():
+            return
+        backup = backup_dir / f"{abs(hash(str(path))):x}-{path.name}"
+        shutil.copy2(path, backup)
+        if not any(item["target"] == str(path) for item in restore):
+            restore.append({"target": str(path), "backup": str(backup)})
 
     @staticmethod
     def _atomic_copy(source: Path, target: Path) -> None:

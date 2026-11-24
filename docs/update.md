@@ -154,6 +154,8 @@ OnebotMaaLogAnalyzer/
 │   ├── 0.2.1/
 │   └── 0.3.0/
 ├── main.py.legacy          # 首次迁移前的旧入口
+├── main.py.prev            # 上一次被替换的入口副本
+├── maa_bootstrap.py.prev   # 上一次被替换的引导逻辑副本
 └── .updates/               # 临时目录、备份与日志
 ```
 
@@ -164,6 +166,13 @@ OnebotMaaLogAnalyzer/
 
 - 新版本在独立目录完整构建并校验，失败时只清理临时目录；
 - 指针使用临时文件 + `fsync` + `os.replace` 原子切换；
+- 根入口 `main.py` 与 `maa_bootstrap.py` 是**成对**校验后才写入的：两个文件在暂存目录里
+  对着真实安装根各跑一次 `--launcher-check`，连同「断电只替换了其中一个」留下的中间
+  组合也一并验证，因此两次 `os.replace` 之间的任何时刻都能启动；被替换的旧文件留一份
+  `*.prev`，可手工拷回；
+- 引导器接口（`run_bare_launcher` / `load_astrbot_main` / `launcher_check` 等）视为稳定
+  ABI：中间组合校验不通过时整次更新会在动任何根文件之前失败，而不是留下半新半旧的
+  引导器。要破坏该 ABI 的版本需先发一版带兼容别名的过渡版本；
 - 裸模式由稳定引导器监督启动，新版本未在超时内确认启动会自动切回旧版本；
 - 同一新版本连续两次启动失败会被标记为坏版本，不再自动尝试；
 - 回退时恢复 `config.json`、AstrBot 的 `metadata.yaml` / `_conf_schema.json`
@@ -215,3 +224,5 @@ Release 额外上传三个 `*.manifest.json` 和 `SHA256SUMS.txt`。增量更新
   重载后会读取 `current.json` 的新版本。
 - **更新后模板外观没变**：确认 `update.update_templates` 不是 `false`；另外该主题文件
   若被手改过，会被判定为用户模板而保留，删掉或还原该文件后才会重新跟随新版本。
+- **启动报 `ImportError: maa_bootstrap` / 引导器异常**：把安装根下的 `maa_bootstrap.py.prev`
+  与 `main.py.prev` 拷回原名即可回到上一版引导器；两者总是成对写入，`*.prev` 也是成对的。

@@ -2,8 +2,14 @@
 """Stable bootstrap for the versioned installation layout.
 
 This file is intentionally dependency-free: it must keep working even when the
-newly installed application is broken.  It is never modified in place during an
-update; the updater writes a candidate, checks it, and atomically replaces it.
+newly installed application is broken.  The updater only commits bytes that
+were already executed once from a staging directory (see
+``VersionInstaller._install_bootstrap``), and keeps ``*.prev`` copies for manual
+recovery.
+
+``ROOT`` is ``MAA_INSTALL_ROOT`` when set — the installer runs a staged copy of
+``main.py`` + ``maa_bootstrap.py`` against the real install root to validate the
+pair before touching it — and otherwise the directory holding this file.
 """
 from __future__ import annotations
 
@@ -18,7 +24,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent
+
+def _install_root() -> Path:
+    override = str(os.environ.get("MAA_INSTALL_ROOT") or "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parent
+
+
+ROOT = _install_root()
 POINTER = "current.json"
 LAST_GOOD = "last-good.json"
 RESTART_CODE = 87
@@ -409,6 +423,17 @@ def launcher_check() -> int:
     return 0
 
 
+def astrbot_check() -> int:
+    """Same self-check as :func:`launcher_check` for the plugin shim."""
+    candidates = _astrbot_candidates()
+    if not candidates:
+        print("[启动] 未找到可加载的插件版本目录。", file=sys.stderr)
+        return 1
+    for candidate in candidates:
+        print(f"[启动] 插件候选：{candidate['label']} -> {candidate['script']}")
+    return 0
+
+
 def run_bare_launcher() -> int:
     if "--launcher-check" in sys.argv[1:]:
         return launcher_check()
@@ -576,6 +601,7 @@ __all__ = [
     "POINTER",
     "RESTART_CODE",
     "ROOT",
+    "astrbot_check",
     "bare_candidates",
     "launcher_check",
     "load_astrbot_main",
