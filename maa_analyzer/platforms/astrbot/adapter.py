@@ -644,6 +644,18 @@ class AstrBotPlatformAdapter:
             group_id, [{"type": "text", "data": {"text": text}}]
         )
 
+    async def send_private_text(self, user_id: int, text: str) -> str | None:
+        if not text:
+            return None
+        called, result = await self._call_action_result(
+            "send_private_msg",
+            user_id=_api_id(user_id),
+            message=[{"type": "text", "data": {"text": text}}],
+        )
+        if not called:
+            return None
+        return _message_id(result)
+
     async def send_message(
         self, group_id: int, message: Sequence[Mapping[str, Any]]
     ) -> str | None:

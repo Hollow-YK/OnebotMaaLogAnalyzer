@@ -32,7 +32,7 @@
 
 AstrBot 面板映射常用字段和大多数高级字段；复杂结构仍需编辑 JSON。新建面板配置时，有固定程序默认值的字段直接显示这些默认值，面板值会覆盖所选档案或端点的对应配置。下表说明各字段的生效范围和空值行为：
 
-AstrBot WebUI 会把面板字段按基础与群组、指令权限、项目识别、LLM、图像理解、报告、消息反馈、追问、历史、分析、压缩包与日志处理、仓库、文件日志分为 13 个对象分组。分组仅存在于插件保存对象；共享运行时使用本文所示的扁平面板键，`config.json` 仍保持既有配置分区。旧版顶层平铺的面板字段会在插件启动时自动迁入对应分组并保存。
+AstrBot WebUI 会把面板字段按基础与群组、指令权限、项目识别、LLM、图像理解、报告、消息反馈、追问、历史、分析、压缩包与日志处理、仓库、文件日志、检查更新分为 14 个对象分组。分组仅存在于插件保存对象；共享运行时使用本文所示的扁平面板键，`config.json` 仍保持既有配置分区。旧版顶层平铺的面板字段会在插件启动时自动迁入对应分组并保存。
 
 | 面板字段 | 生效范围 | 空值或自动选择的含义 |
 | --- | --- | --- |
@@ -42,6 +42,7 @@ AstrBot WebUI 会把面板字段按基础与群组、指令权限、项目识别
 | `listen_groups` / `notify_group` | 所选档案的监听群、额外通知群 | 空列表停止监听；空通知群关闭额外转发 |
 | `owners` / `admins` | 所选档案的指令权限名单 | 空列表清空对应名单 |
 | `command_prefix` / `commands_*` | 指令前缀、开关、权限、回复上限 | 固定默认值以面板为准，清空固定值恢复默认 |
+| `update_*` | 顶层 `update` 段：检查开关、通道、自动更新、通知 QQ、API 与镜像 | 面板值覆盖 JSON；`github_token` 只能写 JSON |
 | `project_name` / `file_prefix` | 项目显示名、日志包文件名前缀 | 清空配置；空项目名允许从日志识别，prefix 模式需填写前缀 |
 | `archive_match_mode` / `require_log_layout_mode` / `ui_*_mode` | 日志包识别、布局校验、UI 自动识别开关 | 使用面板固定默认值 |
 | `report_*` | 报告模式、模板、尺寸、浏览器与渲染选项 | 固定值恢复面板默认；空字体和浏览器路径使用程序自动选择 |
@@ -882,6 +883,43 @@ max_tokens：         llm.defaults → providers[].models[] → bot.configs.<名
 
 原理、阈值与调优见 [上下文与提示词缓存](context.md)。
 
+## update：检查更新与自动更新
+
+```json
+"update": {
+  "check_enabled": true,
+  "channel": "stable",
+  "auto_update": false,
+  "download_mode": "auto",
+  "notify_qq": ["123456789"],
+  "check_on_start": true,
+  "check_interval_hours": 24,
+  "api_bases": ["https://api.github.com"],
+  "download_mirrors": [],
+  "github_token": ""
+}
+```
+
+| 字段 | 类型 / 默认 | 说明 |
+| --- | --- | --- |
+| `check_enabled` | `bool` / `true` | 自动检查总开关；关闭后仍可 `/maa update check` |
+| `channel` | `string` / `"stable"` | `stable` 正式版 / `prerelease` 测试版 |
+| `auto_update` | `bool` / `false` | 发现新版本后自动下载安装 |
+| `download_mode` | `string` / `"auto"` | `auto` / `full` / `incremental` |
+| `notify_qq` | `list[str]` / `[]` | 更新与失败通知的私聊 QQ 号 |
+| `check_on_start` | `bool` / `true` | 启动后检查一次 |
+| `check_interval_hours` | `int` / `24` | 自动检查间隔，最小 1 小时 |
+| `api_bases` | `list[str]` / GitHub API | 依次查询，取所有成功结果中最新的版本 |
+| `download_mirrors` | `list[str]` / `[]` | 下载镜像，支持 `{url}` 占位 |
+| `github_token` | `string` / `""` | 可选 GitHub token，提高 API 限额 |
+
+- 仓库固定为 `Hollow-YK/OnebotMaaLogAnalyzer`，不提供配置项。
+- 缺少 `update` 段时按上面的默认值运行，不会重写 `config.json`。
+- 从源码运行（没有 CI 写入的 `build-info.json`）时只检查、不自动更新。
+- 更新失败会私聊 `notify_qq`，**不会自动重试**。
+
+完整机制、增量更新与回退设计见 [检查更新与自动更新](update.md)。
+
 ## debug：离线调试
 
 调试模式**不连接 OneBot**，通过模拟事件注入验证逻辑，且只读写 `debug.data_dir`，不碰生产数据。
@@ -942,6 +980,7 @@ max_tokens：         llm.defaults → providers[].models[] → bot.configs.<名
 ## 安全提示
 
 - `config.json` 含 API 密钥与 `access_token`，已在 `.gitignore` 中，**不要提交、不要贴进 issue**。
+- `update.github_token` 只用于 GitHub API 请求，不会发送给下载镜像或 `raw.githubusercontent.com`。
 - `commands.write_level` 默认 `2`（仅超管可改）：`repo.url` 可被改写意味着可以让 Bot 去读取任意 git 仓库。
 - 反向 WS 的 `ws_reverse_host` 默认只监听 `127.0.0.1`；改成 `0.0.0.0` 时务必配置 `access_token`。
 - `repo.path` 指向的目录只被读取，不会执行其中任何代码；但仍建议指向可信仓库。

@@ -143,6 +143,15 @@ class OneBotAPI:
         })
         return data.get("message_id") if isinstance(data, dict) else None
 
+    async def send_private_msg(self, user_id: int, message) -> Optional[int]:
+        """发送私聊消息。message 为消息段数组或纯文本。"""
+        if isinstance(message, str):
+            message = [{"type": "text", "data": {"text": message}}]
+        data = await self._call("send_private_msg", {
+            "user_id": user_id, "message": message,
+        })
+        return data.get("message_id") if isinstance(data, dict) else None
+
     async def send_group_forward_msg(self, group_id: int, messages: list[dict]) -> Optional[int]:
         """发送自定义节点组成的 QQ 合并转发。"""
         data = await self._call("send_group_forward_msg", {

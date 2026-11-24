@@ -117,6 +117,9 @@ class PlatformPort(Protocol):
     async def send_text(self, group_id: int, text: str) -> str | None:
         ...
 
+    async def send_private_text(self, user_id: int, text: str) -> str | None:
+        ...
+
     async def send_message(
         self, group_id: int, message: Sequence[Mapping[str, Any]]
     ) -> str | None:

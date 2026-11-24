@@ -12,6 +12,9 @@
 /maa history           分析历史归档（可跨天追问）
 /maa ai [n]            最近 n 个会话（分析 + 追问）的用量（默认 5 个）
 /maa ai all            全部历史用量汇总及按群统计
+/maa update            当前版本、通道与更新设置
+/maa update check     立即检查配置中的通道
+/maa update check pre 立即检查测试版
 /maa followup          追问答疑会话状态
 
 /maa set <项> <值>      修改分析设置（如 /maa set max_report_images 3）
@@ -30,6 +33,7 @@
 /maa history purge     清空全部分析历史
 /maa enable|disable    启用 / 停用本配置
 /maa reload            按 config.json 重建运行时（等同重启，日志另开新文件）
+/maa update apply      下载并安装最新版本（源码运行会拒绝）
 
 /maa followup close    结束当前追问会话（需管理员及以上）
 ```
@@ -73,7 +77,7 @@
 | `commands.prefix` | `/maa` | 指令前缀 |
 | `commands.owners` | 空 | 超管 QQ 号列表 |
 | `commands.admins` | 空 | 管理员 QQ 号列表 |
-| `commands.read_level` | `1` | 查看类指令所需等级（`status` / `get` / `project` / `repo` / `jobs` / `history` / `ai`；默认仅管理员及以上） |
+| `commands.read_level` | `1` | 查看类指令所需等级（`status` / `get` / `project` / `repo` / `jobs` / `history` / `ai` / `update`；默认仅管理员及以上） |
 | `commands.write_level` | `2` | 修改类指令所需等级 |
 | `commands.followup_level` | `0` | 追问答疑所需等级 |
 

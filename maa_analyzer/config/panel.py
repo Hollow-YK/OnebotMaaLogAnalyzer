@@ -435,6 +435,9 @@ def apply_panel_overrides(
     patch = validate_panel_patch(panel)
     bot_cfg = _ensure_dict(result, "bot")
 
+    if patch.update is not None and patch.update.model_fields_set:
+        update_cfg = _ensure_dict(result, "update")
+        _merge_patch(update_cfg, patch.update.sparse_dump())
     if "data_dir" in patch.model_fields_set:
         bot_cfg["data_dir"] = str(patch.data_dir or "").strip()
     if patch.log is not None:

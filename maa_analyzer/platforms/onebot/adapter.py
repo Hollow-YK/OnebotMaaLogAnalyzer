@@ -47,6 +47,12 @@ class OneBotPlatformAdapter:
         data = await self.api.send_group_msg(group_id, text)
         return _message_id(data)
 
+    async def send_private_text(self, user_id: int, text: str) -> str | None:
+        if not text:
+            return None
+        data = await self.api.send_private_msg(user_id, text)
+        return _message_id(data)
+
     async def send_message(
         self, group_id: int, message: Sequence[Mapping[str, Any]]
     ) -> str | None:

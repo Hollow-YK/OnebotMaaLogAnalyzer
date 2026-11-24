@@ -1,4 +1,4 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -15,4 +15,10 @@ config.json
 # 发布打包产物
 dist/
 *.zip
+OnebotMaaLogAnalyzer-*.manifest.json
+SHA256SUMS.txt
 .DS_Store
+
+# 自动更新运行时目录
+versions/
+.updates/

@@ -15,4 +15,5 @@
 | [AI 工具](tools.md) | 日志包工具与仓库工具清单、沙箱安全、调用限制 |
 | [调试](debugging.md) | 离线调试模式：CLI REPL、HTTP 端点、JSON 批量测试与断言 |
 | [架构](architecture.md) | 双入口分层设计、共享内核、平台适配器、目录结构与事件订阅 |
+| [检查更新与自动更新](update.md) | GitHub 正式版/测试版检查、私聊通知、多 API、增量更新与崩溃安全回退 |
 | [发布](releasing.md) | 自动发布流程、裸 OneBot 普通包 / 精简包、AstrBot 插件包与白名单 |

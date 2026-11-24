@@ -24,7 +24,11 @@ OnebotMaaLogAnalyzer 的 AstrBot 版本是 AIOCQHTTP 插件。它与裸 OneBot �
 
 ```text
 AstrBot/data/plugins/OnebotMaaLogAnalyzer/
-├── main.py
+├── main.py                 # 稳定 shim
+├── plugin_shell.py         # 真实插件壳
+├── maa_bootstrap.py
+├── build-info.json
+├── build-manifest.json
 ├── README.md
 ├── metadata.yaml
 ├── _conf_schema.json
@@ -39,10 +43,14 @@ AstrBot/data/plugins/OnebotMaaLogAnalyzer/
 插件重复初始化不会重复启动后台任务；停用、AstrBot 重载或插件重载时会取消分卷计时与
 后台任务、保存配置与历史、关闭 LLM/HTTP 会话和渲染浏览器。
 
+自动更新在 AstrBot 模式下只切换到新的不可变版本目录并提示，**需要在 AstrBot 面板重载
+插件**后才会加载新代码。根 `main.py` 是稳定 shim，重载后读取 `current.json`；若新版本
+导入失败，会自动回退到旧版本或扁平 `plugin_shell.py`。
+
 ## 配置
 
 完整配置格式与裸 OneBot 模式相同，详见[配置](configuration.md)。AstrBot 面板会按用途折叠为
-13 个分组，常用项和大多数高级项仍在面板中编辑；配置档案增删改排序、未被选择的
+14 个分组，常用项和大多数高级项仍在面板中编辑；配置档案增删改排序、未被选择的
 LLM Provider/Model 数组项等复杂结构仍需高级 JSON：
 
 | 分组 | 包含内容 |
@@ -60,6 +68,7 @@ LLM Provider/Model 数组项等复杂结构仍需高级 JSON：
 | `压缩包与日志处理` | 压缩包大小、分卷合并、单次读取窗口 |
 | `项目仓库与检索` | 仓库来源、分支、版本切换、预加载和检索限制 |
 | `文件日志` | 插件文件日志开关、目录与级别 |
+| `检查更新` | 检查开关、正式版/测试版、自动更新、通知 QQ、API 与下载镜像 |
 
 分组只作用于 AstrBot 的 WebUI 保存对象。插件启动时会把分组展平为共享运行时使用的字段，
 `config.json` 仍保持 `bot.configs.<名称>`、`llm`、`log` 等既有分区；两套存储格式彼此独立。

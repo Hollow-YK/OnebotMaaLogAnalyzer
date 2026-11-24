@@ -3,7 +3,7 @@ display_name: Onebot Maa Log Analyzer
 desc: AIOCQHTTP 日志包分析、引用追问与 /maa 管理指令
 short_desc: Maa 日志自动分析与问答
 author: OnebotMaaLogAnalyzer Contributors
-version: 0.1.0
+version: 0.3.0-dev
 repo: https://github.com/Hollow-YK/OnebotMaaLogAnalyzer
 support_platforms:
   - aiocqhttp

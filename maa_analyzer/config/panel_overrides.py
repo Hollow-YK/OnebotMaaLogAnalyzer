@@ -668,6 +668,38 @@ class LoggingPatch(PanelPatchModel):
     )
 
 
+class UpdatePatch(PanelPatchModel):
+    """Sparse patch for the runtime top-level ``update`` section."""
+
+    check_enabled: Mode | None = Field(
+        default=None, validation_alias="update_check_mode"
+    )
+    channel: str | None = Field(
+        default=None, validation_alias="update_channel"
+    )
+    auto_update: Mode | None = Field(
+        default=None, validation_alias="update_auto_mode"
+    )
+    download_mode: str | None = Field(
+        default=None, validation_alias="update_download_mode"
+    )
+    notify_qq: StringList | None = Field(
+        default=None, validation_alias="update_notify_qq"
+    )
+    check_on_start: Mode | None = Field(
+        default=None, validation_alias="update_check_on_start_mode"
+    )
+    check_interval_hours: NonNegativeInt | None = Field(
+        default=None, validation_alias="update_check_interval_hours"
+    )
+    api_bases: StringList | None = Field(
+        default=None, validation_alias="update_api_bases"
+    )
+    download_mirrors: StringList | None = Field(
+        default=None, validation_alias="update_download_mirrors"
+    )
+
+
 class PanelPatch(PanelPatchModel):
     """Top-level typed view of the flat AstrBot panel."""
 
@@ -676,6 +708,7 @@ class PanelPatch(PanelPatchModel):
     log: LoggingPatch | None = None
     llm: GlobalLLMPatch | None = None
     profile: ProfilePatch | None = None
+    update: UpdatePatch | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -687,6 +720,7 @@ class PanelPatch(PanelPatchModel):
             "log": LoggingPatch.from_panel(value),
             "llm": GlobalLLMPatch.from_panel(value),
             "profile": ProfilePatch.from_panel(value),
+            "update": UpdatePatch.from_panel(value),
         }
 
 
@@ -737,6 +771,7 @@ def _mode_fields() -> set[str]:
         ReportConfigPatch,
         LLMModelPatch,
         LoggingPatch,
+        UpdatePatch,
     ):
         for name, field in model.model_fields.items():
             if _panel_kind(field) == "mode":
@@ -756,6 +791,7 @@ def _nonnegative_int_fields() -> set[str]:
         LLMModelPatch,
         LLMDefaultsPatch,
         LLMCircuitBreakerPatch,
+        UpdatePatch,
     ):
         for name, field in model.model_fields.items():
             if not _annotation_contains(field.annotation, int):
@@ -817,6 +853,7 @@ __all__ = [
     "ProjectConfigPatch",
     "ReportConfigPatch",
     "RepoConfigPatch",
+    "UpdatePatch",
     "VisionConfigPatch",
     "validate_panel_patch",
 ]

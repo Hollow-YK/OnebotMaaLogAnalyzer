@@ -45,6 +45,7 @@ try:
         LLMDefaults,
         ProjectConfig,
         ReportConfig,
+        UpdateConfig,
         VisionConfig,
     )
 except ImportError as exc:  # pragma: no cover - 启动期环境问题
@@ -131,6 +132,7 @@ def default_document() -> dict:
             "data_dir": "data",
             "configs": {"默认": _config_defaults()},
         },
+        "update": _dump(UpdateConfig()),
         "llm": {
             "providers": [{
                 "name": "default",

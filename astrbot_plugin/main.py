@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import importlib
+import os
 import sys
 import weakref
 from pathlib import Path
@@ -126,10 +127,13 @@ class Main(Star):
             )
 
         self.plugin_data_dir = StarTools.get_data_dir(PLUGIN_NAME)
+        template_root = Path(
+            os.environ.get("MAA_INSTALL_ROOT") or _KERNEL_ROOT
+        ) / "templates"
         self.plugin_runtime = AstrBotPluginRuntime(
             self.config,
             plugin_data_dir=self.plugin_data_dir,
-            template_root=_KERNEL_ROOT / "templates",
+            template_root=template_root,
         )
         await self._start_runtime()
 
@@ -163,6 +167,12 @@ class Main(Star):
             runtime.panel.pop("_persist_llm_migration", None)
             runtime.panel.pop("_persist_endpoint_migration", None)
         _ACTIVE_RUNTIMES.add(runtime)
+        try:
+            from maa_analyzer.update.boot import confirm_boot
+
+            confirm_boot()
+        except Exception:
+            logger.debug("启动确认失败", exc_info=True)
 
     async def terminate(self) -> None:
         """Stop background work and release plugin-owned resources."""

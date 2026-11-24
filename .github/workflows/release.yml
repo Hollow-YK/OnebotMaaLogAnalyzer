@@ -65,7 +65,7 @@ jobs:
           cat /tmp/release_body.md
 
       - name: Create release archives
-        run: python .github/scripts/package.py "$VERSION"
+        run: python .github/scripts/package.py "$VERSION" --tag "$GITHUB_REF_NAME"
         env:
           VERSION: ${{ steps.meta.outputs.version }}
 
@@ -78,5 +78,9 @@ jobs:
             OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}.zip
             OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}-light.zip
             OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}-astrbot.zip
+            OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}.manifest.json
+            OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}-light.manifest.json
+            OnebotMaaLogAnalyzer-${{ steps.meta.outputs.version }}-astrbot.manifest.json
+            SHA256SUMS.txt
           prerelease: ${{ steps.meta.outputs.prerelease }}
           fail_on_unmatched_files: true
