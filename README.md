@@ -10,7 +10,7 @@
 
 ## 功能特性
 
-- **双入口部署** — `python main.py` 可继续作为裸 OneBot Bot 运行；也可安装为 AstrBot 插件，由 AstrBot 的 AIOCQHTTP 适配器收发消息，不需要再启动一个裸 Bot 进程
+- **双入口部署** — `python main.py` 作为稳定引导器启动裸 OneBot Bot；也可安装为 AstrBot 插件，由 AstrBot 的 AIOCQHTTP 适配器收发消息，不需要再启动一个裸 Bot 进程
 - **自动分析** — 匹配到日志包立即下载分析，无需任何人操作
 - **多 UI 适配** — 自动识别 MXU / MFAAvalonia / MaaFwApp / MaaTauriAndroid / MWU / MFW-PyQt6 日志包布局与命名，解析 UI 类型、软件版本、资源版本、MaaFramework 版本；**无需配置文件名前缀**，下载后校验布局避免误判；自动合并分卷包
 - **日志包结构说明** — 按自动识别出的 UI 布局（MXU / MFAAvalonia / MaaFwApp / MaaTauriAndroid / MWU / MFW）生成固定格式说明：目录与文件的作用、版本信息、错误截图与配置清单
@@ -22,6 +22,8 @@
 - **项目代码参考** — 可选配置 MaaFW 项目仓库，按解析出的版本号自动切到对应 tag，AI 用只读工具（`search_repo` / `read_file` 等）对照源码确认问题
 - **QQ 指令** — `/maa` 系列指令查看/修改配置，带三级权限控制，可整体关闭
 - **多群配置** — 每个配置独立管理监听群、通知群、分析设置与任务记录
+- **检查更新** — 固定 GitHub 仓库，默认检查正式版，可切换测试版（pre-release）；发现新版本私聊通知指定 QQ
+- **崩溃安全自动更新（裸 OneBot）** — 可选整包或增量下载；不可变版本目录 + 原子指针 + 稳定引导器，更新失败或断电后仍能启动旧版本；AstrBot 插件仅检查更新
 - **调试模式** — 无需真实 OneBot 服务端即可注入模拟事件，CLI REPL + HTTP 端点 + JSON 批量测试
 
 ## 快速开始
@@ -126,9 +128,25 @@ python main.py               # 首次运行生成 config.json
 3. 在 AstrBot 插件管理中重载或重启 AstrBot，并启用 OnebotMaaLogAnalyzer。
 4. 在插件面板填写监听群、项目识别、LLM 端点/模型与分析高级配置，或通过“配置文件位置”复用现有 `config.json`。
 
-插件默认把首次生成的 `config.json` 与运行数据放在 AstrBot 的 `data/plugin_data/OnebotMaaLogAnalyzer/`。AstrBot 面板按基础、指令、项目、LLM、看图、报告、反馈、追问、历史、分析、日志处理和仓库等用途分组，旧版顶层扁平配置会自动迁入分组。复用裸模式数据时，建议在面板中把 `config_file` 填为原 `config.json` 的绝对路径，并把 `data_dir` 填为原数据目录的绝对路径；面板已提供的字段以面板值为准。`onebot` 连接段在插件模式下不使用，消息和群文件操作由 AstrBot 的 AIOCQHTTP 适配器提供。
+插件默认把首次生成的 `config.json` 与运行数据放在 AstrBot 的 `data/plugin_data/OnebotMaaLogAnalyzer/`。AstrBot 面板按基础、指令、项目、LLM、看图、报告、反馈、追问、历史、分析、日志处理、仓库和检查更新等用途分组，旧版顶层扁平配置会自动迁入分组。复用裸模式数据时，建议在面板中把 `config_file` 填为原 `config.json` 的绝对路径，并把 `data_dir` 填为原数据目录的绝对路径；面板已提供的字段以面板值为准。`onebot` 连接段在插件模式下不使用，消息和群文件操作由 AstrBot 的 AIOCQHTTP 适配器提供。
 
 > 当前首版仅支持 AIOCQHTTP，不覆盖 QQ 官方机器人或其他 AstrBot 平台适配器。仓库内单元测试覆盖适配器与生命周期，但尚未在真实 AstrBot 4.29.4 + NapCat / Lagrange 环境中完成联调。
+
+## 检查更新
+
+默认启用正式版检查，自动更新默认关闭。在 `config.json` 顶层填写：
+
+```json
+"update": {
+  "check_enabled": true,
+  "channel": "stable",
+  "auto_update": false,
+  "notify_qq": ["你的QQ号"],
+  "api_bases": ["https://api.github.com"]
+}
+```
+
+发现新版本会私聊 `notify_qq`。裸 OneBot 下 `auto_update: true` 时使用不可变版本目录、原子指针和稳定引导器自动更新，失败或断电后仍可回退旧版本；**AstrBot 插件只检查更新，安装/升级由 AstrBot 自己管理**。检查失败会通知但不会自动重试。完整说明见[检查更新](docs/update.md)。
 
 ## 触发条件
 
@@ -176,6 +194,7 @@ MaaFwApp 取 `device_info.txt` 的 `Version` / `MaaFwApp` / `Framework`；MaaTau
 | [上下文与缓存](docs/context.md) | 提示词前缀缓存、自动压缩、命中率观测 |
 | [调试](docs/debugging.md) | CLI REPL、HTTP 端点、JSON 批量测试与断言 |
 | [AstrBot 部署](docs/astrbot.md) | AIOCQHTTP 安装、配置迁移、面板覆盖、重载与故障排查 |
+| [检查更新](docs/update.md) | 正式版/测试版、私聊通知、多 API、增量更新与崩溃安全回退 |
 | [架构](docs/architecture.md) | 双入口分层设计、共享内核、平台适配器与事件订阅 |
 | [发布](docs/releasing.md) | 自动发布流程、裸 OneBot 普通包 / 精简包、AstrBot 插件包与白名单 |
 

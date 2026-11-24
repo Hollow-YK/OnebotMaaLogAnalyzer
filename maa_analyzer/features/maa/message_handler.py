@@ -30,7 +30,8 @@ class MessageHandler:
     """把群文本消息路由到指令系统或追问答疑。"""
 
     def __init__(self, service: "MaaService", analyzer: "MaaAnalyzer",
-                 followup: FollowupStore, history=None, segment_sender=None):
+                 followup: FollowupStore, history=None, segment_sender=None,
+                 updater=None):
         self.s = service
         self.analyzer = analyzer
         self.followup = followup
@@ -38,7 +39,8 @@ class MessageHandler:
         # watcher.send_segments 回调，用于复用图文混排发送逻辑
         self.segment_sender = segment_sender
         self.commands = CommandHandler(
-            service, followup, history_store=history, analyzer=analyzer
+            service, followup, history_store=history, analyzer=analyzer,
+            updater=updater,
         )
 
     # ════════════════════════════════════════════════════════════

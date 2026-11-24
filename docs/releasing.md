@@ -15,14 +15,18 @@ Release 名称保留原始标签名。
 1. 用 [git-cliff](https://git-cliff.org/) 依据提交记录自动生成 Release Notes
    （分组规则见 `.github/cliff.toml`）。
 2. 生成裸 OneBot 普通包、裸 OneBot 精简包和 AstrBot 插件包三个压缩包。
-3. 在压缩前执行白名单、必需文件和禁止文件校验，任一失败即中止发布。
-4. 创建 GitHub Release；版本号含 `alpha` / `beta` / `rc` / `dev` / `preview`
+3. 把 tag 版本写入包内的 `maa_analyzer/version.py` 和 AstrBot `metadata.yaml`，并为每个包
+   写入 `build-info.json`（版本 / 包类型）和 `build-manifest.json`（全文件 SHA256），
+   并额外生成三个 `*.manifest.json` 和 `SHA256SUMS.txt` 供增量更新使用。
+4. 在压缩前执行白名单、必需文件和禁止文件校验，任一失败即中止发布。
+5. 创建 GitHub Release；版本号含 `alpha` / `beta` / `rc` / `dev` / `preview`
    时自动标记为预发布。
 
 ## 持续集成
 
 每次 push 和 Pull Request 都会运行类型检查，并使用与正式发布相同的脚本构建上述三个包。
-ZIP 可从对应 GitHub Actions 运行的 `packages-<提交 SHA>` artifact 下载；CI 不会创建 Release。
+ZIP、manifest 和 `SHA256SUMS.txt` 可从对应 GitHub Actions 运行的 `packages-<提交 SHA>`
+artifact 下载；CI 不会创建 Release。
 
 类型检查使用 mypy，将当前结果与 PR 目标提交比较；push 默认分支时与推送前的提交比较，
 其他分支 push 时与默认分支比较；新增类型问题会使
@@ -37,19 +41,24 @@ ZIP 可从对应 GitHub Actions 运行的 `packages-<提交 SHA>` artifact 下�
 | `OnebotMaaLogAnalyzer-<版本>-light.zip` | `OnebotMaaLogAnalyzer-light/` | 裸 OneBot 精简包，不含编辑工具，只含 `default` 主题 |
 | `OnebotMaaLogAnalyzer-<版本>-astrbot.zip` | `OnebotMaaLogAnalyzer/` | AstrBot AIOCQHTTP 插件包 |
 
-两个裸模式包都从 `main.py` 启动，并包含完整的 `maa_analyzer/` 共享内核。AstrBot 包中的
-`main.py` 是插件入口，安装到 AstrBot 插件目录后不需要再启动裸 OneBot 进程。
+两个裸模式包都从稳定的 `main.py` 引导器启动，真实应用入口是
+`maa_analyzer/bare_entry.py`，并包含完整的 `maa_analyzer/` 共享内核。AstrBot 包中的
+根 `main.py` 是稳定 shim，`plugin_shell.py` 是真实插件壳；安装到 AstrBot 插件目录后
+不需要再启动裸 OneBot 进程。更新时 shim 会读取 `current.json` 选择不可变版本目录。
 
 ## 普通包
 
 ```text
 OnebotMaaLogAnalyzer/
-├── main.py
+├── main.py                 # 稳定引导器
+├── maa_bootstrap.py
+├── build-info.json
+├── build-manifest.json
 ├── requirements.txt
 ├── README.md
 ├── LICENSE
 ├── docs/
-├── maa_analyzer/
+├── maa_analyzer/           # 含 bare_entry.py
 ├── templates/
 └── tools/
 ```
@@ -62,6 +71,9 @@ OnebotMaaLogAnalyzer/
 ```text
 OnebotMaaLogAnalyzer-light/
 ├── main.py
+├── maa_bootstrap.py
+├── build-info.json
+├── build-manifest.json
 ├── requirements.txt
 ├── README.md
 ├── LICENSE
@@ -79,7 +91,11 @@ OnebotMaaLogAnalyzer-light/
 
 ```text
 OnebotMaaLogAnalyzer/
-├── main.py
+├── main.py                 # 稳定 AstrBot shim
+├── plugin_shell.py         # 真实插件壳（源码 astrbot_plugin/main.py）
+├── maa_bootstrap.py
+├── build-info.json
+├── build-manifest.json
 ├── README.md
 ├── metadata.yaml
 ├── _conf_schema.json
@@ -101,9 +117,21 @@ OnebotMaaLogAnalyzer/
 - `tools/templates/editor.py`
 - `tools/config/editor.py`
 
-AstrBot 包必须包含插件壳、面板 schema、共享内核和
+AstrBot 包必须包含插件 shim、真实插件壳 `plugin_shell.py`、面板 schema、共享内核和
 `maa_analyzer/platforms/astrbot/adapter.py`。插件包不得只在顶层放 `maa_analyzer/` 而
 遗漏插件入口。
+
+三个包还必须包含 `build-info.json` 和 `build-manifest.json`。Release 额外上传：
+
+```text
+OnebotMaaLogAnalyzer-<版本>.manifest.json
+OnebotMaaLogAnalyzer-<版本>-light.manifest.json
+OnebotMaaLogAnalyzer-<版本>-astrbot.manifest.json
+SHA256SUMS.txt
+```
+
+更新器只信任 `SHA256SUMS.txt` 中对 manifest 的哈希；增量文件再按 manifest 内的
+逐文件 SHA256 校验。
 
 以下内容不得进入任何发布包：
 

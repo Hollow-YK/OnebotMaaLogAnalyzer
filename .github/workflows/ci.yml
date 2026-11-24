@@ -39,5 +39,8 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: packages-${{ github.sha }}
-          path: OnebotMaaLogAnalyzer-*.zip
+          path: |
+            OnebotMaaLogAnalyzer-*.zip
+            OnebotMaaLogAnalyzer-*.manifest.json
+            SHA256SUMS.txt
           if-no-files-found: error

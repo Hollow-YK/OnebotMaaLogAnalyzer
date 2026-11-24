@@ -285,6 +285,16 @@ class MaaService:
         """发送纯文本群消息，返回 message_id。"""
         return await self.send_message(group_id, text)
 
+    async def send_private_text(self, user_id: int, text: str) -> Optional[str]:
+        """发送纯文本私聊消息，返回 message_id。"""
+        if not text:
+            return None
+        sender = getattr(self.port, "send_private_text", None)
+        if not callable(sender):
+            logger.warning("当前平台端口不支持私聊发送。")
+            return None
+        return await sender(user_id, text)
+
     async def send_forward_messages(
         self, group_id: int, messages: list[list[dict]]
     ) -> Optional[str]:

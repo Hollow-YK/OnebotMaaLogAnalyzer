@@ -1,29 +1,69 @@
 #!/usr/bin/env python3
-"""Build the OneBot and AstrBot distribution archives."""
+"""Build the OneBot and AstrBot distribution archives.
+
+Every archive carries:
+
+* ``build-info.json`` — version, package kind and repository identity.
+* ``build-manifest.json`` — SHA256 of every file for incremental updates.
+
+A matching ``*.manifest.json`` and ``SHA256SUMS.txt`` are written next to the
+archives so the updater can fetch the manifest without downloading the zip.
+"""
 
 import argparse
-from pathlib import Path
+import hashlib
+import json
+import re
 import shutil
 import sys
+from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from maa_analyzer.update.install import PRODUCT, REPO  # noqa: E402
+from maa_analyzer.update.manifest import build_manifest  # noqa: E402
+
 DIST = ROOT / "dist"
 FORBIDDEN_DIRS = {"debug", "tests", "__pycache__", ".github", "astrbot_plugin"}
 FORBIDDEN_FILES = {"config.json", "config.local.json", ".gitignore", ".env"}
 BARE_REQUIRED = (
-    "main.py", "requirements.txt", "README.md", "LICENSE",
-    "maa_analyzer/__init__.py", "maa_analyzer/runtime.py", "maa_analyzer/platform.py",
-    "maa_analyzer/core/__init__.py", "maa_analyzer/features/__init__.py",
-    "maa_analyzer/features/maa/__init__.py", "maa_analyzer/platforms/onebot/__init__.py",
-    "maa_analyzer/platforms/astrbot/__init__.py", "maa_analyzer/astrbot/plugin_runtime.py",
+    "main.py",
+    "maa_bootstrap.py",
+    "requirements.txt",
+    "README.md",
+    "LICENSE",
+    "maa_analyzer/__init__.py",
+    "maa_analyzer/bare_entry.py",
+    "maa_analyzer/runtime.py",
+    "maa_analyzer/platform.py",
+    "maa_analyzer/core/__init__.py",
+    "maa_analyzer/features/__init__.py",
+    "maa_analyzer/features/maa/__init__.py",
+    "maa_analyzer/platforms/onebot/__init__.py",
+    "maa_analyzer/platforms/astrbot/__init__.py",
+    "maa_analyzer/astrbot/plugin_runtime.py",
     "templates/default/page.html",
+    "build-info.json",
 )
 ASTRBOT_REQUIRED = (
-    "main.py", "README.md", "metadata.yaml", "_conf_schema.json", "requirements.txt",
-    "maa_analyzer/__init__.py", "maa_analyzer/runtime.py", "maa_analyzer/core/__init__.py",
-    "maa_analyzer/features/maa/__init__.py", "maa_analyzer/platforms/astrbot/adapter.py",
-    "maa_analyzer/astrbot/plugin_runtime.py", "templates/default/page.html",
+    "main.py",
+    "plugin_shell.py",
+    "maa_bootstrap.py",
+    "README.md",
+    "metadata.yaml",
+    "_conf_schema.json",
+    "requirements.txt",
+    "maa_analyzer/__init__.py",
+    "maa_analyzer/runtime.py",
+    "maa_analyzer/core/__init__.py",
+    "maa_analyzer/features/maa/__init__.py",
+    "maa_analyzer/platforms/astrbot/adapter.py",
+    "maa_analyzer/astrbot/plugin_runtime.py",
+    "templates/default/page.html",
+    "build-info.json",
 )
 
 
@@ -31,17 +71,26 @@ def clean(package: Path) -> None:
     for path in sorted(package.rglob("*"), key=lambda p: len(p.parts), reverse=True):
         if path.is_dir() and path.name in {"__pycache__", "tests"}:
             shutil.rmtree(path)
-        elif path.is_file() and (path.suffix in {".pyc", ".pyo", ".pyd", ".log"}
-                                 or path.match("test_*.py")):
+        elif path.is_file() and (
+            path.suffix in {".pyc", ".pyo", ".pyd", ".log"}
+            or path.match("test_*.py")
+        ):
             path.unlink()
 
 
 def check(package: Path, label: str, required: tuple[str, ...]) -> None:
     for path in package.rglob("*"):
-        if ((path.is_dir() and path.name in FORBIDDEN_DIRS)
-                or (path.is_file() and (path.name in FORBIDDEN_FILES
-                    or path.suffix in {".pyc", ".pyo", ".pyd", ".log"}
-                    or path.match("test_*.py")))):
+        if (
+            path.is_dir()
+            and path.name in FORBIDDEN_DIRS
+        ) or (
+            path.is_file()
+            and (
+                path.name in FORBIDDEN_FILES
+                or path.suffix in {".pyc", ".pyo", ".pyd", ".log"}
+                or path.match("test_*.py")
+            )
+        ):
             raise ValueError(f"{label}中出现禁止的文件：{path}")
     for name in ("bot", "core", "features"):
         if (package / name).exists():
@@ -51,7 +100,94 @@ def check(package: Path, label: str, required: tuple[str, ...]) -> None:
             raise ValueError(f"{label}缺少必需文件：{name}")
 
 
-def archive(package: Path, output: Path) -> None:
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _stamp_version(package: Path, version: str) -> None:
+    _write_text(
+        package / "maa_analyzer" / "version.py",
+        '"""Runtime version stamped by the release workflow."""\n'
+        "from __future__ import annotations\n\n"
+        f'__version__ = "{version}"\n\n'
+        '__all__ = ["__version__"]\n',
+    )
+    metadata = package / "metadata.yaml"
+    if metadata.is_file():
+        text = metadata.read_text(encoding="utf-8")
+        if re.search(r"(?m)^version:\s.*$", text):
+            text = re.sub(
+                r"(?m)^version:\s.*$", f"version: {version}", text, count=1
+            )
+        else:
+            text += f"\nversion: {version}\n"
+        metadata.write_text(text, encoding="utf-8")
+
+
+def _write_build_info(package: Path, *, version: str, kind: str, tag: str) -> None:
+    data = {
+        "schema": 1,
+        "product": PRODUCT,
+        "version": version,
+        "kind": kind,
+        "repo": REPO,
+        "tag": tag,
+    }
+    _write_text(
+        package / "build-info.json",
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def _inline_info(package: Path, version: str, kind: str, tag: str) -> dict[str, bytes]:
+    """Files generated by CI that do not exist verbatim in the repository."""
+    inline: dict[str, bytes] = {
+        "build-info.json": (
+            package / "build-info.json"
+        ).read_bytes(),
+        "maa_analyzer/version.py": (
+            package / "maa_analyzer" / "version.py"
+        ).read_bytes(),
+    }
+    metadata = package / "metadata.yaml"
+    if metadata.is_file():
+        inline["metadata.yaml"] = metadata.read_bytes()
+    if kind == "astrbot":
+        inline["main.py"] = (package / "main.py").read_bytes()
+    return inline
+
+
+def _source_map(kind: str) -> dict[str, str]:
+    if kind != "astrbot":
+        return {}
+    return {
+        "__init__.py": "astrbot_plugin/__init__.py",
+        "plugin_shell.py": "astrbot_plugin/main.py",
+        "_conf_schema.json": "astrbot_plugin/_conf_schema.json",
+        "README.md": "astrbot_plugin/README.md",
+        "requirements.txt": "astrbot_plugin/requirements.txt",
+    }
+
+
+def _manifest(package: Path, *, version: str, kind: str, tag: str) -> dict:
+    manifest = build_manifest(
+        package,
+        version=version,
+        kind=kind,
+        tag=tag,
+        inline=_inline_info(package, version, kind, tag),
+        source_map=_source_map(kind),
+    )
+    data = manifest.to_dict()
+    _write_text(
+        package / "build-manifest.json",
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    )
+    return data
+
+
+def _archive(package: Path, output: Path) -> None:
     print(f"{package.name} 内容：")
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as zip_file:
         for path in sorted(package.rglob("*")):
@@ -61,10 +197,25 @@ def archive(package: Path, output: Path) -> None:
     print(f"已生成 {output.name} ({output.stat().st_size} bytes)")
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", help="压缩包版本名")
-    version = parser.parse_args().version
+    parser.add_argument(
+        "--tag",
+        default="",
+        help="Git 标签；用于 manifest 的 raw 下载地址，默认 v<version>",
+    )
+    args = parser.parse_args()
+    version = args.version
+    tag = args.tag or f"v{version}"
     if version in {"", ".", ".."} or "/" in version or "\\" in version:
         parser.error("版本名必须是文件名，不能包含路径分隔符")
 
@@ -75,32 +226,74 @@ def main() -> None:
     for path in (full, light, astrbot_stage):
         shutil.rmtree(path, ignore_errors=True)
     full.mkdir(parents=True)
-    for name in ("main.py", "requirements.txt", "README.md", "LICENSE"):
+
+    for name in (
+        "main.py",
+        "maa_bootstrap.py",
+        "requirements.txt",
+        "README.md",
+        "LICENSE",
+    ):
         shutil.copy2(ROOT / name, full / name)
     for name in ("docs", "maa_analyzer", "templates", "tools"):
         shutil.copytree(ROOT / name, full / name)
     clean(full)
-    check(full, "普通包", BARE_REQUIRED + ("tools/templates/editor.py", "tools/config/editor.py"))
-    for name in ("tools/templates/editor.py", "tools/config/editor.py"):
-        if not (full / name).is_file():
-            raise ValueError(f"普通包缺少工具：{name}")
+    _stamp_version(full, version)
+    _write_build_info(full, version=version, kind="standard", tag=tag)
+    check(
+        full,
+        "普通包",
+        BARE_REQUIRED + ("tools/templates/editor.py", "tools/config/editor.py"),
+    )
+    full_manifest = _manifest(full, version=version, kind="standard", tag=tag)
 
     shutil.copytree(full, light)
     shutil.rmtree(light / "tools")
     for path in (light / "templates").iterdir():
         if path.name != "default":
             shutil.rmtree(path) if path.is_dir() else path.unlink()
+    _write_build_info(light, version=version, kind="light", tag=tag)
     check(light, "精简包", BARE_REQUIRED)
-    if (light / "tools").exists() or any(p.name != "default" for p in (light / "templates").iterdir()):
+    if (light / "tools").exists() or any(
+        p.name != "default" for p in (light / "templates").iterdir()
+    ):
         raise ValueError("精简包不应包含 tools/ 或额外的模板")
+    light_manifest = _manifest(light, version=version, kind="light", tag=tag)
 
     shutil.copytree(ROOT / "astrbot_plugin", astrbot)
+    (astrbot / "main.py").replace(astrbot / "plugin_shell.py")
+    shutil.copy2(ROOT / "astrbot_plugin" / "_launcher.py", astrbot / "main.py")
+    (astrbot / "_launcher.py").unlink(missing_ok=True)
+    shutil.copy2(ROOT / "maa_bootstrap.py", astrbot / "maa_bootstrap.py")
     for name in ("maa_analyzer", "templates"):
         shutil.copytree(ROOT / name, astrbot / name)
     clean(astrbot)
+    _stamp_version(astrbot, version)
+    _write_build_info(astrbot, version=version, kind="astrbot", tag=tag)
     check(astrbot, "AstrBot 插件包", ASTRBOT_REQUIRED)
+    astrbot_manifest = _manifest(
+        astrbot, version=version, kind="astrbot", tag=tag
+    )
+
+    archives: list[Path] = []
+    manifests: list[tuple[Path, dict]] = [
+        (ROOT / f"OnebotMaaLogAnalyzer-{version}.manifest.json", full_manifest),
+        (ROOT / f"OnebotMaaLogAnalyzer-{version}-light.manifest.json", light_manifest),
+        (
+            ROOT / f"OnebotMaaLogAnalyzer-{version}-astrbot.manifest.json",
+            astrbot_manifest,
+        ),
+    ]
     for package, suffix in ((full, ""), (light, "-light"), (astrbot, "-astrbot")):
-        archive(package, ROOT / f"OnebotMaaLogAnalyzer-{version}{suffix}.zip")
+        output = ROOT / f"OnebotMaaLogAnalyzer-{version}{suffix}.zip"
+        _archive(package, output)
+        archives.append(output)
+    for path, data in manifests:
+        _write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    sums = ROOT / "SHA256SUMS.txt"
+    lines = [f"{_sha256(path)}  {path.name}" for path in (*archives, *[m[0] for m in manifests])]
+    _write_text(sums, "\n".join(lines) + "\n")
+    print(f"已生成 {sums.name}")
 
 
 if __name__ == "__main__":

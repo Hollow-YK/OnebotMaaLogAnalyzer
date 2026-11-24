@@ -121,6 +121,10 @@ class AstrBotPluginRuntime:
                 runtime = self.runtime_factory(
                     adapter, cfg, data_dir, self.template_root
                 )
+                try:
+                    runtime.config_path = config_path
+                except Exception:
+                    pass
                 self.adapter = adapter
                 self.runtime = runtime
                 await runtime.start()
@@ -288,6 +292,10 @@ class AstrBotPluginRuntime:
                     new_data_dir,
                     self.template_root,
                 )
+                try:
+                    replacement.config_path = new_config_path
+                except Exception:
+                    pass
                 await replacement.start()
                 self._bind_reload_callbacks(replacement)
                 self.runtime = replacement

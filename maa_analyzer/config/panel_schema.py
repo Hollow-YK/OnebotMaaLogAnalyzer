@@ -256,6 +256,25 @@ class LoggingPanel(PanelSection):
     log_level: str = "INFO"
 
 
+class UpdatePanel(PanelSection):
+    """GitHub release checking and self-update settings."""
+
+    panel_title: ClassVar[str] = "检查更新"
+
+    update_check_mode: str = "enabled"
+    update_channel: str = "stable"
+    update_auto_mode: str = "disabled"
+    update_download_mode: str = "auto"
+    update_templates_mode: str = "enabled"
+    update_notify_qq: list[str] = Field(default_factory=list)
+    update_check_on_start_mode: str = "enabled"
+    update_check_interval_hours: int = 24
+    update_api_bases: list[str] = Field(
+        default_factory=lambda: ["https://api.github.com"]
+    )
+    update_download_mirrors: list[str] = Field(default_factory=list)
+
+
 class PanelConfig(BaseModel):
     """Typed AstrBot panel configuration grouped by semantic section."""
 
@@ -278,6 +297,7 @@ class PanelConfig(BaseModel):
     processing: ProcessingPanel = Field(default_factory=ProcessingPanel)
     repo: RepoPanel = Field(default_factory=RepoPanel)
     logging: LoggingPanel = Field(default_factory=LoggingPanel)
+    update: UpdatePanel = Field(default_factory=UpdatePanel)
 
 
 @dataclass(frozen=True, slots=True)

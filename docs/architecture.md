@@ -21,8 +21,10 @@ OneBotPlatformAdapter              AstrBotPlatformAdapter
 maa_analyzer/core  maa_analyzer/features/maa  LLM / history / render
 ```
 
-- **裸 OneBot**：`main.py` 负责读取 `config.json`、建立 OneBot HTTP/WS 连接并处理四种通信模式。
-- **AstrBot**：`astrbot_plugin/main.py` 是 AIOCQHTTP 插件壳，由 AstrBot 提供事件与协议 API。
+- **裸 OneBot**：根 `main.py` 是稳定引导器，负责选择 `current.json` 指向的不可变版本并监督启动；
+  实际应用入口 `maa_analyzer/bare_entry.py` 读取 `config.json`、建立 OneBot HTTP/WS 连接并处理四种通信模式。
+- **AstrBot**：`astrbot_plugin/main.py` 是 AIOCQHTTP 插件壳，由 AstrBot 提供事件与协议 API；
+  CI 包的根 `main.py` 是稳定 shim，真实插件壳为 `plugin_shell.py`。
 
 两个入口都通过 `MaaWorkflowRuntime` 装配相同的服务、LLM、历史、追问、仓库、附件和报告组件。
 插件模式不需要另起裸 OneBot 进程。
@@ -52,9 +54,11 @@ maa_analyzer/runtime.py       共享运行时装配
 
 ```text
 OnebotMaaLogAnalyzer/
-├── main.py                         # 裸 OneBot 启动器
+├── main.py                         # 稳定引导器（选择 current.json 指向的版本）
+├── maa_bootstrap.py                # 引导器/AstrBot shim 的选择与回退逻辑
 ├── astrbot_plugin/                 # AstrBot 插件壳
 │   ├── main.py                     # Star 生命周期、事件过滤器、AIOCQHTTP 监听
+│   ├── _launcher.py                # CI 包中作为根 main.py 的稳定 shim
 │   ├── metadata.yaml
 │   ├── _conf_schema.json           # 面板配置模式
 │   └── requirements.txt
@@ -74,7 +78,8 @@ OnebotMaaLogAnalyzer/
 │   │   ├── onebot/                 # HTTP/WS、适配器、事件桥
 │   │   └── astrbot/                # AIOCQHTTP 事件与 API 适配器
 │   ├── core/                       # models、service、data、LLM 等基础设施
-│   └── features/maa/               # 分析、指令、历史、追问、渲染、仓库等业务
+│   ├── features/maa/               # 分析、指令、历史、追问、渲染、仓库等业务
+│   └── update/                     # GitHub 检查、manifest 差异、增量安装与启动确认
 ├── templates/                      # 图片报告模板，两个发布形态共用
 ├── debug/                          # 源码调试工具，不进入发布包
 ├── docs/
@@ -114,9 +119,9 @@ AstrBot 在监听器执行前会先判断事件是否值得唤醒。`MaaEventFil
 ## 生命周期
 
 `MaaWorkflowRuntime.start()` 幂等创建数据目录、LLM、服务、历史、分析器、追问存储、
-监听器和后台任务。`stop()` 会：
+监听器、更新管理器和后台任务。`stop()` 会：
 
-1. 取消待处理的分卷计时和后台任务；
+1. 取消更新检查、待处理的分卷计时和后台任务；
 2. 保存服务配置、历史与任务状态；
 3. 关闭运行时拥有的 LLM/HTTP 会话；
 4. 关闭渲染浏览器；
@@ -124,6 +129,10 @@ AstrBot 在监听器执行前会先判断事件是否值得唤醒。`MaaEventFil
 
 AstrBot 插件额外负责隔离日志句柄、角色缓存和配置重载回滚。插件停用后再次启用会创建新的
 运行时，不复用已取消的任务集合。
+
+更新子系统与常规分析运行时不同：它面向整个进程和安装目录，而不是单个配置。检查循环由
+`MaaWorkflowRuntime` 启停，但真正的文件安装使用不可变版本目录、原子 `current.json`
+指针和独立引导器，避免更新过程中破坏正在运行的版本。
 
 ## 并发模型
 
@@ -154,6 +163,7 @@ data/
 ├── settings.json
 ├── ai_usage.jsonl
 ├── repo/
+├── updates/                    # 更新状态、结果与下载日志
 └── <配置名>/
     ├── groups.json
     ├── settings.json

@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .config import validate_common_config
 from .core.ai_usage import UsageStore
@@ -17,6 +17,8 @@ from .features.maa.history import HistoryStore
 from .features.maa.message_handler import MessageHandler
 from .features.maa.watcher import LogWatcher
 from .platform import PlatformPort
+from .update.install import detect_install
+from .update.manager import UpdateManager
 
 logger = logging.getLogger("Maa.Runtime")
 
@@ -35,6 +37,8 @@ class MaaWorkflowRuntime:
         owns_port: bool = False,
         owns_llm: bool | None = None,
         background_services: bool = True,
+        restart_callback: Callable[[], None] | None = None,
+        config_path: str | Path | None = None,
     ):
         errors = validate_common_config(cfg)
         if errors:
@@ -51,6 +55,10 @@ class MaaWorkflowRuntime:
         self.owns_port = bool(owns_port)
         self.owns_llm = bool(owns_llm)
         self.background_services = bool(background_services)
+        self.restart_callback = restart_callback
+        self.config_path = (
+            Path(config_path).expanduser().resolve() if config_path else None
+        )
 
         self.dm: DataManager | None = None
         self.llm: Any | None = None
@@ -60,6 +68,7 @@ class MaaWorkflowRuntime:
         self.followup: FollowupStore | None = None
         self.watcher: LogWatcher | None = None
         self.messages: MessageHandler | None = None
+        self.updater: UpdateManager | None = None
         self._tasks: list[asyncio.Task] = []
         self._state = "new"
 
@@ -101,6 +110,16 @@ class MaaWorkflowRuntime:
             self.service.sync_from_config(bot_cfg.get("configs") or {})
             self._log_config_summary()
 
+            self.updater = UpdateManager(
+                data_dir=self.dm._dir,
+                cfg=self.cfg.get("update") or {},
+                install=detect_install(),
+                config_path=self.config_path,
+                service=self.service,
+                restart_callback=self.restart_callback,
+                background=self.background_services,
+            )
+
             self.history = HistoryStore(self.dm._dir)
             self.analyzer = MaaAnalyzer(
                 self.service,
@@ -121,6 +140,7 @@ class MaaWorkflowRuntime:
                 self.followup,
                 history=self.history,
                 segment_sender=self.watcher.send_segments,
+                updater=self.updater,
             )
 
             self.service.register_event(
@@ -142,6 +162,7 @@ class MaaWorkflowRuntime:
                     ),
                 ]
                 self._tasks.extend(self.analyzer.start_repo_preloads())
+                await self.updater.start()
             self._state = "running"
             return self
         except BaseException:
@@ -156,6 +177,12 @@ class MaaWorkflowRuntime:
         self._state = "stopping"
         if self.watcher is not None:
             self.watcher.cancel_pending()
+        updater, self.updater = self.updater, None
+        if updater is not None:
+            try:
+                await updater.stop()
+            except Exception as exc:
+                logger.warning("停止更新检查失败：%s", exc)
 
         tasks, self._tasks = self._tasks, []
         for task in tasks:

@@ -1136,5 +1136,97 @@
         ]
       }
     }
+  },
+  "update": {
+    "description": "检查更新",
+    "type": "object",
+    "items": {
+      "update_check_mode": {
+        "description": "是否自动检查更新",
+        "type": "string",
+        "default": "enabled",
+        "options": [
+          "enabled",
+          "disabled"
+        ]
+      },
+      "update_channel": {
+        "description": "更新通道：正式版或测试版",
+        "type": "string",
+        "default": "stable",
+        "options": [
+          "stable",
+          "prerelease"
+        ]
+      },
+      "update_auto_mode": {
+        "description": "发现新版本后是否自动下载安装（仅裸 OneBot；AstrBot 插件由 AstrBot 管理）",
+        "type": "string",
+        "default": "disabled",
+        "options": [
+          "enabled",
+          "disabled"
+        ]
+      },
+      "update_download_mode": {
+        "description": "下载模式：自动 / 整包 / 增量（仅裸 OneBot）",
+        "type": "string",
+        "default": "auto",
+        "options": [
+          "auto",
+          "full",
+          "incremental"
+        ]
+      },
+      "update_templates_mode": {
+        "description": "更新时同步内置模板（仅裸 OneBot；用户自建或改过的模板文件始终保留）",
+        "type": "string",
+        "default": "enabled",
+        "options": [
+          "enabled",
+          "disabled"
+        ]
+      },
+      "update_notify_qq": {
+        "description": "接收更新与失败通知的 QQ 号列表",
+        "type": "list",
+        "default": [],
+        "items": {
+          "type": "string"
+        }
+      },
+      "update_check_on_start_mode": {
+        "description": "启动后立即检查一次更新",
+        "type": "string",
+        "default": "enabled",
+        "options": [
+          "enabled",
+          "disabled"
+        ]
+      },
+      "update_check_interval_hours": {
+        "description": "自动检查间隔（小时）",
+        "type": "int",
+        "default": 24
+      },
+      "update_api_bases": {
+        "description": "GitHub API 地址列表，依次查询并取最新结果",
+        "type": "list",
+        "default": [
+          "https://api.github.com"
+        ],
+        "items": {
+          "type": "string"
+        }
+      },
+      "update_download_mirrors": {
+        "description": "下载镜像列表，支持 {url} 占位",
+        "type": "list",
+        "default": [],
+        "items": {
+          "type": "string"
+        }
+      }
+    }
   }
 }

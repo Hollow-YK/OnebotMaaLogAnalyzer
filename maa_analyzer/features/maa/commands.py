@@ -134,6 +134,7 @@ _WRITE_SUBCOMMANDS: dict[str, set] = {
     },
     "history": {"clean", "clear", "清理", "purge", "清空"},
     "project": {"set", "设置"},
+    "update": {"apply", "install", "安装"},
 }
 
 # 需要"至少某个等级"的子指令：结束追问会话是写操作，而 followup_level 默认 0
@@ -178,11 +179,12 @@ class CommandHandler:
     """解析并执行 /maa 指令。"""
 
     def __init__(self, service, followup_store=None, history_store=None,
-                 analyzer=None):
+                 analyzer=None, updater=None):
         self.s = service
         self.followup = followup_store
         self.history = history_store
         self.analyzer = analyzer
+        self.updater = updater
         self._current_group = ""   # 当前指令所属群（供 followup 子指令使用）
 
     # ════════════════════════════════════════════════════════════
@@ -256,6 +258,7 @@ class CommandHandler:
             "jobs": (commands.read_level, self._cmd_jobs),
             "history": (commands.read_level, self._cmd_history),
             "ai": (commands.read_level, self._cmd_ai),
+            "update": (commands.read_level, self._cmd_update),
             "followup": (commands.followup_level, self._cmd_followup),
             "set": (commands.write_level, self._cmd_set),
 
@@ -303,6 +306,8 @@ class CommandHandler:
             f"  {prefix} jobs              查看最近分析记录",
             f"  {prefix} history           查看分析历史归档（可跨天追问）",
             f"  {prefix} ai [n|all]        查看最近 n 个会话的用量或全部历史按群汇总",
+            f"  {prefix} update            查看版本与更新设置",
+            f"  {prefix} update check [stable|pre] 立即检查更新",
             f"  {prefix} followup          查看追问答疑会话状态",
             "",
             "修改类（需权限）：",
@@ -315,6 +320,7 @@ class CommandHandler:
             f"  {prefix} repo preload on|off 启停启动预下载",
             f"  {prefix} history clean      清理超期历史记录",
             f"  {prefix} history purge      清空全部分析历史",
+            f"  {prefix} update apply      下载并安装最新版本",
             f"  {prefix} enable            启用本配置",
             f"  {prefix} disable           停用本配置",
             f"  {prefix} reload            重新加载 config.json",
@@ -467,6 +473,43 @@ class CommandHandler:
             lines.append("")
         lines.append("说明：同一份日志的分析与它后续的追问计为同一个会话。")
         return CommandResult(text="\n".join(lines).rstrip())
+
+    async def _cmd_update(self, cfg: ConfigState, args: list[str]) -> CommandResult:
+        """`/maa update [status|check|apply]` 管理程序自身更新。"""
+        if self.updater is None:
+            return CommandResult(
+                text="更新模块未启用或不可用。", ok=False
+            )
+        sub = str(args[0]).strip().lower() if args else "status"
+        channel = ""
+        if len(args) > 1:
+            channel = str(args[1]).strip().lower()
+        if sub in {"status", "状态"}:
+            return CommandResult(text=self.updater.describe_status())
+        if sub in {"check", "检查"}:
+            try:
+                result = await self.updater.check(
+                    channel=channel or None,
+                    auto_apply=False,
+                    notify=True,
+                )
+            except Exception as exc:
+                logger.exception("检查更新失败")
+                return CommandResult(
+                    text=f"检查更新失败：{type(exc).__name__}: {exc}",
+                    ok=False,
+                )
+            return CommandResult(text=self.updater.format_check_result(result))
+        if sub in {"apply", "install", "安装"}:
+            message = await self.updater.request_apply(channel or None)
+            return CommandResult(text=message)
+        return CommandResult(
+            text=(
+                f"用法：{cfg.commands.prefix} update [status|check [stable|pre]|apply]\n"
+                f"当前通道：{getattr(self.updater.config, 'channel', 'stable')}"
+            ),
+            ok=False,
+        )
 
     async def _cmd_project(self, cfg: ConfigState, args: list[str]) -> CommandResult:
         """

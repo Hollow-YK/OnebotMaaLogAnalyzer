@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from ..core.archive_names import (
     is_known_log_archive_name,
@@ -81,6 +81,76 @@ class CommandConfig(BaseModel):
         if uid in {str(x).strip() for x in self.admins}:
             return 1
         return 0
+
+
+def _string_list(value: Any) -> List[str]:
+    """Accept a single number/string or a list and normalize to strings."""
+    if value is None:
+        return []
+    if isinstance(value, (str, int, float)):
+        value = [value]
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+UpdateStringList = Annotated[
+    List[str], BeforeValidator(_string_list)
+]
+
+
+class UpdateConfig(BaseModel):
+    """Process-wide GitHub update settings (top-level ``update`` section)."""
+
+    check_enabled: bool = True
+    channel: str = "stable"
+    auto_update: bool = False
+    download_mode: str = "auto"
+    # 更新时是否用新版本自带的内置模板覆盖安装根 ``templates/``。
+    # 关闭后内置模板保持旧版；用户自建或改过的模板随时保留不动。
+    update_templates: bool = True
+    notify_qq: UpdateStringList = Field(default_factory=list)
+    check_on_start: bool = True
+    check_interval_hours: int = 24
+    api_bases: UpdateStringList = Field(
+        default_factory=lambda: ["https://api.github.com"]
+    )
+    download_mirrors: UpdateStringList = Field(default_factory=list)
+    github_token: str = ""
+
+    model_config = {"populate_by_name": True, "alias_generator": _to_camel}
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "UpdateConfig":
+        channel = str(self.channel or "").strip().lower()
+        self.channel = (
+            "prerelease"
+            if channel in {"prerelease", "pre", "beta", "test"}
+            else "stable"
+        )
+        mode = str(self.download_mode or "").strip().lower()
+        self.download_mode = (
+            mode if mode in {"auto", "full", "incremental"} else "auto"
+        )
+        try:
+            interval = int(self.check_interval_hours or 24)
+        except (TypeError, ValueError):
+            interval = 24
+        self.check_interval_hours = max(1, min(8760, interval))
+        self.notify_qq = [
+            str(item).strip() for item in self.notify_qq if str(item).strip()
+        ]
+        bases: list[str] = []
+        for item in self.api_bases:
+            text = str(item or "").strip().rstrip("/")
+            if text.startswith(("http://", "https://")) and text not in bases:
+                bases.append(text)
+        self.api_bases = bases or ["https://api.github.com"]
+        self.download_mirrors = [
+            str(item).strip()
+            for item in self.download_mirrors
+            if str(item).strip()
+        ]
+        self.github_token = str(self.github_token or "").strip()
+        return self
 
 
 class ModelSupports(BaseModel):
