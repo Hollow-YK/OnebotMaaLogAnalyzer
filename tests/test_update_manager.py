@@ -60,6 +60,8 @@ class _FakeHttp:
 
 
 class _FakeInstaller:
+    last_update_templates: bool | None = None
+
     def __init__(self, **kwargs):
         self.kwargs = kwargs
 
@@ -71,7 +73,8 @@ class _FakeInstaller:
             version_dir=Path("versions") / release.version_text,
         )
 
-    def activate(self, prepared):
+    def activate(self, prepared, *, update_templates=True):
+        type(self).last_update_templates = update_templates
         return {"active": "0.2.0", "previous": "", "restore": []}
 
     async def close(self):
@@ -149,18 +152,32 @@ class UpdateManagerTests(unittest.IsolatedAsyncioTestCase):
         async def _run(fn, *args, **kwargs):
             return fn(*args, **kwargs)
 
+        _FakeInstaller.last_update_templates = None
         with patch("maa_analyzer.update.manager.VersionInstaller", _FakeInstaller), \
              patch("maa_analyzer.update.manager.run_blocking", new=AsyncMock(side_effect=_run)), \
              patch("maa_analyzer.update.manager.detect_install", return_value=self.install):
             outcome = await manager.apply(_release("0.2.0"), force=True)
         self.assertTrue(outcome.ok)
         self.assertEqual(restarts, ["go"])
+        self.assertTrue(_FakeInstaller.last_update_templates)
         result = json.loads(
             (self.data / "updates" / "last-result.json").read_text(encoding="utf-8")
         )
         self.assertEqual(result["status"], "activated")
         self.assertEqual(result["version"], "0.2.0")
         self.assertTrue(any("正在重启" in text for _, text in self.service.messages))
+
+    async def test_apply_passes_template_switch_to_installer(self):
+        manager = self._manager(update_templates=False)
+        async def _run(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        _FakeInstaller.last_update_templates = None
+        with patch("maa_analyzer.update.manager.VersionInstaller", _FakeInstaller), \
+             patch("maa_analyzer.update.manager.run_blocking", new=AsyncMock(side_effect=_run)), \
+             patch("maa_analyzer.update.manager.detect_install", return_value=self.install):
+            await manager.apply(_release("0.2.0"), force=True)
+        self.assertFalse(_FakeInstaller.last_update_templates)
 
     async def test_status_and_check_message(self):
         _FakeClient.result = CheckResult(latest=_release("0.2.0"))

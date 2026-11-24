@@ -141,6 +141,7 @@ def default_config() -> dict:
             "channel": "stable",
             "auto_update": False,
             "download_mode": "auto",
+            "update_templates": True,
             "notify_qq": [],
             "check_on_start": True,
             "check_interval_hours": 24,

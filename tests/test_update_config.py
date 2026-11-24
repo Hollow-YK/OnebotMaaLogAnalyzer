@@ -13,6 +13,7 @@ class UpdateConfigTests(unittest.TestCase):
         self.assertTrue(cfg["check_enabled"])
         self.assertEqual(cfg["channel"], "stable")
         self.assertFalse(cfg["auto_update"])
+        self.assertTrue(cfg["update_templates"])
         self.assertEqual(cfg["notify_qq"], [])
         self.assertEqual(cfg["api_bases"], ["https://api.github.com"])
 
@@ -33,6 +34,7 @@ class UpdateConfigTests(unittest.TestCase):
             "update_channel": "prerelease",
             "update_auto_mode": "disabled",
             "update_download_mode": "incremental",
+            "update_templates_mode": "disabled",
             "update_notify_qq": ["123"],
             "update_check_on_start_mode": "disabled",
             "update_check_interval_hours": 6,
@@ -44,6 +46,7 @@ class UpdateConfigTests(unittest.TestCase):
         self.assertFalse(update["auto_update"])
         self.assertFalse(update["check_on_start"])
         self.assertEqual(update["download_mode"], "incremental")
+        self.assertFalse(update["update_templates"])
         self.assertEqual(update["notify_qq"], ["123"])
         self.assertEqual(update["check_interval_hours"], 6)
         self.assertEqual(

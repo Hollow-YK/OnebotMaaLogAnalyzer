@@ -23,6 +23,7 @@
   "channel": "stable",
   "auto_update": false,
   "download_mode": "auto",
+  "update_templates": true,
   "notify_qq": ["123456789"],
   "check_on_start": true,
   "check_interval_hours": 24,
@@ -38,6 +39,7 @@
 | `channel` | `stable` | `stable` 正式版 / `prerelease` 测试版（含正式版与预发布，取最新） |
 | `auto_update` | `false` | 发现新版本后自动下载安装 |
 | `download_mode` | `auto` | `auto` / `full` / `incremental` |
+| `update_templates` | `true` | 更新时是否同步内置模板；`false` 时安装根 `templates/` 完全不动 |
 | `notify_qq` | `[]` | 接收更新与失败通知的 QQ 号列表；为空则只写日志 |
 | `check_on_start` | `true` | 启动后检查一次 |
 | `check_interval_hours` | `24` | 自动检查间隔，最小 1 小时 |
@@ -109,6 +111,32 @@ AstrBot 面板的「检查更新」分组提供上述大部分字段；`github_t
 （`build-info.json`、`maa_analyzer/version.py`、AstrBot 的 `metadata.yaml` 和根
 `main.py`）直接内嵌在 manifest 中。
 
+增量构建时，未变化的文件从当前版本目录复用；**如果本地副本已被改动过**
+（手改源码、手工解压覆盖、改过模板等），该文件不会进入新版本快照，而是改为从
+Release 重新下载并校验。因此任何本地改动都不会让更新失败。
+
+## 内置模板与用户模板
+
+安装根 `templates/` 同时存放内置模板与用户模板，归属以**正在运行的那一版发布包的
+`build-manifest.json`**（即上一版清单）判定：
+
+- **内置模板**：上一版 manifest 里列出的文件（`default/`、`default-dark/`、`gh/`、
+  `mobile/` 等随包分发的主题）。
+- **用户模板**：上一版 manifest 里没有的文件——自建主题目录、往内置主题里新增的文件、
+  以及**改过**的内置模板文件。
+
+更新时以新版本目录里的完整快照为准，逐个文件判定：
+
+- `update_templates: true`（默认）：内置模板跟随新版本覆盖；用户模板保留；
+  新版本已删除的内置模板文件（且本地未被改动）会一并删除，避免残留旧主题。
+- `update_templates: false`：内置模板保持当前内容，既不覆盖也不新增/删除，
+  用户模板同样不受影响。适合长期锁定了模板外观的部署。
+
+无论哪种设置，用户模板与用户改动都不会被覆盖或删除；改过内置模板文件后，该文件
+不再跟随上游更新（其余未改动的文件仍会更新）。需要同时保留定制与上游修复时，建议
+把定制内容放进单独命名的主题目录（如 `templates/dark/`），再用
+`report.template` 选中它。
+
 ## 崩溃安全设计
 
 更新不会修改正在运行的版本。安装目录大致为：
@@ -141,8 +169,9 @@ OnebotMaaLogAnalyzer/
 - 回退时恢复 `config.json`、AstrBot 的 `metadata.yaml` / `_conf_schema.json`
   以及关键小数据文件；
 - 旧版本目录与 `main.py.legacy` 保留，作为最终回退；
-- 根目录 `templates/` 按旧 manifest 哈希做三方判断：用户改过的模板保留，
-  未修改的默认模板随新版本更新，新增模板会补入。
+- 根目录 `templates/` 只更新内置模板（见[内置模板与用户模板](#内置模板与用户模板)）：
+  用户自建的主题、用户新增或改过的文件一律保留，`update.update_templates=false`
+  时内置模板也不动。
 
 即使下载中断、磁盘写入失败、进程被杀或断电，下次启动也会选择可用版本。
 该保证以磁盘本身未损坏为前提。
@@ -184,3 +213,5 @@ Release 额外上传三个 `*.manifest.json` 和 `SHA256SUMS.txt`。增量更新
   修复后删除 `current.json` 中的 `bad` 项或重新安装发布包。
 - **AstrBot 更新后未生效**：在 AstrBot 面板重载插件；根目录 `main.py` 是稳定 shim，
   重载后会读取 `current.json` 的新版本。
+- **更新后模板外观没变**：确认 `update.update_templates` 不是 `false`；另外该主题文件
+  若被手改过，会被判定为用户模板而保留，删掉或还原该文件后才会重新跟随新版本。

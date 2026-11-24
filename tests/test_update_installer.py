@@ -156,8 +156,12 @@ class InstallerTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         _clean(BASE)
 
-    def _install_current(self, version: str = "0.1.0") -> None:
-        for name, data in _package_files(version).items():
+    def _install_current(
+        self, version: str = "0.1.0", extra: dict[str, bytes] | None = None
+    ) -> None:
+        files = dict(_package_files(version))
+        files.update(extra or {})
+        for name, data in files.items():
             _write(self.root / name, data)
         package = self.root
         manifest = build_manifest(
@@ -322,6 +326,129 @@ class InstallerTests(unittest.IsolatedAsyncioTestCase):
             VersionInstaller._extract_archive(
                 archive.read_bytes(), BASE / "extract"
             )
+
+    # ── 内置模板 / 用户模板 ──────────────────────────────────────
+
+    async def _prepare_and_activate(
+        self,
+        files: dict[str, bytes],
+        *,
+        download_mode: str = "full",
+        update_templates: bool = True,
+        raw: dict[str, bytes] | None = None,
+    ) -> tuple[Any, _FakeHttp]:
+        """Build a 0.2.0 release from ``files``, prepare it and activate it."""
+        package, _, _ = _make_package(BASE, "0.2.0", files=files)
+        archive = _zip_package(package, BASE / f"new-{uuid.uuid4().hex[:6]}.zip")
+        manifest_bytes = (package / "build-manifest.json").read_bytes()
+        sums = _sums(
+            ("OnebotMaaLogAnalyzer-0.2.0.zip", archive),
+            ("OnebotMaaLogAnalyzer-0.2.0.manifest.json", manifest_bytes),
+        )
+        release = _release(
+            "0.2.0",
+            manifest_bytes=manifest_bytes,
+            archive_bytes=archive,
+            sums_bytes=sums,
+        )
+        served = {
+            "https://dl.example/OnebotMaaLogAnalyzer-0.2.0.zip": archive,
+            "https://dl.example/OnebotMaaLogAnalyzer-0.2.0.manifest.json": (
+                manifest_bytes
+            ),
+            "https://dl.example/SHA256SUMS.txt": sums,
+        }
+        for path, data in (raw or {}).items():
+            served[raw_url("v0.2.0", path)] = data
+        fake = _FakeHttp(served)
+        installer = VersionInstaller(
+            install=detect_install(self.root),
+            data_dir=self.root / "data",
+            config_path=self.root / "config.json",
+            http=fake,
+        )
+        prepared = await installer.prepare(release, download_mode=download_mode)
+        installer.activate(prepared, update_templates=update_templates)
+        return prepared, fake
+
+    async def test_locally_modified_file_is_redownloaded_not_copied(self):
+        """用户改过的文件不能进新版本快照，否则整次更新会校验失败。"""
+        self._install_current()
+        _write(self.root / "templates/default/page.html", b"<html>user</html>")
+        files = dict(_package_files("0.2.0"))
+        files["payload.txt"] = b"changed payload\n"
+        prepared, fake = await self._prepare_and_activate(
+            files,
+            download_mode="auto",
+            raw={
+                "templates/default/page.html": b"<html></html>",
+                "payload.txt": b"changed payload\n",
+            },
+        )
+        self.assertEqual(prepared.mode, "incremental")
+        self.assertFalse(any("0.2.0.zip" in url for url in fake.calls))
+        self.assertEqual(
+            (prepared.version_dir / "templates/default/page.html").read_bytes(),
+            b"<html></html>",
+        )
+        # 安装根里的用户改动仍然保留
+        self.assertEqual(
+            (self.root / "templates/default/page.html").read_bytes(),
+            b"<html>user</html>",
+        )
+
+    async def test_update_templates_disabled_freezes_builtin_templates(self):
+        self._install_current()
+        files = dict(_package_files("0.2.0"))
+        files["templates/default/page.html"] = b"<html>NEW</html>"
+        files["templates/fresh/page.html"] = b"<html>NEW THEME</html>"
+        await self._prepare_and_activate(files, update_templates=False)
+        self.assertEqual(
+            (self.root / "templates/default/page.html").read_bytes(),
+            b"<html></html>",
+        )
+        self.assertFalse((self.root / "templates/fresh").exists())
+
+    async def test_builtin_templates_follow_release_and_user_files_stay(self):
+        self._install_current(
+            extra={"templates/default/style.css": b"/* old css */"}
+        )
+        _write(self.root / "templates/default/style.css", b"/* edited by user */")
+        _write(self.root / "templates/default/notes.txt", b"user note")
+        _write(self.root / "templates/mine/page.html", b"<html>{{content}}</html>")
+        files = dict(_package_files("0.2.0"))
+        files["templates/default/page.html"] = b"<html>NEW</html>"
+        files["templates/default/style.css"] = b"/* release css */"
+        files["templates/default/extra.html"] = b"<i>new optional file</i>"
+        await self._prepare_and_activate(files)
+        templates = self.root / "templates"
+        # 内置文件跟随新版本
+        self.assertEqual(
+            (templates / "default/page.html").read_bytes(), b"<html>NEW</html>"
+        )
+        self.assertTrue((templates / "default/extra.html").is_file())
+        # 用户改过的内置文件、用户自建文件、用户自建主题都保留
+        self.assertEqual(
+            (templates / "default/style.css").read_bytes(),
+            b"/* edited by user */",
+        )
+        self.assertEqual(
+            (templates / "default/notes.txt").read_bytes(), b"user note"
+        )
+        self.assertEqual(
+            (templates / "mine/page.html").read_bytes(),
+            b"<html>{{content}}</html>",
+        )
+
+    async def test_removed_builtin_template_is_deleted(self):
+        self._install_current(
+            extra={"templates/default/style.css": b"/* old css */"}
+        )
+        files = dict(_package_files("0.2.0"))  # 新版本不再内置 style.css
+        await self._prepare_and_activate(files)
+        templates = self.root / "templates"
+        self.assertFalse((templates / "default/style.css").exists())
+        self.assertTrue((templates / "default/page.html").is_file())
 
 
 if __name__ == "__main__":

@@ -683,6 +683,9 @@ class UpdatePatch(PanelPatchModel):
     download_mode: str | None = Field(
         default=None, validation_alias="update_download_mode"
     )
+    update_templates: Mode | None = Field(
+        default=None, validation_alias="update_templates_mode"
+    )
     notify_qq: StringList | None = Field(
         default=None, validation_alias="update_notify_qq"
     )

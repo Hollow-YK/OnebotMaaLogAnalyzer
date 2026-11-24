@@ -331,7 +331,7 @@ class VersionInstaller:
             target.parent.mkdir(parents=True, exist_ok=True)
             if path not in changed:
                 source = self.install.app_root / path
-                if source.is_file():
+                if source.is_file() and file_sha256(source) == entry.sha256:
                     if self.install.versioned:
                         self._link_or_copy(source, target)
                     else:
@@ -339,7 +339,13 @@ class VersionInstaller:
                         # never share an inode with the old root files.
                         shutil.copy2(source, target)
                     continue
-                # Unchanged per manifest but locally missing: download it too.
+                # Unchanged per the local manifest but missing or modified on
+                # disk (hand edits, partial re-zip, user templates): rebuild the
+                # file from the release instead of trusting the local copy.
+                if source.is_file():
+                    logger.info(
+                        "[更新] 本地文件已变更，改为从 Release 下载：%s", path
+                    )
                 changed.add(path)
             content = entry.content
             if content is not None:
@@ -536,7 +542,9 @@ class VersionInstaller:
 
     # ── activation ──────────────────────────────────────────────
 
-    def activate(self, prepared: PreparedUpdate) -> dict:
+    def activate(
+        self, prepared: PreparedUpdate, *, update_templates: bool = True
+    ) -> dict:
         """Back up mutable files, install the launcher and switch the pointer."""
         root = self.install.root
         version = prepared.release.version_text
@@ -568,7 +576,10 @@ class VersionInstaller:
         try:
             self._install_root_assets(prepared.version_dir, backup_dir, restore)
             self._sync_root_templates(
-                prepared.version_dir, backup_dir, restore
+                prepared.version_dir,
+                backup_dir,
+                restore,
+                update_templates=update_templates,
             )
             self._install_bootstrap(prepared.version_dir, backup_dir, restore)
             pointer = {
@@ -629,16 +640,29 @@ class VersionInstaller:
             self._atomic_copy(source, target)
 
     def _sync_root_templates(
-        self, version_dir: Path, backup_dir: Path, restore: list[dict[str, str]]
+        self,
+        version_dir: Path,
+        backup_dir: Path,
+        restore: list[dict[str, str]],
+        *,
+        update_templates: bool = True,
     ) -> None:
-        """Refresh root templates while preserving user-edited files.
+        """Refresh the install-root ``templates`` that the running app reads.
 
-        The running app reads ``<install root>/templates``.  A file is replaced
-        only when it still matches the previous release manifest; otherwise it
-        is treated as a user customization and left alone.
+        Template ownership is decided by the **previous release manifest**: a
+        file that the old release shipped is built-in and follows the new
+        version; anything else under ``templates/`` — extra files, whole
+        user-authored themes, or built-in files the user edited — belongs to the
+        user and is never rewritten or deleted.  ``update_templates=False``
+        freezes built-in templates at their current content.
         """
         source_root = version_dir / "templates"
         if not source_root.is_dir():
+            return
+        if not update_templates:
+            logger.info(
+                "[更新] 按配置跳过内置模板同步（update.update_templates=false）"
+            )
             return
         old_manifest = self._local_manifest()
         for source in sorted(source_root.rglob("*")):
@@ -652,26 +676,70 @@ class VersionInstaller:
                     if old_manifest is not None
                     else None
                 )
-                if old_entry is not None:
-                    if file_sha256(target) != old_entry.sha256:
-                        logger.info(
-                            "[更新] 保留用户修改的模板：%s", relative
-                        )
-                        continue
-                else:
-                    # Legacy flat installs may not have a manifest.  Keep the
-                    # existing file rather than silently discarding possible
-                    # user edits; new template files are still added below.
-                    logger.info("[更新] 保留旧安装模板：%s", relative)
+                if old_entry is None:
+                    # Not shipped by the previous release: either a user theme
+                    # or a file created by hand.  Keep it.
+                    logger.info("[更新] 保留用户模板：%s", relative)
                     continue
-                backup = backup_dir / (
-                    "templates-" + str(abs(hash(relative))) + "-" + target.name
-                )
-                shutil.copy2(target, backup)
-                restore.append(
-                    {"target": str(target), "backup": str(backup)}
-                )
+                if file_sha256(target) != old_entry.sha256:
+                    logger.info("[更新] 保留用户修改的模板：%s", relative)
+                    continue
+                self._backup_template(target, backup_dir, restore)
             self._atomic_copy(source, target)
+        if old_manifest is not None:
+            self._drop_removed_templates(
+                version_dir, old_manifest, backup_dir, restore
+            )
+
+    def _drop_removed_templates(
+        self,
+        version_dir: Path,
+        old_manifest: ReleaseManifest,
+        backup_dir: Path,
+        restore: list[dict[str, str]],
+    ) -> None:
+        """Delete built-in templates the new release no longer ships."""
+        for relative, entry in sorted(old_manifest.files.items()):
+            if not relative.startswith("templates/"):
+                continue
+            if (version_dir / relative).is_file():
+                continue
+            target = self.install.root / relative
+            if not target.is_file():
+                continue
+            if file_sha256(target) != entry.sha256:
+                logger.info("[更新] 保留用户修改的模板：%s", relative)
+                continue
+            self._backup_template(target, backup_dir, restore)
+            try:
+                target.unlink()
+            except OSError as exc:
+                logger.warning("[更新] 删除下线模板失败：%s（%s）", relative, exc)
+                continue
+            self._prune_empty_dirs(target.parent)
+
+    def _backup_template(
+        self,
+        target: Path,
+        backup_dir: Path,
+        restore: list[dict[str, str]],
+    ) -> None:
+        backup = backup_dir / (
+            "templates-" + str(abs(hash(str(target)))) + "-" + target.name
+        )
+        shutil.copy2(target, backup)
+        restore.append({"target": str(target), "backup": str(backup)})
+
+    def _prune_empty_dirs(self, directory: Path) -> None:
+        """Remove now-empty template theme directories, never ``templates`` itself."""
+        stop = self.install.root / "templates"
+        current = directory
+        while current != stop and stop in current.parents:
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
 
     def _install_bootstrap(
         self, version_dir: Path, backup_dir: Path, restore: list[dict[str, str]]

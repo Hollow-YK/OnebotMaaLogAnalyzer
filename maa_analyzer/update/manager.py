@@ -359,7 +359,11 @@ class UpdateManager:
             prepared = await installer.prepare(
                 release, download_mode=self.config.download_mode
             )
-            pointer = await run_blocking(installer.activate, prepared)
+            pointer = await run_blocking(
+                installer.activate,
+                prepared,
+                update_templates=self.config.update_templates,
+            )
         finally:
             await installer.close()
         self._write_result(
@@ -499,6 +503,8 @@ class UpdateManager:
             f"  通道：{self.config.channel}",
             f"  自动更新：{'开启' if self.config.auto_update else '关闭'}",
             f"  下载模式：{self.config.download_mode}",
+            f"  更新模板："
+            + ("跟随新版本" if self.config.update_templates else "保持不动"),
             f"  通知 QQ：{', '.join(mask_secret(q) for q in self.config.notify_qq) or '（未设置）'}",
             f"  API：{', '.join(self.config.api_bases)}",
             f"  上次检查：{last}",

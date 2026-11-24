@@ -1178,6 +1178,15 @@
           "incremental"
         ]
       },
+      "update_templates_mode": {
+        "description": "更新时同步内置模板（用户自建或改过的模板文件始终保留）",
+        "type": "string",
+        "default": "enabled",
+        "options": [
+          "enabled",
+          "disabled"
+        ]
+      },
       "update_notify_qq": {
         "description": "接收更新与失败通知的 QQ 号列表",
         "type": "list",

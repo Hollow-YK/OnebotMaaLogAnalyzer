@@ -265,6 +265,7 @@ class UpdatePanel(PanelSection):
     update_channel: str = "stable"
     update_auto_mode: str = "disabled"
     update_download_mode: str = "auto"
+    update_templates_mode: str = "enabled"
     update_notify_qq: list[str] = Field(default_factory=list)
     update_check_on_start_mode: str = "enabled"
     update_check_interval_hours: int = 24

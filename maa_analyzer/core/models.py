@@ -104,6 +104,9 @@ class UpdateConfig(BaseModel):
     channel: str = "stable"
     auto_update: bool = False
     download_mode: str = "auto"
+    # 更新时是否用新版本自带的内置模板覆盖安装根 ``templates/``。
+    # 关闭后内置模板保持旧版；用户自建或改过的模板随时保留不动。
+    update_templates: bool = True
     notify_qq: UpdateStringList = Field(default_factory=list)
     check_on_start: bool = True
     check_interval_hours: int = 24
