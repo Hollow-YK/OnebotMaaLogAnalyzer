@@ -215,7 +215,13 @@ class UpdateManager:
             if notify:
                 await self._notify_new_version(latest, chosen, current)
             if auto_apply and self.config.auto_update:
-                if current.source:
+                if current.kind == "astrbot":
+                    # AstrBot owns plugin installation/updates.  The shared
+                    # updater only reports newer releases for that package.
+                    logger.info(
+                        "[更新] AstrBot 插件由 AstrBot 管理，跳过自动安装。"
+                    )
+                elif current.source:
                     key = f"auto-disabled:{latest.version_text}"
                     if self._state.get("notified", {}).get(key) != latest.version_text:
                         await self._notify(
@@ -279,18 +285,16 @@ class UpdateManager:
             lines.extend(["", "更新内容摘要：", excerpt])
             if len(body) > len(excerpt):
                 lines.append("……")
-        lines.extend(
-            [
-                "",
-                "自动更新："
-                + (
-                    "已开启"
-                    if self.config.auto_update and not current.source
-                    else "已关闭"
-                ),
-                "发送 /maa update apply 可手动更新。",
-            ]
-        )
+        if current.kind == "astrbot":
+            auto_text = "由 AstrBot 管理（仅检查）"
+            hint = "请在 AstrBot 插件管理中更新；本 Bot 仅检查新版本。"
+        elif current.source:
+            auto_text = "仅检查（源码运行）"
+            hint = "源码运行请使用 git pull 更新。"
+        else:
+            auto_text = "已开启" if self.config.auto_update else "已关闭"
+            hint = "发送 /maa update apply 可手动更新。"
+        lines.extend(["", f"自动更新：{auto_text}", hint])
         return "\n".join(lines)
 
     # ── applying ────────────────────────────────────────────────
@@ -302,6 +306,11 @@ class UpdateManager:
         force: bool = False,
         channel: str | None = None,
     ) -> ApplyOutcome:
+        if self.install.kind == "astrbot":
+            return ApplyOutcome(
+                False,
+                "AstrBot 插件更新由 AstrBot 管理，当前仅支持检查更新。",
+            )
         if release is None:
             result = await self.check(
                 channel=channel, notify=False, force=force
@@ -335,6 +344,10 @@ class UpdateManager:
         self, release: ReleaseInfo, *, force: bool = False
     ) -> ApplyOutcome:
         current = detect_install()
+        if current.kind == "astrbot":
+            raise RuntimeError(
+                "AstrBot 插件更新由 AstrBot 管理，当前仅支持检查更新。"
+            )
         if current.source:
             raise RuntimeError("源码运行不支持自动更新，请使用 git pull。")
         if compare_versions(release.version_text, current.version) <= 0:
@@ -403,6 +416,8 @@ class UpdateManager:
 
     async def request_apply(self, channel: str | None = None) -> str:
         """Start an update in the background and return a user-facing message."""
+        if self.install.kind == "astrbot":
+            return "AstrBot 插件更新由 AstrBot 管理，当前仅支持检查更新。"
         if self.install.source:
             return "当前从源码运行，不支持自动更新；请使用 git pull。"
         # Manual ``/maa update apply`` is allowed even when auto is off.
@@ -501,8 +516,20 @@ class UpdateManager:
             + ("（源码运行，自动更新不可用）" if current.source else ""),
             f"  检查更新：{'开启' if self.config.check_enabled else '关闭'}",
             f"  通道：{self.config.channel}",
-            f"  自动更新：{'开启' if self.config.auto_update else '关闭'}",
-            f"  下载模式：{self.config.download_mode}",
+            "  自动更新："
+            + (
+                "仅检查（由 AstrBot 管理）"
+                if current.kind == "astrbot"
+                else "仅检查（源码运行）"
+                if current.source
+                else "开启" if self.config.auto_update else "关闭"
+            ),
+            "  下载模式："
+            + (
+                "不适用（由 AstrBot 管理）"
+                if current.kind == "astrbot"
+                else self.config.download_mode
+            ),
             f"  更新模板："
             + ("跟随新版本" if self.config.update_templates else "保持不动"),
             f"  通知 QQ：{', '.join(mask_secret(q) for q in self.config.notify_qq) or '（未设置）'}",

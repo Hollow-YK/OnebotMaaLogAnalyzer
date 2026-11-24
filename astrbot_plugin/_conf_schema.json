@@ -1160,7 +1160,7 @@
         ]
       },
       "update_auto_mode": {
-        "description": "发现新版本后是否自动下载安装",
+        "description": "发现新版本后是否自动下载安装（仅裸 OneBot；AstrBot 插件由 AstrBot 管理）",
         "type": "string",
         "default": "disabled",
         "options": [
@@ -1169,7 +1169,7 @@
         ]
       },
       "update_download_mode": {
-        "description": "下载模式：自动 / 整包 / 增量",
+        "description": "下载模式：自动 / 整包 / 增量（仅裸 OneBot）",
         "type": "string",
         "default": "auto",
         "options": [
@@ -1179,7 +1179,7 @@
         ]
       },
       "update_templates_mode": {
-        "description": "更新时同步内置模板（用户自建或改过的模板文件始终保留）",
+        "description": "更新时同步内置模板（仅裸 OneBot；用户自建或改过的模板文件始终保留）",
         "type": "string",
         "default": "enabled",
         "options": [

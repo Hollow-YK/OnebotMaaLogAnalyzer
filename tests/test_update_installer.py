@@ -12,8 +12,8 @@ from typing import Any
 from unittest.mock import patch
 
 from maa_analyzer.update.github import ReleaseAsset, ReleaseInfo
-from maa_analyzer.update.install import asset_names, detect_install
-from maa_analyzer.update.installer import VersionInstaller
+from maa_analyzer.update.install import InstallInfo, asset_names, detect_install
+from maa_analyzer.update.installer import PreparedUpdate, VersionInstaller
 from maa_analyzer.update.manifest import (
     build_manifest,
     bytes_sha256,
@@ -295,6 +295,35 @@ class InstallerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prepared.mode, "full")
         self.assertTrue(prepared.warnings)
         self.assertTrue(any("0.2.0.zip" in c for c in fake.calls))
+
+    async def test_astrbot_install_is_refused(self):
+        install = InstallInfo(
+            root=self.root,
+            app_root=self.root,
+            kind="astrbot",
+            version="0.1.0",
+        )
+        installer = VersionInstaller(
+            install=install,
+            data_dir=self.root / "data",
+            http=_FakeHttp({}),
+        )
+        release = _release(
+            "0.2.0",
+            manifest_bytes=b"",
+            archive_bytes=b"",
+            sums_bytes=b"",
+        )
+        with self.assertRaises(Exception) as caught:
+            await installer.prepare(release, download_mode="full")
+        self.assertIn("AstrBot", str(caught.exception))
+        with self.assertRaises(Exception):
+            installer.activate(PreparedUpdate(
+                release=release,
+                manifest=None,  # type: ignore[arg-type]
+                version_dir=self.root,
+                mode="full",
+            ))
 
     async def test_checksum_mismatch_refuses_activation(self):
         self._install_current()

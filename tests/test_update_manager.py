@@ -95,11 +95,11 @@ class UpdateManagerTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         _clean(BASE)
 
-    def _manager(self, *, restart_callback=None, **cfg):
+    def _manager(self, *, restart_callback=None, install=None, **cfg):
         manager = UpdateManager(
             data_dir=self.data,
             cfg={"notify_qq": ["123"], "channel": "stable", **cfg},
-            install=self.install,
+            install=install or self.install,
             service=self.service,
             restart_callback=restart_callback,
             background=False,
@@ -145,6 +145,33 @@ class UpdateManagerTests(unittest.IsolatedAsyncioTestCase):
         apply.assert_not_called()
         joined = "\n".join(text for _, text in self.service.messages)
         self.assertIn("源码运行", joined)
+
+    async def test_astrbot_is_check_only(self):
+        astrbot = InstallInfo(
+            root=BASE, app_root=BASE, kind="astrbot", version="0.1.0"
+        )
+        _FakeClient.result = CheckResult(latest=_release("0.2.0"))
+        manager = self._manager(install=astrbot, auto_update=True)
+        with patch("maa_analyzer.update.manager.GitHubReleaseClient", _FakeClient), \
+             patch("maa_analyzer.update.manager.detect_install", return_value=astrbot), \
+             patch.object(manager, "apply") as apply:
+            await manager.check(auto_apply=True)
+        apply.assert_not_called()
+        joined = "\n".join(text for _, text in self.service.messages)
+        self.assertIn("由 AstrBot 管理", joined)
+
+        with patch(
+            "maa_analyzer.update.manager.detect_install", return_value=astrbot
+        ):
+            status = manager.describe_status()
+        self.assertIn("仅检查（由 AstrBot 管理）", status)
+
+        self.assertIn(
+            "仅支持检查更新", await manager.request_apply()
+        )
+        outcome = await manager.apply(_release("0.2.0"), force=True)
+        self.assertFalse(outcome.ok)
+        self.assertIn("仅支持检查更新", outcome.message)
 
     async def test_manual_apply_activates_and_requests_restart(self):
         restarts: list[str] = []

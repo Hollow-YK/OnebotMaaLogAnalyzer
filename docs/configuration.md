@@ -905,9 +905,9 @@ max_tokens：         llm.defaults → providers[].models[] → bot.configs.<名
 | --- | --- | --- |
 | `check_enabled` | `bool` / `true` | 自动检查总开关；关闭后仍可 `/maa update check` |
 | `channel` | `string` / `"stable"` | `stable` 正式版 / `prerelease` 测试版 |
-| `auto_update` | `bool` / `false` | 发现新版本后自动下载安装 |
-| `download_mode` | `string` / `"auto"` | `auto` / `full` / `incremental` |
-| `update_templates` | `bool` / `true` | 更新时是否同步内置模板；用户自建或改过的模板始终保留 |
+| `auto_update` | `bool` / `false` | 发现新版本后自动下载安装（仅裸 OneBot） |
+| `download_mode` | `string` / `"auto"` | `auto` / `full` / `incremental`（仅裸 OneBot） |
+| `update_templates` | `bool` / `true` | 更新时是否同步内置模板；用户自建或改过的模板始终保留（仅裸 OneBot） |
 | `notify_qq` | `list[str]` / `[]` | 更新与失败通知的私聊 QQ 号 |
 | `check_on_start` | `bool` / `true` | 启动后检查一次 |
 | `check_interval_hours` | `int` / `24` | 自动检查间隔，最小 1 小时 |
@@ -918,10 +918,12 @@ max_tokens：         llm.defaults → providers[].models[] → bot.configs.<名
 - 仓库固定为 `Hollow-YK/OnebotMaaLogAnalyzer`，不提供配置项。
 - 缺少 `update` 段时按上面的默认值运行，不会重写 `config.json`。
 - 从源码运行（没有 CI 写入的 `build-info.json`）时只检查、不自动更新。
+- **AstrBot 插件只检查更新**：插件安装与升级由 AstrBot 管理，本程序不会下载或替换
+  AstrBot 插件目录。
 - 更新失败会私聊 `notify_qq`，**不会自动重试**。
 - `update_templates=false` 时安装根 `templates/` 完全不动（既不覆盖也不新增/删除）；
   置为 `true` 时只同步「上一版本发布包里有的」内置模板，用户自建的主题与手改过的文件
-  永远保留，详见[内置模板与用户模板](update.md#内置模板与用户模板)。
+  永远保留（仅裸 OneBot），详见[内置模板与用户模板](update.md#内置模板与用户模板)。
 
 完整机制、增量更新与回退设计见 [检查更新与自动更新](update.md)。
 

@@ -33,7 +33,7 @@
 /maa history purge     清空全部分析历史
 /maa enable|disable    启用 / 停用本配置
 /maa reload            按 config.json 重建运行时（等同重启，日志另开新文件）
-/maa update apply      下载并安装最新版本（源码运行会拒绝）
+/maa update apply      下载并安装最新版本（仅裸 OneBot；AstrBot/源码会拒绝）
 
 /maa followup close    结束当前追问会话（需管理员及以上）
 ```

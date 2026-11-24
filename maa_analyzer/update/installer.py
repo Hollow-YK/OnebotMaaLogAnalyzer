@@ -221,9 +221,13 @@ class VersionInstaller:
         mode = str(download_mode or "auto").strip().lower()
         if mode not in {"auto", "full", "incremental"}:
             mode = "auto"
+        if self.install.kind == "astrbot":
+            raise InstallError(
+                "AstrBot 插件更新由 AstrBot 管理，当前仅支持检查更新。"
+            )
         if self.install.source:
             raise InstallError("源码运行不支持自动更新，请使用 git pull。")
-        if self.install.kind not in {"standard", "light", "astrbot"}:
+        if self.install.kind not in {"standard", "light"}:
             raise InstallError(f"未知安装类型：{self.install.kind}")
 
         manifest, sums = await self._manifest(release)
@@ -552,6 +556,10 @@ class VersionInstaller:
         self, prepared: PreparedUpdate, *, update_templates: bool = True
     ) -> dict:
         """Back up mutable files, install the launcher and switch the pointer."""
+        if self.install.kind == "astrbot":
+            raise InstallError(
+                "AstrBot 插件更新由 AstrBot 管理，当前仅支持检查更新。"
+            )
         root = self.install.root
         version = prepared.release.version_text
         versions = root / "versions"
