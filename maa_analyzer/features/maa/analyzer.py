@@ -68,6 +68,7 @@ from ...features.maa.repo_tools import (
     RepoTools,
     repo_tool_definitions,
 )
+from ...version import __version__
 from ...features.maa.attachments import (
     OutSegment,
     build_report_segments,
@@ -874,6 +875,9 @@ class MaaAnalyzer:
             )
 
             project_label = archive.project_name or project.name or "MaaXXX"
+            # 回填前记录「用户是否真的配置了项目名」：报告里
+            # meta.project 只看配置值，information.project 才看日志识别值。
+            configured_project_name = str(project.name or "").strip()
             # 把索引解析出的项目名回填，使报告头 / 系统提示词 / 追问保持一致
             project = project.model_copy(
                 update={"name": project.name or archive.project_name}
@@ -977,13 +981,18 @@ class MaaAnalyzer:
                 archive=archive, file_name=file_name, downloaded=downloaded,
                 project=project, log_count=len(archive.log_files),
                 image_count=len(archive.error_images),
+                repo_ref=self._repo_ref_value(repo_prep.provider),
+                configured_project_name=configured_project_name,
             )
             segments, response_text, rendered, render_notice = await self._prepare_output(
                 config_name=config_name,
                 settings=settings,
                 raw_report=raw_report,
                 information=information,
+                information_values=information,
                 archive=archive,
+                project=project,
+                configured_project_name=configured_project_name,
                 segments=segments,
                 notes=attach_notes,
                 render_followup=True,
@@ -1343,26 +1352,72 @@ class MaaAnalyzer:
     # ════════════════════════════════════════════════════════════
 
     @staticmethod
+    def _repo_ref_value(provider: Optional[RepoProvider]) -> str:
+        """当前对照的仓库版本；未启用仓库时为空。"""
+        if provider is None:
+            return ""
+        text = str(getattr(provider, "current_ref", "") or "").strip()
+        if text.startswith("（") and text.endswith("）"):
+            text = text[1:-1]
+        return text
+
+    @staticmethod
     def _report_info_values(*, archive, file_name: str, downloaded: int,
                             project: ProjectConfig, log_count: int,
-                            image_count: int) -> dict[str, str]:
+                            image_count: int,
+                            repo_ref: str = "",
+                            configured_project_name: Optional[str] = None,
+                            ) -> dict[str, str]:
         """
-        图片化报告头（概览）的取值，交给主题的 information.html。
+        图片化报告头（概览）与 `information.*` 字段的取值。
 
-        运行环境逐项给出，模板自己拼行；缺失的项为空串。
+        项目名按来源拆开：
+          - project：日志包识别出的项目名（可能为空）
+          - project_configured：用户配置的项目名（可能为空）
+          - project_display：合并后的展示名（配置 > 日志 > MaaXXX）
+
+        注意：`project` 字段本身是「日志识别值」，页面框架的
+        `meta.project` 才是「用户配置值」。
         """
         profile = archive.profile if archive is not None else None
+        configured = (
+            str(configured_project_name or "").strip()
+            if configured_project_name is not None
+            else str(getattr(project, "name", "") or "").strip()
+        )
+        detected = str(getattr(profile, "project_name", "") or "").strip()
+        resolved = (
+            str(getattr(archive, "project_name", "") or "").strip()
+            if archive is not None else ""
+        )
+        display = resolved or configured or detected or "MaaXXX"
+        if configured:
+            project_source = "配置"
+        elif detected:
+            project_source = "日志"
+        else:
+            project_source = "默认"
         part_note = next(
             (note for note in (archive.notes if archive is not None else [])
              if str(note).startswith("检测到分卷")),
             "",
         )
-        project_label = (
-            (archive.project_name if archive is not None else "")
-            or project.name or "MaaXXX"
-        )
+        original_name = str(
+            getattr(archive, "original_file_name", "") or ""
+        ).strip()
+        file_label = str(file_name or "").strip() or original_name
+        if not file_label and archive is not None:
+            file_label = Path(str(getattr(archive, "zip_path", "") or "")).name
+
+        def count(attr: str) -> str:
+            return str(int(getattr(archive, attr, 0) or 0)) if archive else "0"
+
         return {
-            "project": project_label,
+            # 两种来源 + 合并展示名
+            "project": detected,
+            "project_configured": configured,
+            "project_display": display,
+            "project_source": project_source,
             "ui": profile.ui_name if profile is not None else "",
             "ui_version": profile.ui_version if profile is not None else "",
             "module_version": (
@@ -1376,10 +1431,23 @@ class MaaAnalyzer:
             ),
             "device": profile.device if profile is not None else "",
             "os": profile.os_version if profile is not None else "",
-            "file": file_name,
+            "screen": (
+                str((profile.metadata or {}).get("screen", "") if profile else "")
+            ),
+            "file": file_label,
             "size": format_bytes(downloaded),
             "log_count": str(log_count),
             "image_count": str(image_count),
+            "file_count": count("file_count"),
+            "uncompressed_size": (
+                format_bytes(int(getattr(archive, "total_uncompressed_size", 0) or 0))
+                if archive else ""
+            ),
+            "log_total": count("log_total"),
+            "error_image_total": count("error_image_total"),
+            "custom_image_total": count("custom_image_total"),
+            "config_total": count("config_total"),
+            "repo_ref": str(repo_ref or "").strip(),
             "part_note": part_note,
         }
 
@@ -1505,7 +1573,10 @@ class MaaAnalyzer:
         settings: AnalysisSettings,
         raw_report: str,
         information: Optional[dict[str, str]] = None,
+        information_values: Optional[dict[str, str]] = None,
         archive: Optional[ArchiveInfo],
+        project: Optional[ProjectConfig] = None,
+        configured_project_name: Optional[str] = None,
         segments: list[OutSegment],
         notes: list[str],
         render_followup: bool,
@@ -1559,21 +1630,25 @@ class MaaAnalyzer:
         if notes:
             markdown += "\n\n" + "\n".join(f"- {note}" for note in notes)
 
+        configured_project = str(
+            configured_project_name
+            if configured_project_name is not None
+            else getattr(project, "name", "") or ""
+        ).strip()
         project_name = (
-            (archive.project_name if archive is not None else "") or "MaaXXX"
+            (archive.project_name if archive is not None else "")
+            or configured_project or "MaaXXX"
         )
         generated_at = time.strftime("%Y-%m-%d %H:%M:%S")
         session_id = session_id or current_session_id()
         usage = self.llm.session_summary(session_id) if session_id else {}
         meta = {
             "title": "日志分析报告",
-            "project": project_name,
-            "file": (
-                Path(str(getattr(archive, "zip_path", "") or "")).name
-                if archive is not None and bool(getattr(archive, "zip_path", ""))
-                else ""
-            ),
+            # meta.project 是用户配置值；日志识别值在 information.project。
+            "project": configured_project,
             "generated_at": generated_at,
+            "tool_version": __version__,
+            "template": report_cfg.template,
             # 仅主分析展示用量；追问不显示会话累计 token。
             "tokens_input": format_tokens(usage.get("prompt_tokens")) if show_analysis_usage else "",
             "tokens_output": format_tokens(usage.get("completion_tokens")) if show_analysis_usage else "",
@@ -1586,12 +1661,16 @@ class MaaAnalyzer:
             "model": "、".join(usage.get("models") or []) or "-",
             "usage": self._usage_line(usage) if show_analysis_usage else "",
         }
+        info_values = (
+            information_values if information_values is not None else information
+        )
         result = await render_report(
             markdown,
             report_cfg,
             meta=meta,
             attachments=attachments,
             information=information,
+            information_values=info_values,
             data_dir=self._data_dir,
             template_root=self._template_root,
         )
@@ -2259,12 +2338,30 @@ class MaaAnalyzer:
             settings, raw, archive, provider, project=project,
             config_name=config_name,
         )
+        # 追问不显示整块报告头，但页眉/页脚仍可读取 information.* 字段。
+        downloaded = 0
+        if archive is not None and str(getattr(archive, "zip_path", "") or ""):
+            try:
+                downloaded = int(Path(str(archive.zip_path)).stat().st_size)
+            except OSError:
+                downloaded = 0
+        followup_information = self._report_info_values(
+            archive=archive,
+            file_name=str(getattr(archive, "original_file_name", "") or ""),
+            downloaded=downloaded,
+            project=project or ProjectConfig(),
+            log_count=len(archive.log_files) if archive is not None else 0,
+            image_count=len(archive.error_images) if archive is not None else 0,
+            repo_ref=self._repo_ref_value(provider),
+        )
         report_cfg = self._report_cfg(config_name)
         segments, text, rendered, render_notice = await self._prepare_output(
             config_name=config_name,
             settings=settings,
             raw_report=raw,
+            information_values=followup_information,
             archive=archive,
+            project=project,
             segments=segments,
             notes=notes,
             render_followup=bool(report_cfg.render_followup),

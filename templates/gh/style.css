@@ -210,10 +210,14 @@
 .info-framework-version::before { content: "MaaFramework"; }
 .info-device::before { content: "设备"; }
 .info-os::before { content: "系统"; }
+.info-screen::before { content: "屏幕"; }
 .info-file::before { content: "文件"; }
 .info-size::before { content: "大小"; }
-.info-logs::before { content: "日志"; }
-.info-images::before { content: "错误截图"; }
+.info-files::before { content: "包内文件"; }
+.info-uncompressed::before { content: "解压后"; }
+.info-log-total::before { content: "日志"; }
+.info-error-total::before { content: "错误截图"; }
+.info-repo::before { content: "代码版本"; }
 
 .info-ui {
   font-weight: 600;

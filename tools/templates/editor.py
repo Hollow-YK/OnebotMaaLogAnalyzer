@@ -100,8 +100,8 @@ _RENDERER_KEY: Optional[tuple[str, str]] = None
 
 META_LABELS = (
     ("title", "标题"),
-    ("project", "项目"),
-    ("file", "日志文件名"),
+    ("project", "配置项目名（meta.project）"),
+    ("file", "日志文件名（information.file）"),
     ("generated_at", "生成时间"),
     ("tokens_input", "输入 token"),
     ("tokens_output", "输出 token"),
@@ -110,59 +110,83 @@ META_LABELS = (
     ("provider", "provider"),
     ("model", "model"),
     ("usage", "自定义用量行"),
+    ("cache_hit_rate", "缓存命中率"),
+    ("usage_summary", "用量摘要"),
+    ("tool_version", "工具版本"),
+    ("template", "模板名"),
 )
 
 PLACEHOLDERS = (
-    ("title", "报告标题"),
-    ("project", "项目名"),
-    ("file", "日志文件名"),
-    ("generated_at", "生成时间"),
-    ("tokens_input", "输入 token"),
-    ("tokens_output", "输出 token"),
-    ("tokens_total", "总 token"),
-    ("usage_calls", "模型调用次数"),
-    ("provider", "provider 名称"),
-    ("model", "模型名"),
-    ("usage", "整行自定义用量文本"),
-    ("page", "当前页码"),
-    ("pages", "总页数"),
+    ("content", "AI 正文（仅 page.html）"),
     ("header", "页眉内容（仅 page.html）"),
+    ("information", "报告头 HTML（仅第 1 页）"),
     ("footer", "页脚内容（仅 page.html）"),
-    ("information", "报告头（自定义区域，仅第 1 页）"),
-    ("content", "正文内容（仅 page.html）"),
+    ("meta.title", "报告标题"),
+    ("meta.project", "配置项目名（可能为空）"),
+    ("meta.generated_at", "生成时间"),
+    ("meta.page", "当前页码"),
+    ("meta.pages", "总页数"),
+    ("meta.tokens_input", "输入 token"),
+    ("meta.tokens_output", "输出 token"),
+    ("meta.tokens_total", "总 token"),
+    ("meta.cache_hit_rate", "缓存命中率"),
+    ("meta.usage_summary", "用量摘要"),
+    ("meta.usage_style", "用量行隐藏样式"),
+    ("meta.usage_calls", "模型调用次数"),
+    ("meta.provider", "provider 名称"),
+    ("meta.model", "模型名"),
+    ("meta.usage", "整行自定义用量文本"),
+    ("meta.tool_version", "工具版本"),
+    ("meta.template", "实际加载的模板名"),
 )
 
 # 附件外壳专用占位符（attach-img.html / attach-file.html）
 ATTACH_PLACEHOLDERS = (
-    ("name", "文件名"),
-    ("path", "来源内相对路径"),
-    ("source", "来源（日志包 / 仓库）"),
-    ("size", "大小（未知时为空）"),
-    ("status", "状态说明（未找到 / 未内联）"),
-    ("kind", "image / file / missing / skipped"),
-    ("class", "推荐容器类名"),
-    ("src", "图片 data URI（仅 attach-img.html）"),
+    ("attach.name", "文件名"),
+    ("attach.path", "来源内相对路径"),
+    ("attach.source", "来源（日志包 / 仓库）"),
+    ("attach.size", "大小（未知时为空）"),
+    ("attach.status", "状态说明（未找到 / 未内联）"),
+    ("attach.kind", "image / file / missing / skipped"),
+    ("attach.class", "推荐容器类名"),
+    ("attach.src", "图片 data URI（仅 attach-img.html）"),
 )
 
-# 报告头外壳专用占位符（information.html）
+# 报告头外壳专用占位符（information.html）；
+# 这些字段在 page/header/footer 里同样可用。
 INFO_PLACEHOLDERS = (
-    ("project", "项目名"),
-    ("ui", "UI 名称（MXU / MFAAvalonia / …）"),
-    ("ui_version", "软件版本"),
-    ("module_version", "MaaFwApp 模块版本"),
-    ("resource_version", "资源 / 项目版本"),
-    ("framework_version", "MaaFramework 版本"),
-    ("device", "设备"),
-    ("os", "系统"),
-    ("file", "日志包文件名"),
-    ("size", "压缩包大小"),
-    ("log_count", "日志文件数"),
-    ("image_count", "错误截图数"),
-    ("part_note", "分卷提示（无则空）"),
+    ("information.project_display", "合并后的展示项目名"),
+    ("information.project", "日志识别出的项目名"),
+    ("information.project_configured", "用户配置的项目名"),
+    ("information.project_source", "项目名来源（配置 / 日志 / 默认）"),
+    ("information.ui", "UI 名称（MXU / MFAAvalonia / …）"),
+    ("information.ui_version", "软件版本"),
+    ("information.module_version", "MaaFwApp 模块版本"),
+    ("information.resource_version", "资源 / 项目版本"),
+    ("information.framework_version", "MaaFramework 版本"),
+    ("information.device", "设备"),
+    ("information.os", "系统"),
+    ("information.screen", "屏幕分辨率"),
+    ("information.file", "日志包文件名"),
+    ("information.size", "压缩包大小"),
+    ("information.log_count", "优先日志数"),
+    ("information.image_count", "优先错误截图数"),
+    ("information.file_count", "包内文件数"),
+    ("information.uncompressed_size", "解压后大小"),
+    ("information.log_total", "日志精确总数"),
+    ("information.error_image_total", "错误截图精确总数"),
+    ("information.custom_image_total", "自定义截图精确总数"),
+    ("information.config_total", "配置文件精确总数"),
+    ("information.repo_ref", "代码对照版本"),
+    ("information.part_note", "分卷提示（无则空）"),
 )
 
 # 预览用的示例运行环境（真实取值来自本次分析的日志包）
 DEMO_INFORMATION = {
+    "project": "narutomobile",
+    "project_configured": "MAN",
+    "project_display": "MAN",
+    "project_source": "配置",
     "ui": "MFAAvalonia",
     "ui_version": "1.2.3",
     "module_version": "",
@@ -170,9 +194,18 @@ DEMO_INFORMATION = {
     "framework_version": "v5.3.1",
     "device": "Pixel 7",
     "os": "Android 13",
+    "screen": "1080x2400",
+    "file": "narutomobile-logs.zip",
     "size": "12.3 MB",
     "log_count": "4",
     "image_count": "2",
+    "file_count": "57",
+    "uncompressed_size": "38.4 MB",
+    "log_total": "12",
+    "error_image_total": "3",
+    "custom_image_total": "2",
+    "config_total": "4",
+    "repo_ref": "v1.2.3",
     "part_note": "",
 }
 
@@ -263,13 +296,21 @@ def default_meta() -> dict[str, str]:
         "provider": "main",
         "model": "deepseek-v4.1-flash",
         "usage": "输入 18.4k · 输出 5.2k · 合计 23.6k tokens · main/deepseek-v4.1-flash ×4",
+        "cache_hit_rate": "80.0%",
+        "usage_summary": "输入 18.4k · 输出 5.2k · 合计 23.6k tokens · 缓存命中率：80.0%",
+        "usage_style": "",
+        "tool_version": "0.3.0-dev",
+        "template": "default",
     }
 
 
 def preview_information(meta: dict) -> dict[str, str]:
     """预览用的报告头取值：项目名 / 文件名跟随元信息，其余用示例值。"""
     values = dict(DEMO_INFORMATION)
-    values["project"] = str(meta.get("project") or "") or "MAA"
+    configured = str(meta.get("project") or "").strip()
+    values["project_configured"] = configured
+    values["project_display"] = configured or values["project"] or "MAA"
+    values["project_source"] = "配置" if configured else "日志"
     values["file"] = str(meta.get("file") or "")
     return values
 
@@ -633,6 +674,8 @@ def run_render(payload: dict) -> dict:
             if template.information
             else production_information_html(information)
         )
+        # 预览以实际加载到的主题名为准（非法/缺失会回退 default）。
+        meta["template"] = template.name
 
         with _LOCK:
             renderer = _get_renderer()
@@ -642,6 +685,7 @@ def run_render(payload: dict) -> dict:
                     template, item, attachments, True,
                 ),
                 information_html=information_html,
+                information_values=information,
             )
 
         return {
@@ -1211,8 +1255,9 @@ _PAGE = r"""<!DOCTYPE html>
         <div class="section">
           <h3>报告头占位符</h3>
           <div class="hint" style="margin-bottom:6px">
-            只用于 <code>information.html</code>（可选文件）：预览里是示例运行环境，
-            运行环境各字段为空时整项隐藏（默认模板用 <code>:empty</code> 控制）。
+            用于 <code>information.html</code>，也可在
+            <code>page.html</code> / <code>header.html</code> / <code>footer.html</code>
+            里用 <code>{{information.*}}</code> 读取；空字段默认整项隐藏。
           </div>
           <div id="infoPhList"></div>
         </div>

@@ -1,16 +1,20 @@
 <div class="report-info">
   <div class="info-line">
-    <span class="info-item info-ui">{{ui}}</span>
-    <span class="info-item info-ui-version">{{ui_version}}</span>
-    <span class="info-item info-resource-version">{{resource_version}}</span>
-    <span class="info-item info-framework-version">{{framework_version}}</span>
-    <span class="info-item info-module-version">{{module_version}}</span>
-    <span class="info-item info-device">{{device}}</span>
-    <span class="info-item info-os">{{os}}</span>
-    <span class="info-item info-file">{{file}}</span>
-    <span class="info-item info-size">{{size}}</span>
-    <span class="info-item info-logs">{{log_count}} 个</span>
-    <span class="info-item info-images">{{image_count}} 张</span>
+    <span class="info-item info-ui">{{information.ui}}</span>
+    <span class="info-item info-ui-version">{{information.ui_version}}</span>
+    <span class="info-item info-resource-version">{{information.resource_version}}</span>
+    <span class="info-item info-framework-version">{{information.framework_version}}</span>
+    <span class="info-item info-module-version">{{information.module_version}}</span>
+    <span class="info-item info-device">{{information.device}}</span>
+    <span class="info-item info-os">{{information.os}}</span>
+    <span class="info-item info-screen">{{information.screen}}</span>
+    <span class="info-item info-file">{{information.file}}</span>
+    <span class="info-item info-size">{{information.size}}</span>
+    <span class="info-item info-files">{{information.file_count}}</span>
+    <span class="info-item info-uncompressed">{{information.uncompressed_size}}</span>
+    <span class="info-item info-log-total">{{information.log_total}}</span>
+    <span class="info-item info-error-total">{{information.error_image_total}}</span>
+    <span class="info-item info-repo">{{information.repo_ref}}</span>
   </div>
-  <div class="info-note">{{part_note}}</div>
+  <div class="info-note">{{information.part_note}}</div>
 </div>

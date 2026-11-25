@@ -589,6 +589,8 @@ Bot 会自动解析 UI 类型、软件版本、资源版本与 MaaFramework 版�
   `footer.html` / `style.css`）
 - 报告正文按 `<!-- section: 标题 -->` 分块顺序拼接；`<!-- page-break -->` 强制换页
 - 报告头不进正文：由主题的 `{{information}}` 插槽渲染（仅第 1 页），主题决定位置
+- 模板数据字段使用命名空间：`{{meta.*}}` / `{{information.*}}` / `{{attach.*}}`；
+  四个结构槽 `{{header}}` / `{{information}}` / `{{content}}` / `{{footer}}` 保持裸名。
 - 内联图片按正文宽度等比缩放，**没有单张体积上限**（旧的 `settings.max_image_mb` 已删除）
 
 完整的渲染管线、分页算法、浏览器探测顺序与模板编写指南见 [图片化报告与模板](render.md)。
