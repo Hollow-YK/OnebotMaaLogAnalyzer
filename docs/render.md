@@ -126,9 +126,10 @@ AI 输出 Markdown（含 section / page-break / 附件指令）
 ## 附件的呈现
 
 - 外壳（HTML 结构与样式）由主题的 `attach-img.html` / `attach-file.html` 决定，
-  插件只提供 `{{name}}` / `{{path}}` / `{{source}}` / `{{size}}` 等取值。
-- **图片**：交 `attach-img.html` 渲染，`{{src}}` 是 data URI，默认模板按**正文宽度
-  等比缩放**（左右两端对齐）；高度超过可用正文高度时整体缩小，不会被分页裁切。
+  插件只提供 `{{attach.name}}` / `{{attach.path}}` / `{{attach.source}}` /
+  `{{attach.size}}` 等取值。
+- **图片**：交 `attach-img.html` 渲染，`{{attach.src}}` 是 data URI，默认模板按
+  **正文宽度等比缩放**（左右两端对齐）；高度超过可用正文高度时整体缩小，不会被分页裁切。
   图片**没有体积上限**（旧的 `max_image_mb` 已删除）——渲染时会缩放，
   体积只影响生成报告图的大小。
 - **其他文件**：交 `attach-file.html` 渲染成卡片（文件名 / 相对路径 / 来源 / 大小），
@@ -137,9 +138,10 @@ AI 输出 Markdown（含 section / page-break / 附件指令）
 - 附件指令**独占一行**时，外壳会作为内容块的独立块渲染（不再被 `<p>` 包住）；
   写在文字中间时则跟随段落，由浏览器按块级元素处理。
 - `embed_attachments=false` 时图片不走 `attach-img.html`，改用 `attach-file.html`
-  渲染成「图片未内联」卡片（`{{status}}`），报告后单独发送图片消息。
+  渲染成「图片未内联」卡片（`{{attach.status}}`），报告后单独发送图片消息。
 - `attach_markdown=true` 时额外上传 `<项目>-<时间>-report.md`，
   内容为剥离 `section` / `page-break` / 看图标记后的原始 Markdown。
+- `attach.*` 只在两个附件外壳里可用；写在其他模板文件里不会替换。
 
 ## 分页
 
@@ -147,7 +149,7 @@ AI 输出 Markdown（含 section / page-break / 附件指令）
 ① 先渲染「空正文」页面，测出模板自身的页眉/页脚/内边距占用 → 每页可用正文高度
 ② 渲染全部内容块，测量每块高度
 ③ 先按 page-break 切段，段内按可用高度装箱
-④ 逐页填充模板，{{page}} / {{pages}} 每页不同
+④ 逐页填充模板，{{meta.page}} / {{meta.pages}} 每页不同
 ⑤ 逐页 DOM.getBoxModel 取包围盒 → Page.captureScreenshot(clip=包围盒)
 ```
 
@@ -226,7 +228,26 @@ templates/
 - 三个文件（`page.html` / `attach-img.html` / `attach-file.html`）缺任意一个，
   模板视为不完整：记 warning 并整体回退 `default`。
 - `information.html` 是**可选**的：缺省时用内置默认外壳（信息齐全，但样式不受
-  主题控制），旧模板无需改动也能继续用。
+  主题控制）。
+
+### 占位符命名空间
+
+模板里只有四个结构槽保持裸名：
+
+```text
+{{header}}  {{information}}  {{content}}  {{footer}}
+```
+
+它们是页面骨架，不是数据字段。所有数据都用命名空间：
+
+| 命名空间 | 内容 | 可用文件 |
+| --- | --- | --- |
+| `{{meta.*}}` | 报告页元信息、用量、页码、工具版本 | `page.html` / `header.html` / `footer.html` |
+| `{{information.*}}` | 日志包 / 运行环境 / 报告事实 | `page.html` / `header.html` / `footer.html` / `information.html` |
+| `{{attach.*}}` | 附件字段 | 仅 `attach-img.html` / `attach-file.html` |
+
+`{{information}}` 是**整块报告头 HTML**，只在第 1 页有值；
+`{{information.file}}` 是**单个字段文本**，每页都有值。两者靠「有没有点号」区分。
 
 ### 内置模板与用户模板
 
@@ -244,6 +265,9 @@ templates/
 新目录名（如 `dark/`）来定制；把整个内置主题目录改得面目全非时，该主题就不会再跟随
 上游更新了。
 
+> 模板字段使用命名空间：`{{meta.*}}` / `{{information.*}}` / `{{attach.*}}`；
+> 四个结构槽 `{{header}}` / `{{information}}` / `{{content}}` / `{{footer}}` 保持裸名。
+
 ### page.html
 
 必须包含 `{{content}}`，否则模板无效并回退 `default`：
@@ -251,45 +275,53 @@ templates/
 ```html
 <div class="page">
   {{header}}
+  {{information}}
   <main class="content">{{content}}</main>
-  <footer class="page-footer">{{footer}}</footer>
+  {{footer}}
 </div>
 ```
 
 ### header.html / footer.html
 
-两者都是**每页重复出现**的固定框架，可用的占位符与 `page.html` **完全一致**
-（详见下一节）。默认模板的分工只是排版选择，不是限制：
+两者都是**每页重复出现**的固定框架，可用的数据字段与 `page.html` 一致：
+`meta.*` 与 `information.*` 都可写。默认模板的分工只是排版选择，不是限制：
 
 ```html
 <!-- templates/default/header.html -->
 <div class="page-header">
-  <h1 class="report-title">{{title}}</h1>
-  <div class="report-meta">{{project}} · {{file}} · {{generated_at}}</div>
+  <h1 class="report-title">{{meta.title}}</h1>
+  <div class="report-meta">
+    {{information.project_display}} · {{information.file}} · {{meta.generated_at}}
+  </div>
 </div>
 ```
 
 ```html
 <!-- templates/default/footer.html -->
 <div class="footer-line">
-  <span class="footer-note">Powered By OnebotMaaLogAnalyzer</span>
-  <span class="pager">{{page}} / {{pages}}</span>
+  <span class="footer-note">Powered By OnebotMaaLogAnalyzer v{{meta.tool_version}}</span>
+  <span class="pager">{{meta.page}} / {{meta.pages}}</span>
 </div>
-<div class="footer-usage">{{usage}}</div>
+<div class="footer-usage">{{meta.usage}}</div>
 ```
 
-想在页首也显示用量，把占位符直接写进 `header.html` 即可，例如：
+想在页首也显示用量，把字段直接写进 `header.html` 即可，例如：
 
 ```html
 <div class="page-header">
-  <h1 class="report-title">{{title}}</h1>
-  <div class="report-meta">{{project}} · {{file}} · {{generated_at}}</div>
-  <div class="report-meta">{{usage}}（{{usage_calls}} 次调用）</div>
+  <h1 class="report-title">{{meta.title}}</h1>
+  <div class="report-meta">
+    {{information.project_display}} · {{information.file}} · {{meta.generated_at}}
+  </div>
+  <div class="report-meta">{{meta.usage}}（{{meta.usage_calls}} 次调用）</div>
 </div>
 ```
 
-`{{usage}}` 为空时 `.footer-usage:empty { display: none }` 会让整行不占位，
+`{{meta.usage}}` 为空时 `.footer-usage:empty { display: none }` 会让整行不占位，
 因此没有调用记录时页脚不会多出空白（`header.html` 里也可以套用同样的 CSS）。
+
+> `{{header}}` / `{{footer}}` 只在 `page.html` 有值；写进 `header.html` /
+> `footer.html` 会原样保留。`{{content}}` 同理，只在 `page.html` 生效。
 
 ### attach-img.html / attach-file.html
 
@@ -299,46 +331,47 @@ templates/
 
 ```html
 <!-- templates/default/attach-img.html -->
-<figure class="{{class}}">
-  <img src="{{src}}" alt="{{name}}">
+<figure class="{{attach.class}}">
+  <img src="{{attach.src}}" alt="{{attach.name}}">
   <figcaption>
-    <span class="attach-name">{{name}}</span>
-    <span class="attach-path">{{path}}</span>
-    <span class="attach-meta">{{source}}<span class="attach-size">{{size}}</span></span>
+    <span class="attach-name">{{attach.name}}</span>
+    <span class="attach-path">{{attach.path}}</span>
+    <span class="attach-meta">{{attach.source}}<span class="attach-size">{{attach.size}}</span></span>
   </figcaption>
 </figure>
 ```
 
 ```html
 <!-- templates/default/attach-file.html：文件 / 未找到 / 未内联 -->
-<div class="{{class}}">
-  <span class="attach-name">{{name}}</span>
-  <span class="attach-path">{{path}}</span>
-  <span class="attach-meta">{{source}}<span class="attach-size">{{size}}</span><span class="attach-status">{{status}}</span></span>
+<div class="{{attach.class}}">
+  <span class="attach-name">{{attach.name}}</span>
+  <span class="attach-path">{{attach.path}}</span>
+  <span class="attach-meta">{{attach.source}}<span class="attach-size">{{attach.size}}</span><span class="attach-status">{{attach.status}}</span></span>
 </div>
 ```
 
 | 占位符 | 含义 | 转义 |
 | --- | --- | --- |
-| `{{name}}` | 文件名（`debug/20261122.png` → `20261122.png`） | 是 |
-| `{{path}}` | 来源内相对路径（`debug/20261122.png`） | 是 |
-| `{{source}}` | 来源：`日志包` / `仓库` | 是 |
-| `{{size}}` | 大小（`1.2 MB`）；找不到附件时为空 | 是 |
-| `{{status}}` | 状态说明：`未找到附件` / `图片未内联`，正常附件为空 | 是 |
-| `{{kind}}` | `image` / `file` / `missing` / `skipped` | 是 |
-| `{{class}}` | 推荐容器类名：`attach-image`；`attach-file`（可叠 `attach-missing` / `attach-image-skipped`） | 是 |
-| `{{src}}` | 图片的 data URI（只有 `attach-img.html` 有意义） | 否 |
+| `{{attach.name}}` | 文件名（`debug/20261122.png` → `20261122.png`） | 是 |
+| `{{attach.path}}` | 来源内相对路径（`debug/20261122.png`） | 是 |
+| `{{attach.source}}` | 来源：`日志包` / `仓库` | 是 |
+| `{{attach.size}}` | 大小（`1.2 MB`）；找不到附件时为空 | 是 |
+| `{{attach.status}}` | 状态说明：`未找到附件` / `图片未内联`，正常附件为空 | 是 |
+| `{{attach.kind}}` | `image` / `file` / `missing` / `skipped` | 是 |
+| `{{attach.class}}` | 推荐容器类名：`attach-image`；`attach-file`（可叠 `attach-missing` / `attach-image-skipped`） | 是 |
+| `{{attach.src}}` | 图片的 data URI（只有 `attach-img.html` 有意义） | 否 |
 
 用法约定：
 
 1. `attach-img.html` 渲染**内联图片**；`attach-file.html` 渲染普通文件、
    未找到的附件，以及 `embed_attachments=false` 时未内联的图片
-   （此时带 `{{status}}`=`图片未内联`）。
+   （此时带 `{{attach.status}}`=`图片未内联`）。
 2. 同一路径在一次报告里只渲染一次。
-3. 图片尺寸不归模板强制：建议容器使用 `{{class}}`（默认类名带渲染器注入的
+3. 图片尺寸不归模板强制：建议容器使用 `{{attach.class}}`（默认类名带渲染器注入的
    `width:100%` / 等比缩放 / `max-height` 规则），或自行在 `style.css` 里约束。
-4. `{{size}}` / `{{status}}` 为空时不会显示任何内容，默认模板用
+4. `{{attach.size}}` / `{{attach.status}}` 为空时不会显示任何内容，默认模板用
    `:empty` + `::before` 控制分隔符，你也可以整段省略。
+5. `attach.*` **只在两个附件外壳里有效**；写在其他文件里会原样保留。
 
 ### information.html（报告头，可选）
 
@@ -348,57 +381,78 @@ templates/
 
 缺 `information.html` 时使用内置默认外壳（信息齐全、带轻量内联样式），不会报错；
 四套内置主题都提供了自己的版本。主题里没有 `{{information}}` 插槽时，报告头
-不会显示（加载时会记 warning），旧模板需要补一个插槽。
+不会显示（加载时会记 warning）。
+
+`information.html` **只允许 `information.*`**，不能访问 `meta.*`、`attach.*`
+或四个结构槽。
 
 | 占位符 | 含义 | 为空时 |
 | --- | --- | --- |
-| `{{project}}` | 项目名（`project.name` > 包内解析 > `MaaXXX`） | 内置外壳显示 `MaaXXX` |
-| `{{ui}}` | UI 名称（MXU / MFAAvalonia / MaaFwApp / …） | 空 |
-| `{{ui_version}}` | UI 软件版本 | 空 |
-| `{{module_version}}` | MaaFwApp 模块版本 | 空 |
-| `{{resource_version}}` | 资源 / 项目版本 | 空 |
-| `{{framework_version}}` | MaaFramework 版本 | 空 |
-| `{{device}}` / `{{os}}` | 设备 / 系统 | 空 |
-| `{{file}}` | 日志包文件名 | 空 |
-| `{{size}}` | 压缩包大小（`12.3 MB`） | 空 |
-| `{{log_count}}` / `{{image_count}}` | 日志文件数 / 错误截图数 | `0` |
-| `{{part_note}}` | 分卷提示（「检测到分卷…」，无分卷时为空） | 空 |
+| `{{information.project_display}}` | 合并后的展示项目名（配置 > 日志 > `MaaXXX`） | `MaaXXX` |
+| `{{information.project}}` | 日志包识别出的项目名 | 空 |
+| `{{information.project_configured}}` | 用户配置的项目名（同 `meta.project`） | 空 |
+| `{{information.project_source}}` | 项目名来源：`配置` / `日志` / `默认` | 空 |
+| `{{information.ui}}` | UI 名称（MXU / MFAAvalonia / MaaFwApp / …） | 空 |
+| `{{information.ui_version}}` | UI 软件版本 | 空 |
+| `{{information.module_version}}` | MaaFwApp 模块版本 | 空 |
+| `{{information.resource_version}}` | 资源 / 项目版本 | 空 |
+| `{{information.framework_version}}` | MaaFramework 版本 | 空 |
+| `{{information.device}}` / `{{information.os}}` | 设备 / 系统 | 空 |
+| `{{information.screen}}` | 屏幕分辨率（部分 UI 可解析） | 空 |
+| `{{information.file}}` | 真实上传的日志包文件名 | 空 |
+| `{{information.size}}` | 压缩包大小（`12.3 MB`） | 空 |
+| `{{information.log_count}}` / `{{information.image_count}}` | 优先日志数 / 优先错误截图数（列表有上限） | `0` |
+| `{{information.file_count}}` | 包内文件精确总数 | `0` |
+| `{{information.uncompressed_size}}` | 解压后精确总大小 | 空 |
+| `{{information.log_total}}` | 日志文件精确总数 | `0` |
+| `{{information.error_image_total}}` | 错误截图精确总数 | `0` |
+| `{{information.custom_image_total}}` | 自定义截图精确总数 | `0` |
+| `{{information.config_total}}` | 配置文件精确总数 | `0` |
+| `{{information.repo_ref}}` | 本次对照的代码版本（tag / 分支） | 空 |
+| `{{information.part_note}}` | 分卷提示（「检测到分卷…」，无分卷时为空） | 空 |
 
 默认写法（四套内置主题结构一致，只是配色 / 字号不同）：
 
 ```html
 <!-- templates/default/information.html -->
 <div class="report-info">
-  <div class="info-title">{{project}} 日志分析结果</div>
+  <div class="info-title">{{information.project_display}} 日志分析结果</div>
   <div class="info-line">
-    <span class="info-item info-ui">{{ui}}</span>
-    <span class="info-item info-ui-version">{{ui_version}}</span>
-    <span class="info-item info-resource-version">{{resource_version}}</span>
-    <span class="info-item info-framework-version">{{framework_version}}</span>
-    <span class="info-item info-device">{{device}}</span>
-    <span class="info-item info-os">{{os}}</span>
+    <span class="info-item info-ui">{{information.ui}}</span>
+    <span class="info-item info-ui-version">{{information.ui_version}}</span>
+    <span class="info-item info-resource-version">{{information.resource_version}}</span>
+    <span class="info-item info-framework-version">{{information.framework_version}}</span>
+    <span class="info-item info-device">{{information.device}}</span>
+    <span class="info-item info-os">{{information.os}}</span>
+    <span class="info-item info-screen">{{information.screen}}</span>
   </div>
   <div class="info-line">
-    <span class="info-item info-file">{{file}}</span>
-    <span class="info-item info-size">{{size}}</span>
-    <span class="info-item info-logs">日志 {{log_count}} 个</span>
-    <span class="info-item info-images">错误截图 {{image_count}} 张</span>
+    <span class="info-item info-file">{{information.file}}</span>
+    <span class="info-item info-size">{{information.size}}</span>
+    <span class="info-item info-files">{{information.file_count}}</span>
+    <span class="info-item info-uncompressed">{{information.uncompressed_size}}</span>
+    <span class="info-item info-log-total">{{information.log_total}}</span>
+    <span class="info-item info-error-total">{{information.error_image_total}}</span>
+    <span class="info-item info-repo">{{information.repo_ref}}</span>
   </div>
-  <div class="info-note">{{part_note}}</div>
+  <div class="info-note">{{information.part_note}}</div>
 </div>
 ```
 
+- `information.project` 是**日志识别值**；`information.project_configured` 是
+  **用户配置值**；页面标题/页眉应使用 `information.project_display`。
 - 没有 `{{environment}}`：运行环境各字段单独给，行由模板自己拼。默认模板用
   `.info-item:empty { display: none }` + 各字段的 `::before` 标签，让空字段
-  （例如非 MaaFwApp 的 `{{module_version}}`）整项消失。
+  （例如非 MaaFwApp 的 `{{information.module_version}}`）整项消失。
 - 报告头不落在内容块里，模板里不要再写「概览」之类的标题。
-- 追问不带报告头（渲染时没有报告头取值），会话用量仍在页眉 / 页脚。
+- 追问不显示整块报告头，但页眉 / 页脚仍可读取 `information.*` 字段。
 
 #### 报告头位置（`{{information}}`）
 
-报告头只能通过主题的 `{{information}}` 插槽显示：在 `page.html` /
+整块报告头只能通过主题的 `{{information}}` 插槽显示：在 `page.html` /
 `header.html` / `footer.html` 里写 `{{information}}`，它是**原始 HTML**，
-**只在第 1 页填充**，后续页为空：
+**只在第 1 页填充**，后续页为空。单个字段则直接在
+`page/header/footer` 里写 `{{information.*}}`，每页都有值：
 
 ```html
 <!-- templates/dark/page.html -->
@@ -427,26 +481,33 @@ templates/
 
 替换是**单趟**的：插入的内容（包括正文 HTML）不会被再次解析。
 
-**`page.html` / `header.html` / `footer.html` 使用同一份取值**，下表除标注
-「仅 page.html」的项外，三者都可以用、写法完全一样：
+**`page.html` / `header.html` / `footer.html` 使用同一份数据字段**：
+`meta.*` 与 `information.*` 三者都可以用，写法完全一样。四个结构槽
+`{{header}}` / `{{information}}` / `{{content}}` / `{{footer}}` 保持裸名。
 
 | 占位符 | 含义 | 转义 | 可用于 |
 | --- | --- | --- | --- |
 | `{{content}}` | **AI 内容块**，按顺序拼接（每块自带 `<h2>` 标题） | 否 | 仅 `page.html` |
 | `{{header}}` / `{{footer}}` | 该页的页眉 / 页脚内容（来自 `header.html` / `footer.html`） | 否 | 仅 `page.html` |
-| `{{information}}` | **报告头**（`information.html` 渲染结果），主题自定义位置，仅第 1 页有值 | 否 | 三个文件 |
-| `{{page}}` / `{{pages}}` | 当前页 / 总页数 | 是 | 三个文件 |
-| `{{title}}` / `{{project}}` / `{{file}}` / `{{generated_at}}` | 报告元信息 | 是 | 三个文件 |
-| `{{tokens_input}}` | 本次会话输入 token（如 `12.3k`） | 是 | 三个文件 |
-| `{{tokens_output}}` | 本次会话输出 token | 是 | 三个文件 |
-| `{{tokens_total}}` | 本次会话合计 token | 是 | 三个文件 |
-| `{{cache_hit_rate}}` | 缓存命中率（如 `80.0%`），无缓存读写记录时为“暂无缓存数据” | 是 | 三个文件 |
-| `{{usage_summary}}` | 输入 / 输出 / 合计 token 和缓存命中率 | 是 | 三个文件 |
-| `{{usage_style}}` | 主分析为空，追问为 `display: none`，用于隐藏用量元素 | 是 | 三个文件 |
-| `{{usage_calls}}` | 本次会话的模型调用次数 | 是 | 三个文件 |
-| `{{provider}}` | 本次会话用到的端点（多个用「、」分隔） | 是 | 三个文件 |
-| `{{model}}` | 本次会话用到的模型（多个用「、」分隔） | 是 | 三个文件 |
-| `{{usage}}` | 一行摘要：输入 / 输出 / 合计 / 缓存命中率 + `provider/model ×次数` | 是 | 三个文件 |
+| `{{information}}` | **整块报告头 HTML**（`information.html` 渲染结果），仅第 1 页有值 | 否 | `page/header/footer` |
+| `{{information.*}}` | 单个报告头字段，每页都有值；字段表见上一节 | 是 | `page/header/footer/information` |
+| `{{meta.page}}` / `{{meta.pages}}` | 当前页 / 总页数 | 是 | 三个文件 |
+| `{{meta.title}}` | 报告标题 | 是 | 三个文件 |
+| `{{meta.project}}` | 用户配置的项目名（可能为空） | 是 | 三个文件 |
+| `{{meta.generated_at}}` | 报告生成时间 | 是 | 三个文件 |
+| `{{meta.tool_version}}` | OnebotMaaLogAnalyzer 版本 | 是 | 三个文件 |
+| `{{meta.template}}` | 实际加载的模板名 | 是 | 三个文件 |
+| `{{meta.tokens_input}}` | 本次会话输入 token（如 `12.3k`） | 是 | 三个文件 |
+| `{{meta.tokens_output}}` | 本次会话输出 token | 是 | 三个文件 |
+| `{{meta.tokens_total}}` | 本次会话合计 token | 是 | 三个文件 |
+| `{{meta.cache_hit_rate}}` | 缓存命中率（如 `80.0%`），无缓存读写记录时为“暂无缓存数据” | 是 | 三个文件 |
+| `{{meta.usage_summary}}` | 输入 / 输出 / 合计 token 和缓存命中率 | 是 | 三个文件 |
+| `{{meta.usage_style}}` | 主分析为空，追问为 `display: none`，用于隐藏用量元素 | 是 | 三个文件 |
+| `{{meta.usage_calls}}` | 本次会话的模型调用次数 | 是 | 三个文件 |
+| `{{meta.provider}}` | 本次会话用到的端点（多个用「、」分隔） | 是 | 三个文件 |
+| `{{meta.model}}` | 本次会话用到的模型（多个用「、」分隔） | 是 | 三个文件 |
+| `{{meta.usage}}` | 一行摘要：输入 / 输出 / 合计 / 缓存命中率 + `provider/model ×次数` | 是 | 三个文件 |
+| `{{attach.*}}` | 附件字段，见附件外壳一节 | 是 | 仅两个附件外壳 |
 
 每个占位符在每页可以出现任意多次。
 
@@ -461,16 +522,18 @@ templates/
 1. 多个 `{{content}}` → 只填充第一处，其余留空并记 warning。
 2. `{{content}}` 写在 `header.html` / `footer.html` / 附件与报告头外壳中无效：
    会被忽略并记 warning（正文只能出现在 `page.html`）。
-3. 未识别的占位符**原样保留**并记 debug 日志（不报错，便于逐步调试）。
+3. 未识别或超出作用域的占位符**原样保留**并记 debug 日志。
 4. 模板按 `mtime` 缓存，避免每份报告重复读盘。
 5. 模板内的 `<script>` / `<iframe>` 与外部 URL 引用会被剥离。
 6. 模板只描述「单页长什么样」；分页发生在正文内部，**模板里不要写分页逻辑**。
 7. 模板作者可以使用任意 CSS（渲染环境是真实浏览器）。
 8. 内置 `default` 只用块级流式布局，不依赖 flex / grid / JS 框架。
-9. 附件占位符（`{{name}}` / `{{path}}` / `{{source}}` / `{{size}}` 等）只在两个
-   附件外壳里生效；`{{src}}` 只在内联图片的 `attach-img.html` 里有值。
+9. `attach.*` 只在两个附件外壳里生效；`attach.src` 只在内联图片的
+   `attach-img.html` 里有值。
 10. `{{information}}` 可写在 `page.html` / `header.html` / `footer.html`，**仅第 1 页**填充；
-    没有它的模板不会显示报告头（内置主题都已提供）。
+    没有它的模板不会显示整块报告头（内置主题都已提供）。
+11. 只使用 `{{information.*}}` 字段、没有裸 `{{information}}` 的模板视为
+    「自行排版报告头」，不会注入整块报告头。
 
 ### 可用的结构类名
 
@@ -486,9 +549,9 @@ templates/
 | `.block-title` | 内容块标题（`<h2>`） |
 | `.block-lead` | 「概览」块的额外类（模板可单独定制） |
 | `.report-info` / `.info-title` / `.info-line` / `.info-item` / `.info-note` | 报告头（`information.html`） |
-| `.attach-image` / `.attach-image img` / `figcaption` | 内联图片（`{{class}}` 的默认值之一） |
+| `.attach-image` / `.attach-image img` / `figcaption` | 内联图片（`{{attach.class}}` 的默认值之一） |
 | `.attach-file` / `.attach-name` / `.attach-path` / `.attach-meta` / `.attach-size` / `.attach-status` | 文件卡片与图片信息行 |
-| `.attach-missing` / `.attach-image-skipped` | 未找到 / 未内联的附加类（由 `{{class}}` 带出） |
+| `.attach-missing` / `.attach-image-skipped` | 未找到 / 未内联的附加类（由 `{{attach.class}}` 带出） |
 | `.page-footer` | 页脚容器（默认模板的 `footer.html` 放这里） |
 | `.footer-line` / `.footer-note` / `.pager` | 页脚第一行：左署名、右页码 |
 | `.footer-usage` | 页脚第二行：会话 token 与模型用量（为空时整行隐藏） |
@@ -530,18 +593,18 @@ CSS 变量 `--maa-content-max-height` 由渲染器按 `max_height_px` 计算后�
 
 ```html
 <!-- templates/dark/attach-img.html -->
-<figure class="{{class}}">
-  <img src="{{src}}" alt="{{name}}">
-  <figcaption>{{name}} · {{path}} · {{source}}</figcaption>
+<figure class="{{attach.class}}">
+  <img src="{{attach.src}}" alt="{{attach.name}}">
+  <figcaption>{{attach.name}} · {{attach.path}} · {{attach.source}}</figcaption>
 </figure>
 ```
 
 ```html
 <!-- templates/dark/attach-file.html -->
-<div class="{{class}}">
-  <span class="attach-name">{{name}}</span>
-  <span class="attach-path">{{path}}</span>
-  <span class="attach-meta">{{source}} · {{size}}{{status}}</span>
+<div class="{{attach.class}}">
+  <span class="attach-name">{{attach.name}}</span>
+  <span class="attach-path">{{attach.path}}</span>
+  <span class="attach-meta">{{attach.source}} · {{attach.size}}{{attach.status}}</span>
 </div>
 ```
 
@@ -569,10 +632,11 @@ AI 输出与模板都属于不可信输入：
 | 日志出现「调试端口未就绪 … exit=1」 | 浏览器启动即退出。看 `data/_browser_stderr.log`：root 用户需 `--no-sandbox`（本程序已自动追加）；其余多为缺依赖库（`apt install -y libnss3 libatk-bridge2.0-0 libgbm1 libasound2`） |
 | 日志出现「模板 X 缺少 page.html / attach-img.html / attach-file.html」 | 模板目录缺必需文件，已回退 `default` |
 | 图片里出现 `{{content}}` 字样 | `page.html` 用了不支持的写法（例如全角括号），改用 `{{content}}` 或 `<内容>` |
-| 报告头完全没有出现 | 模板里没有 `{{information}}` 插槽（日志会有「没有 {{information}} 插槽」warning），补一个即可；有插槽但字段为空时检查 `information.html` 的占位符 |
+| 报告头完全没有出现 | 模板里没有 `{{information}}` 插槽（日志会有「没有 {{information}} 插槽」warning），补一个即可；只用了 `{{information.*}}` 字段的模板不会注入整块报告头 |
 | 第 2 页起报告头消失 | 正常行为：`{{information}}` 只在第 1 页有值，容器用 `:empty` / `:has()` 隐藏 |
 | 中文显示为方块 | 系统缺 CJK 字体；在 `report.font_family` 指定已安装字体 |
 | 报告被截断 | 页数超过 `max_pages`，调大该值或让 AI 用 `<!-- page-break -->` 主动分页 |
 | 页面空白 / 高度 0 | 渲染超时或模板 CSS 把 `.page` 撑成 0 宽高；检查模板 |
 | 图片被裁切 | 模板覆盖了 `--maa-content-max-height` 或未使用 `object-fit: contain` |
-| 每页都显示同一个页码 | 模板里硬编码了页码，改用 `{{page}}` / `{{pages}}` |
+| 每页都显示同一个页码 | 模板里硬编码了页码，改用 `{{meta.page}}` / `{{meta.pages}}` |
+| 图片里出现 `{{attach.*}}` 字样 | `attach.*` 只能写在 `attach-img.html` / `attach-file.html` |

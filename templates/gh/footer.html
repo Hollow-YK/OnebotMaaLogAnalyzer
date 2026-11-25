@@ -1,10 +1,10 @@
 <footer class="page-footer">
   <div class="footer-usage">
-    <span class="footer-usage-left">{{provider}} · {{model}}</span>
-    <span class="footer-usage-right" style="{{usage_style}}">{{usage_summary}}</span>
+    <span class="footer-usage-left">{{meta.provider}} · {{meta.model}}</span>
+    <span class="footer-usage-right" style="{{meta.usage_style}}">{{meta.usage_summary}}</span>
   </div>
   <div class="footer-line">
-    <span class="footer-note">Powered By <span class="gh-link">OnebotMaaLogAnalyzer</span> · <span class="gh-link">AGPL v3</span></span>
-    <span class="pager">{{page}} / {{pages}}</span>
+    <span class="footer-note">Powered By <span class="gh-link">OnebotMaaLogAnalyzer</span> v{{meta.tool_version}} · <span class="gh-link">AGPL v3</span></span>
+    <span class="pager">{{meta.page}} / {{meta.pages}}</span>
   </div>
 </footer>

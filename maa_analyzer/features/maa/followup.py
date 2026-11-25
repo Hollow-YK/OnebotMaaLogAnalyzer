@@ -457,7 +457,10 @@ class FollowupStore:
         try:
             from ...features.maa.archive_index import describe_zip
 
-            archive = describe_zip(str(zip_path))
+            archive = describe_zip(
+                str(zip_path),
+                original_file_name=str(getattr(record, "file_name", "") or ""),
+            )
         except Exception as exc:
             logger.warning(f"[追问] 重建日志索引失败：{exc}")
             return None

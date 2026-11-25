@@ -91,19 +91,24 @@ MFAAvalonia 在 `debug/on_error/`，MaaFwApp 可能没有错误截图。路径�
 
 | 模板文件 | 渲染什么 |
 | --- | --- |
-| `attach-img.html` | 内联图片；用 `{{src}}` 取 data URI |
+| `attach-img.html` | 内联图片；用 `{{attach.src}}` 取 data URI |
 | `attach-file.html` | 其他文件 / 未找到的附件 / `embed_attachments=false` 的图片 |
 
 插件为每条附件提供这些取值，模板决定怎么排布与显示：
 
 | 占位符 | 内容 |
 | --- | --- |
-| `{{name}}` | 文件名（`20261122.png`） |
-| `{{path}}` | 来源内相对路径（`debug/20261122.png`） |
-| `{{source}}` | 来源：`日志包` / `仓库` |
-| `{{size}}` | 大小（`1.2 MB`）；找不到附件时为空 |
-| `{{status}}` | 附加状态：`未找到附件` / `图片未内联`，正常为空 |
-| `{{kind}}` / `{{class}}` | 类型与推荐容器类名，便于按状态换配色 |
+| `{{attach.name}}` | 文件名（`20261122.png`） |
+| `{{attach.path}}` | 来源内相对路径（`debug/20261122.png`） |
+| `{{attach.source}}` | 来源：`日志包` / `仓库` |
+| `{{attach.size}}` | 大小（`1.2 MB`）；找不到附件时为空 |
+| `{{attach.status}}` | 附加状态：`未找到附件` / `图片未内联`，正常为空 |
+| `{{attach.kind}}` / `{{attach.class}}` | 类型与推荐容器类名，便于按状态换配色 |
+| `{{attach.src}}` | 图片 data URI，只在 `attach-img.html` 有值 |
+
+> `attach.*` **只允许**出现在 `attach-img.html` / `attach-file.html`；
+> 写在 `page.html` / `header.html` / `footer.html` / `information.html` 里
+> 不会替换，会原样保留并记 debug 日志。
 
 - 图片指令行**不会展示给用户**，渲染前已被替换成模板外壳
 - 同一路径在一次报告里只渲染一次；已渲染的图片不会再单独发一条图片消息

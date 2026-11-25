@@ -94,6 +94,15 @@
 .info-os:not(:empty)::before { content: "系统 "; }
 .info-file:not(:empty)::before { content: "文件 "; }
 .info-size:not(:empty)::before { content: "大小 "; }
+.info-screen:not(:empty)::before { content: "屏幕 "; }
+.info-files:not(:empty)::before { content: "包内 "; }
+.info-files:not(:empty)::after { content: " 个文件"; }
+.info-uncompressed:not(:empty)::before { content: "解压后 "; }
+.info-log-total:not(:empty)::before { content: "日志 "; }
+.info-log-total:not(:empty)::after { content: " 个"; }
+.info-error-total:not(:empty)::before { content: "错误截图 "; }
+.info-error-total:not(:empty)::after { content: " 张"; }
+.info-repo:not(:empty)::before { content: "代码对照 "; }
 
 .info-note {
   margin: 2px 0 0;

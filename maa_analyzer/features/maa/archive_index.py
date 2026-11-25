@@ -69,6 +69,8 @@ class ArchiveInfo:
     """日志包的静态索引（不含任何日志正文）。"""
 
     file_count: int = 0
+    # 真实上传文件名（不是合并/下载用的临时名）
+    original_file_name: str = ""
     total_uncompressed_size: int = 0
     # 压缩包内全部成员（相对路径，已过滤不安全条目）
     all_members: list[str] = field(default_factory=list)
@@ -80,6 +82,11 @@ class ArchiveInfo:
     error_images: list[str] = field(default_factory=list)
     # `custom/` 下的自定义识别截图
     custom_images: list[str] = field(default_factory=list)
+    # 精确总数（列表本身有展示上限，这里不受上限影响）
+    log_total: int = 0
+    error_image_total: int = 0
+    custom_image_total: int = 0
+    config_total: int = 0
     notes: list[str] = field(default_factory=list)
     # 报告与提示词使用的项目名（project.name > 压缩包解析 > MaaXXX）
     project_name: str = ""
@@ -209,11 +216,16 @@ def build_archive_info(
     压缩包不可读时返回空索引（`file_count=0`）并在 notes 中说明。
     """
     notes: list[str] = [str(note) for note in (extra_notes or []) if note]
+    display_name = str(original_file_name or "").strip() or PurePosixPath(zip_path).name
     try:
         archive = zipfile.ZipFile(zip_path)
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         notes.append(f"压缩包无法读取（{type(exc).__name__}），无法列出包内文件。")
-        return ArchiveInfo(notes=notes, zip_path=str(zip_path))
+        return ArchiveInfo(
+            notes=notes,
+            original_file_name=display_name,
+            zip_path=str(zip_path),
+        )
 
     with archive:
         infos = [info for info in archive.infolist() if not info.is_dir()]
@@ -232,8 +244,12 @@ def build_archive_info(
     notes.extend(profile.notes)
 
     members = [info.filename.replace("\\", "/") for info in safe_infos]
+    all_error_images = _select_error_images(members, limit=None)
+    all_custom_images = _select_custom_images(members, limit=None)
+    all_config_infos = _select_config_infos(safe_infos, limit=None)
     info = ArchiveInfo(
         file_count=len(infos),
+        original_file_name=display_name,
         total_uncompressed_size=total,
         all_members=members,
         all_images=_list_images(members),
@@ -242,10 +258,16 @@ def build_archive_info(
             for m in _select_primary_logs(safe_infos, profile, notes)
         ],
         config_files=[
-            m.filename.replace("\\", "/") for m in _select_config_infos(safe_infos)
+            m.filename.replace("\\", "/") for m in all_config_infos[:CONFIG_LIST_LIMIT]
         ],
-        error_images=_select_error_images(members),
-        custom_images=_select_custom_images(members),
+        error_images=all_error_images[:IMAGE_LIST_LIMIT],
+        custom_images=all_custom_images[:IMAGE_LIST_LIMIT],
+        log_total=sum(
+            1 for name in members if name.lower().endswith(LOG_SUFFIXES)
+        ),
+        error_image_total=len(all_error_images),
+        custom_image_total=len(all_custom_images),
+        config_total=len(all_config_infos),
         notes=notes,
         project_name=_resolve_project_name(project_name, profile),
         is_log_archive=_looks_like_log_archive(profile, safe_infos, members),
@@ -263,7 +285,7 @@ def build_archive_info(
     return info
 
 
-def describe_zip(zip_path: str) -> Optional[ArchiveInfo]:
+def describe_zip(zip_path: str, *, original_file_name: str = "") -> Optional[ArchiveInfo]:
     """
     只索引压缩包内容（不生成说明文本）。
 
@@ -284,9 +306,15 @@ def describe_zip(zip_path: str) -> Optional[ArchiveInfo]:
         return None
 
     members = [info.filename.replace("\\", "/") for info in safe_infos]
+    all_error_images = _select_error_images(members, limit=None)
+    all_custom_images = _select_custom_images(members, limit=None)
+    all_config_infos = _select_config_infos(safe_infos, limit=None)
     notes: list[str] = []
     return ArchiveInfo(
         file_count=len(infos),
+        original_file_name=(
+            str(original_file_name or "").strip() or PurePosixPath(zip_path).name
+        ),
         total_uncompressed_size=sum(max(0, int(info.file_size)) for info in infos),
         all_members=members,
         all_images=_list_images(members),
@@ -295,10 +323,16 @@ def describe_zip(zip_path: str) -> Optional[ArchiveInfo]:
             for m in _select_primary_logs(safe_infos, profile, notes)
         ],
         config_files=[
-            m.filename.replace("\\", "/") for m in _select_config_infos(safe_infos)
+            m.filename.replace("\\", "/") for m in all_config_infos[:CONFIG_LIST_LIMIT]
         ],
-        error_images=_select_error_images(members),
-        custom_images=_select_custom_images(members),
+        error_images=all_error_images[:IMAGE_LIST_LIMIT],
+        custom_images=all_custom_images[:IMAGE_LIST_LIMIT],
+        log_total=sum(
+            1 for name in members if name.lower().endswith(LOG_SUFFIXES)
+        ),
+        error_image_total=len(all_error_images),
+        custom_image_total=len(all_custom_images),
+        config_total=len(all_config_infos),
         notes=notes + profile.notes,
         project_name=profile.project_name,
         is_log_archive=_looks_like_log_archive(profile, safe_infos, members),
@@ -385,21 +419,27 @@ def _is_custom_image(name: str) -> bool:
     return "custom" in parts[:-1]
 
 
-def _select_error_images(members: list[str]) -> list[str]:
+def _select_error_images(members: list[str],
+                         limit: int | None = IMAGE_LIST_LIMIT) -> list[str]:
     images = [name for name in members if _is_image(name) and _is_on_error_image(name)]
-    return sorted(images, reverse=True)[:IMAGE_LIST_LIMIT]
+    images.sort(reverse=True)
+    return images if limit is None else images[:limit]
 
 
-def _select_custom_images(members: list[str]) -> list[str]:
+def _select_custom_images(members: list[str],
+                          limit: int | None = IMAGE_LIST_LIMIT) -> list[str]:
     """debug/custom 等目录下的自定义截图（非 on_error），最新优先。"""
     images = [
         name for name in members
         if _is_image(name) and _is_custom_image(name) and not _is_on_error_image(name)
     ]
-    return sorted(images, reverse=True)[:IMAGE_LIST_LIMIT]
+    images.sort(reverse=True)
+    return images if limit is None else images[:limit]
 
 
-def _select_config_infos(infos: list[zipfile.ZipInfo]) -> list[zipfile.ZipInfo]:
+def _select_config_infos(infos: list[zipfile.ZipInfo],
+                         limit: int | None = CONFIG_LIST_LIMIT
+                         ) -> list[zipfile.ZipInfo]:
     wanted = []
     for info in infos:
         name = info.filename.replace("\\", "/").lower()
@@ -407,7 +447,8 @@ def _select_config_infos(infos: list[zipfile.ZipInfo]) -> list[zipfile.ZipInfo]:
             wanted.append(info)
         elif name.startswith("config/") and name.endswith((".json", ".jsonc")):
             wanted.append(info)
-    return sorted(wanted, key=lambda item: item.filename.lower())[:CONFIG_LIST_LIMIT]
+    wanted.sort(key=lambda item: item.filename.lower())
+    return wanted if limit is None else wanted[:limit]
 
 
 def _select_primary_logs(

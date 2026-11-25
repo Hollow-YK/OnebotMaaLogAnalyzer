@@ -465,6 +465,7 @@ class BrowserRenderer:
         *,
         attachment_html,
         information_html: str = "",
+        information_values: Optional[dict] = None,
     ) -> list[bytes]:
         """把报告渲染为若干 PNG/JPEG 字节（串行）。"""
         from ....features.maa.render.markdown import parse_report
@@ -480,8 +481,10 @@ class BrowserRenderer:
         max_height = max(320, int(report.max_height_px or 4096))
 
         try:
-            return self._render_once(parsed, report, template, meta, width,
-                                     max_height, timeout, information_html)
+            return self._render_once(
+                parsed, report, template, meta, width, max_height, timeout,
+                information_html, information_values or {},
+            )
         except Exception as exc:
             # 进程 / 连接异常或超时：重启一次后重试
             logger.warning(f"[渲染] 首次渲染失败，尝试重启浏览器：{exc}")
@@ -490,12 +493,15 @@ class BrowserRenderer:
                 self.start()
             except Exception as restart_exc:
                 raise BrowserUnavailable(str(restart_exc)) from restart_exc
-            return self._render_once(parsed, report, template, meta, width,
-                                     max_height, timeout, information_html)
+            return self._render_once(
+                parsed, report, template, meta, width, max_height, timeout,
+                information_html, information_values or {},
+            )
 
     def _render_once(self, parsed, report: ReportConfig, template: TemplateSet,
                      meta: dict, width: int, max_height: int,
-                     timeout: float, information_html: str = "") -> list[bytes]:
+                     timeout: float, information_html: str = "",
+                     information_values: Optional[dict] = None) -> list[bytes]:
         self.start()
         assert self._cdp is not None
         deadline = time.monotonic() + timeout
@@ -515,8 +521,11 @@ class BrowserRenderer:
 
         # ① 空正文测模板自身占用（报告头只占首屏：首屏与后续页分别量）
         empty_doc = template.document(
-            template.render_page(content="", meta=meta, page=1, pages=1,
-                                 information=information_html),
+            template.render_page(
+                content="", meta=meta, page=1, pages=1,
+                information=information_html,
+                information_values=information_values,
+            ),
             width=width, max_height=max_height, font_family=report.font_family,
         )
         self._set_html(empty_doc, deadline)
@@ -532,8 +541,11 @@ class BrowserRenderer:
         if template.information_slot:
             # 第 2 页起没有报告头，单独量一次（卡片/信息块消失后的骨架）
             rest_doc = template.document(
-                template.render_page(content="", meta=meta, page=2, pages=2,
-                                     information=information_html),
+                template.render_page(
+                    content="", meta=meta, page=2, pages=2,
+                    information=information_html,
+                    information_values=information_values,
+                ),
                 width=width, max_height=max_height,
                 font_family=report.font_family,
             )
@@ -543,7 +555,11 @@ class BrowserRenderer:
         # ② 全部内容块测高度
         all_content = "".join(block.html for block in parsed.blocks)
         measure_doc = template.document(
-            template.render_page(content=all_content, meta=meta, page=1, pages=1),
+            template.render_page(
+                content=all_content, meta=meta, page=1, pages=1,
+                information=information_html,
+                information_values=information_values,
+            ),
             width=width, max_height=max_height, font_family=report.font_family,
         )
         self._set_html(measure_doc, deadline)
@@ -577,6 +593,7 @@ class BrowserRenderer:
                 template.render_page(
                     content=content, meta=meta, page=page_index, pages=total,
                     information=information_html,
+                    information_values=information_values,
                 ),
                 width=width, max_height=max_height,
                 font_family=report.font_family,

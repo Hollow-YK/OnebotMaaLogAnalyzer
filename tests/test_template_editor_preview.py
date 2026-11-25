@@ -52,21 +52,25 @@ class EditorPreviewTests(unittest.TestCase):
     def test_preview_page_renders_information_slot(self):
         template = load_template(ROOT / "templates", "default")
         meta = editor.default_meta()
-        info_html = template.render_information(editor.preview_information(meta))
+        info = editor.preview_information(meta)
+        info_html = template.render_information(info)
         page = template.render_page(
-            content="正文", meta=meta, page=1, pages=1, information=info_html,
+            content="正文", meta=meta, page=1, pages=1,
+            information=info_html, information_values=info,
         )
         self.assertIn("report-info", page)
         self.assertIn("MFAAvalonia", page)
         later = template.render_page(
-            content="正文", meta=meta, page=2, pages=2, information=info_html,
+            content="正文", meta=meta, page=2, pages=2,
+            information=info_html, information_values=info,
         )
         self.assertNotIn("report-info", later)
 
     def test_preview_information_uses_meta_project_and_file(self):
         meta = editor.default_meta()
         values = editor.preview_information(meta)
-        self.assertEqual(values["project"], meta["project"])
+        self.assertEqual(values["project_configured"], meta["project"])
+        self.assertEqual(values["project_display"], meta["project"])
         self.assertEqual(values["file"], meta["file"])
         self.assertEqual(values["ui"], "MFAAvalonia")
         template = load_template(ROOT / "templates", "default")

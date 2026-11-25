@@ -15,7 +15,17 @@ HTML 模板加载与填充。
 
 模板只描述「单页长什么样」；分页发生在正文内部，模板里不要写分页逻辑。
 附件的 HTML 外壳也由模板提供（`attach-img.html` / `attach-file.html`），
-Python 只负责提供 `{{name}}` / `{{path}}` / `{{source}}` / `{{size}}` 等取值。
+Python 只负责提供 `{{attach.*}}` 取值。
+
+占位符命名空间：
+
+    {{header}} / {{information}} / {{content}} / {{footer}}   结构槽，保持裸名
+    {{meta.*}}          报告页元信息、用量、页码、工具版本
+    {{information.*}}   日志包 / 运行环境 / 报告事实
+    {{attach.*}}        附件，仅两个附件外壳可用
+
+`{{information}}` 是整块报告头 HTML（仅第 1 页），`{{information.file}}`
+是单个字段文本；两者靠「有没有点号」区分。
 """
 from __future__ import annotations
 
@@ -32,9 +42,11 @@ _TEMPLATE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _CONTENT = "{{content}}"
 _HEADER = "{{header}}"
 _FOOTER = "{{footer}}"
-# 占位符的唯一来源：`page.html` / `header.html` / `footer.html` 完全共用这一套。
-# 只有 `{{content}}` 例外 —— 它代表正文，只能出现在 page.html。
-_PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_]+)\s*\}\}")
+_INFORMATION = "{{information}}"
+# 占位符：裸名是结构槽，`namespace.field` 是数据字段。
+_PLACEHOLDER = re.compile(
+    r"\{\{\s*([A-Za-z_]+(?:\.[A-Za-z_]+)?)\s*\}\}"
+)
 _SCRIPT = re.compile(
     r"<script\b[^>]*>.*?</script\s*>|<iframe\b[^>]*>.*?</iframe\s*>",
     re.IGNORECASE | re.DOTALL,
@@ -45,45 +57,60 @@ _EXTERNAL = re.compile(
 )
 _IMPORT = re.compile(r"@import\b[^;]*;", re.IGNORECASE)
 
-# 页眉 / 页脚 / 页面骨架都可用（次序即文档展示顺序）
-# 占位符分组（仅作文档参考；实际取值见 _DEFAULTS）：
-#   元信息 title / project / file / generated_at
-#   页码   page / pages（由参数注入）
-#   用量   tokens_input / tokens_output / tokens_total / usage_calls / provider / model / usage
-_DEFAULTS: dict[str, str] = {
-    "title": "", "project": "", "file": "", "generated_at": "",
+# 页眉 / 页脚 / page.html 共用（次序即文档展示顺序）。
+# 只放「报告页自身」的元信息；项目/文件名等日志事实在 information.*。
+_META_DEFAULTS: dict[str, str] = {
+    "title": "", "project": "", "generated_at": "",
     "tokens_input": "0", "tokens_output": "0", "tokens_total": "0",
     "usage_calls": "0", "provider": "-", "model": "-", "usage": "",
     "usage_style": "", "cache_hit_rate": "暂无缓存数据", "usage_summary": "",
+    "tool_version": "", "template": "",
 }
 
-# 未识别占位符原样保留，便于逐步调试。
-# 从 _DEFAULTS 派生，新增占位符时不会出现「三处取值不一致」。
-# `information` 是报告头插槽（原始 HTML），与 `content` / `header` / `footer`
-# 一样由渲染器注入；主题在 page.html / header.html / footer.html 里自己选位置。
-_KNOWN = {"content", "header", "footer", "information", "page", "pages"} | set(_DEFAULTS)
+# 报告头外壳（information.html）的字段。它们也能在 page/header/footer
+# 里通过 {{information.<field>}} 使用。
+_INFORMATION_KNOWN = {
+    # 项目名的三个来源 / 合并结果
+    "project", "project_configured", "project_display", "project_source",
+    "ui", "ui_version", "module_version", "resource_version",
+    "framework_version", "device", "os", "screen",
+    "file", "size", "log_count", "image_count",
+    "file_count", "uncompressed_size", "log_total", "error_image_total",
+    "custom_image_total", "config_total", "repo_ref", "part_note",
+}
 
-# 附件外壳（attach-img.html / attach-file.html）的占位符。
-# 由插件按每条附件注入，模板决定怎么排布与显示。
-#   name   文件名（debug/20261122.png → 20261122.png）
-#   path   来源内相对路径（debug/20261122.png）
-#   source 来源（日志包 / 仓库）
-#   size   大小（1.2 MB）；找不到附件时为空
-#   status 附加状态（未找到附件 / 图片未内联），正常为空
-#   kind   image / file / missing / skipped
-#   class  推荐容器类名（attach-image / attach-file / attach-file attach-missing …）
-#   src    图片 data URI（仅 attach-img.html 有意义）
+# 附件外壳（attach-img.html / attach-file.html）的字段。
 _ATTACH_KNOWN = {
     "name", "path", "source", "size", "status", "kind", "class", "src",
 }
 
-# 报告头外壳（information.html）的占位符：运行环境逐项给，行由模板自己拼。
-# 运行环境为空（例如未知 UI）时对应占位符为空串，模板可用 :empty 隐藏。
-_INFORMATION_KNOWN = {
-    "project",
-    "ui", "ui_version", "module_version", "resource_version",
-    "framework_version", "device", "os",
-    "file", "size", "log_count", "image_count", "part_note",
+# 每个模板文件允许的命名空间与结构槽。
+# 结构槽保持裸名；数据字段必须带命名空间。
+_SCOPES: dict[str, dict[str, set[str]]] = {
+    "page": {
+        "slots": {"content", "header", "information", "footer"},
+        "namespaces": {"meta", "information"},
+    },
+    "header": {
+        "slots": {"information"},
+        "namespaces": {"meta", "information"},
+    },
+    "footer": {
+        "slots": {"information"},
+        "namespaces": {"meta", "information"},
+    },
+    "information": {
+        "slots": set(),
+        "namespaces": {"information"},
+    },
+    "attach_img": {
+        "slots": set(),
+        "namespaces": {"attach"},
+    },
+    "attach_file": {
+        "slots": set(),
+        "namespaces": {"attach"},
+    },
 }
 
 PAGE_FILE = "page.html"
@@ -107,22 +134,67 @@ def _fill_values(text: str, values: dict[str, str],
     return _PLACEHOLDER.sub(substitute, text)
 
 
-def build_placeholder_values(meta: Optional[dict], page: int, pages: int
-                             ) -> dict[str, str]:
-    """
-    构造一套占位符取值。
+def _escape(value: object) -> str:
+    return html.escape(str(value if value is not None else ""))
 
-    `page.html` / `header.html` / `footer.html` 用**同一个** dict 填充，
-    因此三者可用的占位符完全一致（除 `{{content}}` 只能用于 page.html）。
-    """
+
+def build_meta_values(meta: Optional[dict], page: int, pages: int
+                      ) -> dict[str, str]:
+    """构造 `meta.*` 页面元信息（已转义）。"""
     meta = meta or {}
     values: dict[str, str] = {}
-    for key, default in _DEFAULTS.items():
+    for key, default in _META_DEFAULTS.items():
         raw = meta.get(key)
-        values[key] = html.escape(str(default if raw is None else raw))
-    values["page"] = html.escape(str(page))
-    values["pages"] = html.escape(str(pages))
+        values[f"meta.{key}"] = _escape(default if raw is None else raw)
+    values["meta.page"] = _escape(page)
+    values["meta.pages"] = _escape(pages)
     return values
+
+
+def build_information_values(values: Optional[dict], *, escape: bool = True
+                             ) -> dict[str, str]:
+    """构造 `information.*` 字段值。
+
+    `escape=False` 给 `information.html` 用（随后交给 `_fill_values` 转义）；
+    `escape=True` 给 page/header/footer 用（值直接进入 `_fill_static`）。
+    """
+    values = values or {}
+    result: dict[str, str] = {}
+    for field_name in _INFORMATION_KNOWN:
+        raw = values.get(field_name)
+        text = "" if raw is None else str(raw)
+        result[f"information.{field_name}"] = _escape(text) if escape else text
+    return result
+
+
+def _known_for_scope(kind: str, key: str) -> bool:
+    """占位符是否属于该模板文件允许的结构槽 / 命名空间。"""
+    scope = _SCOPES.get(kind)
+    if scope is None:
+        return False
+    if key in scope["slots"]:
+        return True
+    if "." not in key:
+        return False
+    namespace, field_name = key.split(".", 1)
+    if namespace not in scope["namespaces"]:
+        return False
+    if namespace == "meta":
+        return field_name in _META_DEFAULTS or field_name in {"page", "pages"}
+    if namespace == "information":
+        return field_name in _INFORMATION_KNOWN
+    if namespace == "attach":
+        if field_name == "src":
+            return kind == "attach_img"
+        return field_name in _ATTACH_KNOWN
+    return False
+
+
+def _uses_information_fields(text: str) -> bool:
+    return any(
+        token.startswith("information.")
+        for token in _PLACEHOLDER.findall(text or "")
+    )
 
 
 _CACHE: dict[Path, tuple[float, str]] = {}
@@ -142,7 +214,7 @@ class TemplateSet:
     attach_file: str = ""
     # 报告头（概览）外壳：缺失时由渲染器使用内置默认外壳
     information: str = ""
-    # 主题是否用 {{information}} 自己指定了报告头位置（此时不再插入概览块）
+    # 主题是否用裸 {{information}} 自己指定了报告头位置
     information_slot: bool = False
     warnings: list[str] = field(default_factory=list)
 
@@ -150,41 +222,45 @@ class TemplateSet:
         """
         用一条附件的取值填充外壳（单趟替换）。
 
-        `{{src}}` 是图片 data URI，原样插入；其余占位符按文本转义，
-        路径里出现 `<` / `&` 也不会破坏结构。
+        `{{attach.src}}` 是图片 data URI，原样插入；其余占位符按文本转义。
+        `attach.src` 只对 `attach-img.html` 提供。
         """
         text = self.attach_img if image else self.attach_file
-        return _fill_values(text, values, ("src",))
+        prefixed: dict[str, str] = {}
+        for key in _ATTACH_KNOWN:
+            if key == "src" and not image:
+                continue
+            prefixed[f"attach.{key}"] = str(values.get(key) or "")
+        return _fill_values(text, prefixed, ("attach.src",))
 
     def render_information(self, values: dict[str, str]) -> str:
-        """填充报告头外壳（所有占位符都按文本转义）。"""
-        return _fill_values(self.information, values)
+        """填充报告头外壳（所有字段都按文本转义）。"""
+        return _fill_values(
+            self.information, build_information_values(values, escape=False)
+        )
 
     def render_page(self, *, content: str, meta: dict, page: int,
-                    pages: int, information: str = "") -> str:
+                    pages: int, information: str = "",
+                    information_values: Optional[dict] = None) -> str:
         """
         填充单页 HTML（单趟替换，插入内容不会被二次解析）。
 
-        `page.html` / `header.html` / `footer.html` 使用**同一份取值**，
-        因此三者可用的占位符完全一致：报告元信息、页码、会话用量都能
-        写在任意一个文件里。
-
-        `information` 是报告头 HTML（原始 HTML，不转义），主题用
-        `{{information}}` 决定它出现在页面的哪个位置；**只在第 1 页填充**，
-        其余页为空（外层容器可用 `:empty` / `:has()` 隐藏）。
-        主题没有使用该插槽时，报告头仍按 `<!-- information -->` 标记
-        插入「概览」内容块（兼容旧模板）。
+        `page.html` / `header.html` / `footer.html` 共用 `meta.*` 与
+        `information.*`；结构槽 `{{header}}` / `{{footer}}` 只在 page.html
+        有值，`{{information}}` 是整块报告头 HTML（仅第 1 页）。
         """
-        values = build_placeholder_values(meta, page, pages)
-        # 报告头是插件生成的 HTML，原样插入（与 {{header}} / {{footer}} 一致），
-        # 但它描述的是「这份报告」，只在首屏出现一次。
-        values["information"] = information if page == 1 else ""
+        values = build_meta_values(meta, page, pages)
+        values.update(build_information_values(information_values))
+        # 报告头是插件生成的 HTML，原样插入；只在首屏出现一次。
+        values["information"] = (information or "") if page == 1 else ""
 
         header_html = self._fill_static(self.header, values)
         footer_html = self._fill_static(self.footer, values)
+        values["header"] = header_html
+        values["footer"] = footer_html
         page_html = self._fill_static(self.page, values)
 
-        # 只填充第一处 {{content}}，其余留空
+        # 只填充第一处 {{content}}，其余留空；正文最后插入，避免二次替换。
         first = page_html.find(_CONTENT)
         if first >= 0:
             page_html = (
@@ -192,8 +268,6 @@ class TemplateSet:
                 + page_html[first + len(_CONTENT):]
             )
             page_html = page_html.replace(_CONTENT, "")
-        page_html = page_html.replace(_HEADER, header_html)
-        page_html = page_html.replace(_FOOTER, footer_html)
         return page_html
 
     @staticmethod
@@ -222,7 +296,8 @@ class TemplateSet:
             "a{color:#5b6b7c;text-decoration:none;}"
             # 内联图片等比缩放并铺满正文宽度（两端对齐），
             # 高度超过可用正文高度时整体缩小，避免被分页裁切。
-            # 模板用 {{class}} 的默认类名即可直接生效；自定义类名由模板自己控制。
+            # 模板用 {{attach.class}} 的默认类名即可直接生效；
+            # 自定义类名由模板自己控制。
             ".attach-image{width:100%;box-sizing:border-box;}"
             ".attach-image img{display:block;width:100%;max-width:100%;"
             "height:auto;max-height:var(--maa-content-max-height);"
@@ -303,7 +378,7 @@ def _load_single(root: Path, name: str, warnings: list[str]) -> Optional[Templat
     information = (
         _clean_template(_read_cached(info_path)) if info_path.is_file() else ""
     )
-    # {{content}} 是正文插槽，只能出现在 page.html
+    # 结构槽 {{content}} 只能出现在 page.html
     for label, text in (
         ("header.html", header),
         ("footer.html", footer),
@@ -323,31 +398,40 @@ def _load_single(root: Path, name: str, warnings: list[str]) -> Optional[Templat
     attach_img = attach_img.replace(_CONTENT, "")
     attach_file = attach_file.replace(_CONTENT, "")
     information = information.replace(_CONTENT, "")
-    if "src" not in _PLACEHOLDER.findall(attach_img):
+    if "attach.src" not in _PLACEHOLDER.findall(attach_img):
         logger.warning(
-            f"[渲染] 模板 {name} 的 {ATTACH_IMG_FILE} 没有 {{{{src}}}}，图片不会显示"
+            f"[渲染] 模板 {name} 的 {ATTACH_IMG_FILE} 没有 {{{{attach.src}}}}，"
+            "图片不会显示"
         )
-    # 主题自定义报告头区域：任一页框架文件里出现 {{information}} 即视为启用，
+    # 主题自定义报告头区域：任一页框架文件里出现裸 {{information}} 即视为启用，
     # 此时报告头改为由该插槽渲染，不再插入「概览」内容块（避免重复）。
     information_slot = any(
         "information" in _PLACEHOLDER.findall(text)
         for text in (page, header, footer)
     )
+    information_fields = any(
+        _uses_information_fields(text) for text in (page, header, footer)
+    )
     if information_slot:
         logger.debug(
             f"[渲染] 模板 {name} 使用 {{{{information}}}} 插槽渲染报告头"
+        )
+    elif information_fields:
+        logger.debug(
+            f"[渲染] 模板 {name} 使用 {{{{information.*}}}} 字段自行排版报告头，"
+            "不注入整块报告头"
         )
     else:
         logger.warning(
             f"[渲染] 模板 {name} 没有 {{{{information}}}} 插槽，报告头不会显示"
         )
-    _warn_unknown(page, name, "page.html")
-    _warn_unknown(header, name, "header.html")
-    _warn_unknown(footer, name, "footer.html")
-    _warn_unknown(attach_img, name, ATTACH_IMG_FILE, known=_ATTACH_KNOWN)
-    _warn_unknown(attach_file, name, ATTACH_FILE_FILE, known=_ATTACH_KNOWN)
+    _warn_unknown(page, name, "page.html", kind="page")
+    _warn_unknown(header, name, "header.html", kind="header")
+    _warn_unknown(footer, name, "footer.html", kind="footer")
+    _warn_unknown(attach_img, name, ATTACH_IMG_FILE, kind="attach_img")
+    _warn_unknown(attach_file, name, ATTACH_FILE_FILE, kind="attach_file")
     if information:
-        _warn_unknown(information, name, INFORMATION_FILE, known=_INFORMATION_KNOWN)
+        _warn_unknown(information, name, INFORMATION_FILE, kind="information")
     return TemplateSet(
         name=name,
         page=page,
@@ -362,17 +446,16 @@ def _load_single(root: Path, name: str, warnings: list[str]) -> Optional[Templat
     )
 
 
-def _warn_unknown(text: str, name: str, label: str = "",
-                  known: Optional[set[str]] = None) -> None:
-    """未识别的占位符原样保留，仅记 debug 日志（不报错）。"""
-    allowed = _KNOWN if known is None else known
+def _warn_unknown(text: str, name: str, label: str = "", kind: str = "page") -> None:
+    """未识别或超出作用域的占位符原样保留，仅记 debug 日志。"""
     unknown = {
-        key for key in _PLACEHOLDER.findall(text or "") if key not in allowed
+        key for key in _PLACEHOLDER.findall(text or "")
+        if not _known_for_scope(kind, key)
     }
     if unknown:
         where = f"{name}/{label}" if label else name
         logger.debug(
-            f"[渲染] 模板 {where} 含未识别占位符（原样保留）："
+            f"[渲染] 模板 {where} 含未识别或超出作用域的占位符（原样保留）："
             f"{', '.join(sorted(unknown))}"
         )
 
